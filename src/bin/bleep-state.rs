@@ -1,8 +1,8 @@
 // src/bin/bleep_state.rs
 
 use bleep_state::state_manager::StateManager;
+use log::{error, info};
 use std::error::Error;
-use log::{info, error};
 
 fn main() {
     env_logger::init();

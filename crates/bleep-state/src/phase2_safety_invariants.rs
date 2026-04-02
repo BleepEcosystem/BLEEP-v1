@@ -328,7 +328,7 @@
 //! ## SAFETY SUMMARY
 //!
 //! Phase 2 sharding is **deterministic**, **fork-safe**, and **Byzantine-tolerant**.
-//! 
+//!
 //! Key properties:
 //! - ✓ All nodes compute identical shard topology per epoch
 //! - ✓ Topology changes only at epoch boundaries

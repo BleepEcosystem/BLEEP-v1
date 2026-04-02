@@ -12,12 +12,8 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        ai_attestation::*,
-        ai_constraint_validator::*,
-        ai_consensus_integration::*,
-        ai_feedback_loop::*,
-        ai_proposal_types::*,
-        deterministic_inference::*,
+        ai_attestation::*, ai_consensus_integration::*, ai_constraint_validator::*,
+        ai_feedback_loop::*, ai_proposal_types::*, deterministic_inference::*,
     };
     use std::collections::BTreeMap;
 
@@ -329,7 +325,8 @@ mod tests {
             cooldown_epochs: 2,
         });
 
-        let commitment1 = AIOutputCommitment::new(proposal.clone(), 10, vec![1, 2, 3], None).unwrap();
+        let commitment1 =
+            AIOutputCommitment::new(proposal.clone(), 10, vec![1, 2, 3], None).unwrap();
         let record1 = AIAttestationRecord::new(commitment1.clone());
 
         assert!(manager.record_attestation(record1).is_ok());

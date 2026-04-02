@@ -1,5 +1,5 @@
 /// CANONICAL TOKENOMICS ENGINE
-/// 
+///
 /// This module enforces hard-coded, invariant-protected rules for token supply,
 /// emission, and burning. All economic parameters are backed by constitutional
 /// limits and proof-based verification.
@@ -7,10 +7,9 @@
 /// Design Principle: Economics are law-bound, not vote-bound. Governance can tune
 /// parameters within pre-defined bounds, but cannot override fundamental economic
 /// rules.
-
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use sha2::{Sha256, Digest};
 use thiserror::Error;
 
 /// Maximum possible supply: 200 million BLEEP (IMMUTABLE — cannot be changed by governance)
@@ -132,7 +131,8 @@ impl SupplyState {
             return Err(TokenomicsError::InvalidSupplyState(format!(
                 "total_minted {} exceeds hard cap MAX_SUPPLY {} — \
                  {} excess tokens were created and must not exist",
-                self.total_minted, MAX_SUPPLY,
+                self.total_minted,
+                MAX_SUPPLY,
                 self.total_minted - MAX_SUPPLY
             )));
         }
@@ -143,10 +143,7 @@ impl SupplyState {
             return Err(TokenomicsError::InvalidSupplyState(format!(
                 "circulating_supply {} != total_minted({}) - total_burned({}) = {} — \
                  supply state is internally inconsistent",
-                self.circulating_supply,
-                self.total_minted,
-                self.total_burned,
-                expected_circulation
+                self.circulating_supply, self.total_minted, self.total_burned, expected_circulation
             )));
         }
 
@@ -206,18 +203,14 @@ impl EmissionSchedule {
 
         EmissionSchedule {
             emission_rates: rates,
-            decay_factor_bps: 9900, // 99% per epoch (0.01% decay)
+            decay_factor_bps: 9900,     // 99% per epoch (0.01% decay)
             min_epoch_for_decay: 52560, // ~2 years at 5min epochs
         }
     }
 
     /// Validate schedule against constitutional bounds
     pub fn validate(&self) -> Result<(), TokenomicsError> {
-        let total_emission: u32 = self
-            .emission_rates
-            .values()
-            .map(|&r| r as u32)
-            .sum();
+        let total_emission: u32 = self.emission_rates.values().map(|&r| r as u32).sum();
 
         if total_emission as u16 > MAX_INFLATION_RATE_BPS {
             return Err(TokenomicsError::InvalidEmissionSchedule(format!(
@@ -236,7 +229,10 @@ impl EmissionSchedule {
     }
 
     /// Get current emission rates, applying decay if applicable
-    pub fn get_emission_rates(&self, current_epoch: u64) -> Result<std::collections::HashMap<EmissionType, u16>, TokenomicsError> {
+    pub fn get_emission_rates(
+        &self,
+        current_epoch: u64,
+    ) -> Result<std::collections::HashMap<EmissionType, u16>, TokenomicsError> {
         if current_epoch < self.min_epoch_for_decay {
             return Ok(self.emission_rates.clone());
         }
@@ -245,7 +241,8 @@ impl EmissionSchedule {
         let mut decayed_rates = std::collections::HashMap::new();
 
         for (&emission_type, &rate) in &self.emission_rates {
-            let decayed = (rate as u64 * (self.decay_factor_bps as u64).pow(decay_epochs as u32) / 10000u64.pow(decay_epochs as u32)) as u16;
+            let decayed = (rate as u64 * (self.decay_factor_bps as u64).pow(decay_epochs as u32)
+                / 10000u64.pow(decay_epochs as u32)) as u16;
             decayed_rates.insert(emission_type, decayed);
         }
 
@@ -269,7 +266,7 @@ impl BurnConfig {
             // Remaining 75% split: 50% validator rewards + 25% treasury.
             // This matches the canonical fee split in distribution::FeeDistribution.
             fee_burn_percentage_bps: FEE_BURN_BPS as u16, // 2500 = 25%
-            slashing_burn_multiplier: 1,                   // 100% of slash burned
+            slashing_burn_multiplier: 1,                  // 100% of slash burned
         }
     }
 
@@ -333,7 +330,8 @@ impl CanonicalTokenomicsEngine {
     ) -> Result<(), TokenomicsError> {
         // Validate amount doesn't exceed current epoch's allowance
         let rates = self.emission_schedule.get_emission_rates(epoch)?;
-        let rate = rates.get(&emission_type)
+        let rate = rates
+            .get(&emission_type)
             .ok_or(TokenomicsError::InvalidEmissionType)?;
 
         // Use total supply (circulating + locked) or a minimum if starting from genesis
@@ -342,12 +340,12 @@ impl CanonicalTokenomicsEngine {
         } else {
             self.supply_state.circulating_supply
         };
-        
+
         // Calculate max allowed: amount = base * rate / 10000
         // Since MAX_SUPPLY is 200M * 10^8 and rate is at most 500 BPS, use saturating math
         let rate_128 = *rate as u128;
         let max_allowed = base_supply.saturating_mul(rate_128) / 10000;
-        
+
         if amount > max_allowed {
             return Err(TokenomicsError::ExcessiveEmission(format!(
                 "emission {} exceeds allowed {} for this epoch",
@@ -362,7 +360,8 @@ impl CanonicalTokenomicsEngine {
 
         // Update supply state
         self.supply_state.total_minted = self.supply_state.total_minted.saturating_add(amount);
-        self.supply_state.circulating_supply = self.supply_state.circulating_supply.saturating_add(amount);
+        self.supply_state.circulating_supply =
+            self.supply_state.circulating_supply.saturating_add(amount);
 
         if self.supply_state.circulating_supply > MAX_SUPPLY {
             return Err(TokenomicsError::SupplyCapExceeded);
@@ -389,7 +388,8 @@ impl CanonicalTokenomicsEngine {
 
         // Update supply state
         self.supply_state.total_burned = self.supply_state.total_burned.saturating_add(amount);
-        self.supply_state.circulating_supply = self.supply_state.circulating_supply.saturating_sub(amount);
+        self.supply_state.circulating_supply =
+            self.supply_state.circulating_supply.saturating_sub(amount);
 
         Ok(())
     }
@@ -403,7 +403,8 @@ impl CanonicalTokenomicsEngine {
         let state_hash = self.supply_state.compute_hash();
         self.supply_state.state_hash = state_hash.clone();
 
-        self.historical_states.insert(epoch, self.supply_state.clone());
+        self.historical_states
+            .insert(epoch, self.supply_state.clone());
 
         Ok(state_hash)
     }
@@ -424,19 +425,24 @@ impl CanonicalTokenomicsEngine {
         emission_type: EmissionType,
     ) -> u128 {
         (start_epoch..=end_epoch)
-            .map(|epoch| self.emission_records.get(&(epoch, emission_type)).copied().unwrap_or(0))
+            .map(|epoch| {
+                self.emission_records
+                    .get(&(epoch, emission_type))
+                    .copied()
+                    .unwrap_or(0)
+            })
             .sum()
     }
 
     /// Get total burns for a range of epochs
-    pub fn get_total_burns(
-        &self,
-        start_epoch: u64,
-        end_epoch: u64,
-        burn_type: BurnType,
-    ) -> u128 {
+    pub fn get_total_burns(&self, start_epoch: u64, end_epoch: u64, burn_type: BurnType) -> u128 {
         (start_epoch..=end_epoch)
-            .map(|epoch| self.burn_records.get(&(epoch, burn_type)).copied().unwrap_or(0))
+            .map(|epoch| {
+                self.burn_records
+                    .get(&(epoch, burn_type))
+                    .copied()
+                    .unwrap_or(0)
+            })
             .sum()
     }
 }
@@ -506,26 +512,40 @@ mod tests {
         let mut engine = CanonicalTokenomicsEngine::genesis();
         let initial_supply = engine.supply_state.circulating_supply;
 
-        assert!(engine.record_emission(0, EmissionType::BlockProposal, 1000).is_ok());
-        assert_eq!(engine.supply_state.circulating_supply, initial_supply + 1000);
+        assert!(engine
+            .record_emission(0, EmissionType::BlockProposal, 1000)
+            .is_ok());
+        assert_eq!(
+            engine.supply_state.circulating_supply,
+            initial_supply + 1000
+        );
         assert_eq!(engine.supply_state.total_minted, GENESIS_SUPPLY + 1000);
     }
 
     #[test]
     fn test_burn_recording() {
         let mut engine = CanonicalTokenomicsEngine::genesis();
-        engine.record_emission(0, EmissionType::BlockProposal, 10000).ok();
+        engine
+            .record_emission(0, EmissionType::BlockProposal, 10000)
+            .ok();
 
         let initial_supply = engine.supply_state.circulating_supply;
-        assert!(engine.record_burn(0, BurnType::TransactionFee, 1000).is_ok());
-        assert_eq!(engine.supply_state.circulating_supply, initial_supply - 1000);
+        assert!(engine
+            .record_burn(0, BurnType::TransactionFee, 1000)
+            .is_ok());
+        assert_eq!(
+            engine.supply_state.circulating_supply,
+            initial_supply - 1000
+        );
         assert_eq!(engine.supply_state.total_burned, 1000);
     }
 
     #[test]
     fn test_epoch_finalization() {
         let mut engine = CanonicalTokenomicsEngine::genesis();
-        engine.record_emission(0, EmissionType::BlockProposal, 1000).ok();
+        engine
+            .record_emission(0, EmissionType::BlockProposal, 1000)
+            .ok();
 
         let hash = match engine.finalize_epoch(0) {
             Ok(hash) => hash,

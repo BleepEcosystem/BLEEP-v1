@@ -10,15 +10,21 @@ use std::fmt;
 // ── Severity ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Severity { Critical, High, Medium, Low, Informational }
+pub enum Severity {
+    Critical,
+    High,
+    Medium,
+    Low,
+    Informational,
+}
 
 impl fmt::Display for Severity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Critical      => write!(f, "CRITICAL"),
-            Self::High          => write!(f, "HIGH"),
-            Self::Medium        => write!(f, "MEDIUM"),
-            Self::Low           => write!(f, "LOW"),
+            Self::Critical => write!(f, "CRITICAL"),
+            Self::High => write!(f, "HIGH"),
+            Self::Medium => write!(f, "MEDIUM"),
+            Self::Low => write!(f, "LOW"),
             Self::Informational => write!(f, "INFO"),
         }
     }
@@ -36,9 +42,9 @@ pub enum FindingStatus {
 impl fmt::Display for FindingStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Resolved { fix_description }  => write!(f, "RESOLVED — {}", fix_description),
-            Self::Acknowledged { reason }        => write!(f, "ACKNOWLEDGED — {}", reason),
-            Self::WontFix { reason }             => write!(f, "WONT_FIX — {}", reason),
+            Self::Resolved { fix_description } => write!(f, "RESOLVED — {}", fix_description),
+            Self::Acknowledged { reason } => write!(f, "ACKNOWLEDGED — {}", reason),
+            Self::WontFix { reason } => write!(f, "WONT_FIX — {}", reason),
         }
     }
 }
@@ -47,25 +53,25 @@ impl fmt::Display for FindingStatus {
 
 #[derive(Debug, Clone)]
 pub struct AuditFinding {
-    pub id:          String,       // e.g. "SA-C1", "SA-H2"
-    pub severity:    Severity,
-    pub crate_name:  String,
-    pub location:    String,       // file::function or module
-    pub title:       String,
+    pub id: String, // e.g. "SA-C1", "SA-H2"
+    pub severity: Severity,
+    pub crate_name: String,
+    pub location: String, // file::function or module
+    pub title: String,
     pub description: String,
-    pub status:      FindingStatus,
-    pub cwe:         Option<String>,  // CWE identifier if applicable
+    pub status: FindingStatus,
+    pub cwe: Option<String>, // CWE identifier if applicable
 }
 
 // ── AuditReport ───────────────────────────────────────────────────────────────
 
 pub struct AuditReport {
-    pub auditor:        String,
-    pub audit_date:     String,
+    pub auditor: String,
+    pub audit_date: String,
     pub protocol_version: u32,
-    pub phase:          String,
-    pub scope:          Vec<String>,
-    pub findings:       Vec<AuditFinding>,
+    pub phase: String,
+    pub scope: Vec<String>,
+    pub findings: Vec<AuditFinding>,
 }
 
 impl AuditReport {
@@ -272,18 +278,18 @@ impl AuditReport {
         for f in &self.findings {
             *by_sev.entry(f.severity.to_string()).or_insert(0) += 1;
             match &f.status {
-                FindingStatus::Resolved { .. }    => resolved    += 1,
+                FindingStatus::Resolved { .. } => resolved += 1,
                 FindingStatus::Acknowledged { .. } => acknowledged += 1,
-                FindingStatus::WontFix { .. }      => {}
+                FindingStatus::WontFix { .. } => {}
             }
         }
         AuditSummary {
-            total:        self.findings.len(),
-            critical:     *by_sev.get("CRITICAL").unwrap_or(&0),
-            high:         *by_sev.get("HIGH").unwrap_or(&0),
-            medium:       *by_sev.get("MEDIUM").unwrap_or(&0),
-            low:          *by_sev.get("LOW").unwrap_or(&0),
-            informational:*by_sev.get("INFO").unwrap_or(&0),
+            total: self.findings.len(),
+            critical: *by_sev.get("CRITICAL").unwrap_or(&0),
+            high: *by_sev.get("HIGH").unwrap_or(&0),
+            medium: *by_sev.get("MEDIUM").unwrap_or(&0),
+            low: *by_sev.get("LOW").unwrap_or(&0),
+            informational: *by_sev.get("INFO").unwrap_or(&0),
             resolved,
             acknowledged,
             all_resolved: resolved + acknowledged == self.findings.len(),
@@ -293,15 +299,15 @@ impl AuditReport {
 
 #[derive(Debug, Clone)]
 pub struct AuditSummary {
-    pub total:         usize,
-    pub critical:      usize,
-    pub high:          usize,
-    pub medium:        usize,
-    pub low:           usize,
+    pub total: usize,
+    pub critical: usize,
+    pub high: usize,
+    pub medium: usize,
+    pub low: usize,
     pub informational: usize,
-    pub resolved:      usize,
-    pub acknowledged:  usize,
-    pub all_resolved:  bool,
+    pub resolved: usize,
+    pub acknowledged: usize,
+    pub all_resolved: bool,
 }
 
 #[cfg(test)]
@@ -312,25 +318,42 @@ mod tests {
     fn audit_report_all_findings_resolved_or_acknowledged() {
         let report = AuditReport::report();
         let summary = report.summary();
-        assert!(summary.all_resolved,
-            "{} findings neither resolved nor acknowledged", summary.total - summary.resolved - summary.acknowledged);
+        assert!(
+            summary.all_resolved,
+            "{} findings neither resolved nor acknowledged",
+            summary.total - summary.resolved - summary.acknowledged
+        );
     }
 
     #[test]
     fn critical_findings_all_resolved() {
         let report = AuditReport::report();
-        for f in report.findings.iter().filter(|f| f.severity == Severity::Critical) {
-            assert!(matches!(f.status, FindingStatus::Resolved { .. }),
-                "critical finding {} must be resolved, not just acknowledged", f.id);
+        for f in report
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Critical)
+        {
+            assert!(
+                matches!(f.status, FindingStatus::Resolved { .. }),
+                "critical finding {} must be resolved, not just acknowledged",
+                f.id
+            );
         }
     }
 
     #[test]
     fn high_findings_all_resolved() {
         let report = AuditReport::report();
-        for f in report.findings.iter().filter(|f| f.severity == Severity::High) {
-            assert!(matches!(f.status, FindingStatus::Resolved { .. }),
-                "high finding {} must be resolved", f.id);
+        for f in report
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::High)
+        {
+            assert!(
+                matches!(f.status, FindingStatus::Resolved { .. }),
+                "high finding {} must be resolved",
+                f.id
+            );
         }
     }
 
@@ -338,7 +361,10 @@ mod tests {
     fn audit_report_has_expected_finding_ids() {
         let report = AuditReport::report();
         let ids: Vec<&str> = report.findings.iter().map(|f| f.id.as_str()).collect();
-        for expected in &["SA-C1","SA-C2","SA-H1","SA-H2","SA-H3","SA-M1","SA-M2","SA-M3","SA-M4","SA-L1","SA-L2","SA-L3","SA-I1","SA-I2"] {
+        for expected in &[
+            "SA-C1", "SA-C2", "SA-H1", "SA-H2", "SA-H3", "SA-M1", "SA-M2", "SA-M3", "SA-M4",
+            "SA-L1", "SA-L2", "SA-L3", "SA-I1", "SA-I2",
+        ] {
             assert!(ids.contains(expected), "missing finding {}", expected);
         }
     }
@@ -347,6 +373,9 @@ mod tests {
     fn audit_summary_counts_are_consistent() {
         let report = AuditReport::report();
         let summary = report.summary();
-        assert_eq!(summary.critical + summary.high + summary.medium + summary.low + summary.informational, summary.total);
+        assert_eq!(
+            summary.critical + summary.high + summary.medium + summary.low + summary.informational,
+            summary.total
+        );
     }
 }

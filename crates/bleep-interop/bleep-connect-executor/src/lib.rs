@@ -11,13 +11,13 @@ use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use bleep_connect_types::{
-    InstantIntent, ExecutorProfile, ExecutorTier,
-    UniversalAddress, ChainId, BleepConnectError, BleepConnectResult,
-};
-use bleep_connect_crypto::{sha256, ClassicalKeyPair};
-use bleep_connect_layer4_instant::{Layer4Instant, ExecutorBid, ExecutionProof};
 use bleep_connect_adapters::AdapterRegistry;
+use bleep_connect_crypto::{sha256, ClassicalKeyPair};
+use bleep_connect_layer4_instant::{ExecutionProof, ExecutorBid, Layer4Instant};
+use bleep_connect_types::{
+    BleepConnectError, BleepConnectResult, ChainId, ExecutorProfile, ExecutorTier, InstantIntent,
+    UniversalAddress,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RISK ENGINE
@@ -65,7 +65,10 @@ impl RiskEngine {
         }
         let max = self.max_acceptable_value(total_liquidity);
         if intent.source_amount > max {
-            debug!("Transfer {} exceeds risk limit {}", intent.source_amount, max);
+            debug!(
+                "Transfer {} exceeds risk limit {}",
+                intent.source_amount, max
+            );
             return false;
         }
         true
@@ -107,11 +110,21 @@ impl CapitalManager {
         let mut liq = self.liquidity.write().await;
         *liq.entry(chain.to_u32()).or_insert(0) += amount;
         *self.total_liquidity.write().await += amount;
-        info!("Deposited {} on {:?}; total: {}", amount, chain, *self.total_liquidity.read().await);
+        info!(
+            "Deposited {} on {:?}; total: {}",
+            amount,
+            chain,
+            *self.total_liquidity.read().await
+        );
     }
 
     pub async fn get_liquidity(&self, chain: ChainId) -> u128 {
-        *self.liquidity.read().await.get(&chain.to_u32()).unwrap_or(&0)
+        *self
+            .liquidity
+            .read()
+            .await
+            .get(&chain.to_u32())
+            .unwrap_or(&0)
     }
 
     pub async fn total(&self) -> u128 {
@@ -123,7 +136,8 @@ impl CapitalManager {
         let entry = liq.entry(chain.to_u32()).or_insert(0);
         if *entry < amount {
             return Err(BleepConnectError::InternalError(format!(
-                "Insufficient liquidity on {:?}: have {}, need {}", chain, *entry, amount
+                "Insufficient liquidity on {:?}: have {}, need {}",
+                chain, *entry, amount
             )));
         }
         *entry -= amount;
@@ -256,7 +270,11 @@ impl ExecutorNode {
         };
 
         layer4.place_bid(bid)?;
-        info!("Placed bid on {} at {} bps", hex::encode(intent_id), bid_bps);
+        info!(
+            "Placed bid on {} at {} bps",
+            hex::encode(intent_id),
+            bid_bps
+        );
         Ok(true)
     }
 
@@ -270,11 +288,15 @@ impl ExecutorNode {
         let start_ms = now_ms();
 
         // Reserve capital
-        self.capital.reserve(intent.dest_chain, intent.min_dest_amount).await?;
+        self.capital
+            .reserve(intent.dest_chain, intent.min_dest_amount)
+            .await?;
         self.risk.commit(intent_id, intent.min_dest_amount);
 
         // Encode the transfer using the destination chain adapter
-        let adapter = self.adapters.get(intent.dest_chain)
+        let adapter = self
+            .adapters
+            .get(intent.dest_chain)
             .ok_or_else(|| BleepConnectError::InternalError("No adapter".into()))?;
         let calldata = adapter.encode_transfer(intent)?;
 
@@ -286,9 +308,13 @@ impl ExecutorNode {
         // Verify the execution we just performed
         let verified = adapter.verify_execution(intent, &calldata)?;
         if !verified {
-            self.capital.release(intent.dest_chain, intent.min_dest_amount).await;
+            self.capital
+                .release(intent.dest_chain, intent.min_dest_amount)
+                .await;
             self.risk.release(&intent_id);
-            return Err(BleepConnectError::InternalError("Execution verification failed".into()));
+            return Err(BleepConnectError::InternalError(
+                "Execution verification failed".into(),
+            ));
         }
 
         // Build execution proof
@@ -310,18 +336,25 @@ impl ExecutorNode {
         // Submit proof to Layer 4
         layer4.submit_execution_proof(proof).await?;
 
-        self.capital.release(intent.dest_chain, intent.min_dest_amount).await;
+        self.capital
+            .release(intent.dest_chain, intent.min_dest_amount)
+            .await;
         self.risk.release(&intent_id);
         info!(
             "Executed intent {} in {}ms; dest_tx={}",
-            hex::encode(intent_id), execution_time_ms, dest_tx_hash
+            hex::encode(intent_id),
+            execution_time_ms,
+            dest_tx_hash
         );
         Ok(())
     }
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn now_ms() -> u64 {
@@ -352,7 +385,8 @@ mod tests {
             ExecutionStrategy::Competitive,
             RiskTolerance::Medium,
         );
-        exec.deposit_capital(ChainId::Ethereum, 100_000_000_000).await;
+        exec.deposit_capital(ChainId::Ethereum, 100_000_000_000)
+            .await;
 
         let layer4 = Arc::new(Layer4Instant::new(chain));
         layer4.register_executor(ExecutorProfile {
@@ -387,7 +421,10 @@ mod tests {
             source_amount: 1_000_000_000,
             min_dest_amount: 950_000_000,
             sender: UniversalAddress::new(ChainId::BLEEP, "bleep1sender".into()),
-            recipient: UniversalAddress::new(ChainId::Ethereum, "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into()),
+            recipient: UniversalAddress::new(
+                ChainId::Ethereum,
+                "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
+            ),
             max_solver_reward_bps: 50,
             slippage_tolerance_bps: 100,
             nonce: 1,
@@ -410,13 +447,19 @@ mod tests {
     async fn test_risk_engine() {
         let risk = RiskEngine::new(RiskTolerance::Medium, 2);
         assert!(risk.should_bid(
-            &InstantIntent { source_amount: 1_000, ..make_intent() },
+            &InstantIntent {
+                source_amount: 1_000,
+                ..make_intent()
+            },
             1_000_000
         ));
         // Over-capacity
         assert!(!risk.should_bid(
-            &InstantIntent { source_amount: 900_000, ..make_intent() },
+            &InstantIntent {
+                source_amount: 900_000,
+                ..make_intent()
+            },
             1_000_000
         ));
     }
-  }
+}

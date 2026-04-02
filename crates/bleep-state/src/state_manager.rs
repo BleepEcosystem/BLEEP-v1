@@ -26,13 +26,13 @@ pub type StateResult<T> = Result<T, StateError>;
 
 // On-disk key prefixes
 const PREFIX_ACCOUNT: &[u8] = b"acct:";
-const KEY_HEIGHT: &[u8]     = b"sys:block_height";
+const KEY_HEIGHT: &[u8] = b"sys:block_height";
 
 /// Persisted account record.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AccountState {
-    pub balance:   u128,
-    pub nonce:     u64,
+    pub balance: u128,
+    pub nonce: u64,
     pub code_hash: Option<[u8; 32]>,
 }
 
@@ -48,11 +48,11 @@ struct CacheEntry {
 
 /// Top-level state manager with RocksDB persistence + SparseMerkleTrie state root.
 pub struct StateManager {
-    db:           rocksdb::DB,
-    cache:        HashMap<String, CacheEntry>,
+    db: rocksdb::DB,
+    cache: HashMap<String, CacheEntry>,
     block_height: u64,
     /// Sprint 3: Sparse Merkle Trie for O(1)-amortised cryptographic state root.
-    trie:         SparseMerkleTrie,
+    trie: SparseMerkleTrie,
 }
 
 impl StateManager {
@@ -65,12 +65,13 @@ impl StateManager {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_max_open_files(512);
 
-        let db = rocksdb::DB::open(&opts, path)
-            .map_err(|e| StateError::Storage(e.to_string()))?;
+        let db = rocksdb::DB::open(&opts, path).map_err(|e| StateError::Storage(e.to_string()))?;
 
         let block_height = match db.get(KEY_HEIGHT) {
             Ok(Some(v)) => {
-                let arr: [u8; 8] = v.as_slice().try_into()
+                let arr: [u8; 8] = v
+                    .as_slice()
+                    .try_into()
                     .map_err(|_| StateError::Storage("corrupt block_height".into()))?;
                 u64::from_le_bytes(arr)
             }
@@ -89,8 +90,11 @@ impl StateManager {
 
     /// In-memory (temp dir). Panics only if the OS temp dir is unusable.
     pub fn new() -> Self {
-        let tmp = std::env::temp_dir()
-            .join(format!("bleep-state-{}-{}", std::process::id(), pid_suffix()));
+        let tmp = std::env::temp_dir().join(format!(
+            "bleep-state-{}-{}",
+            std::process::id(),
+            pid_suffix()
+        ));
         Self::open(&tmp).unwrap_or_else(|e| {
             panic!("[StateManager] Cannot open RocksDB at temp dir: {}", e);
         })
@@ -127,7 +131,9 @@ impl StateManager {
 
     // ── Block lifecycle ──────────────────────────────────────────────────────
 
-    pub fn block_height(&self) -> u64 { self.block_height }
+    pub fn block_height(&self) -> u64 {
+        self.block_height
+    }
 
     /// Advance block counter, sync dirty accounts into trie, flush to RocksDB.
     pub fn advance_block(&mut self) {
@@ -156,7 +162,8 @@ impl StateManager {
                 if entry.state.balance == 0 && entry.state.nonce == 0 {
                     self.trie.remove(addr);
                 } else {
-                    self.trie.insert(addr, entry.state.balance, entry.state.nonce);
+                    self.trie
+                        .insert(addr, entry.state.balance, entry.state.nonce);
                 }
             }
         }
@@ -199,7 +206,9 @@ impl StateManager {
             None => {
                 log::warn!(
                     "[StateManager] apply_transfer: {} has {}, needs {} (insufficient)",
-                    sender, bal, amount
+                    sender,
+                    bal,
+                    amount
                 );
                 return false;
             }
@@ -213,7 +222,9 @@ impl StateManager {
             None => {
                 log::error!(
                     "[StateManager] apply_transfer: receiver {} balance overflow ({} + {})",
-                    receiver, recv, amount
+                    receiver,
+                    recv,
+                    amount
                 );
                 return false;
             }
@@ -243,8 +254,10 @@ impl StateManager {
 
         let current_total = self.total_supply();
         let new_total = current_total.checked_add(amount).ok_or_else(|| {
-            format!("[StateManager] mint: total supply arithmetic overflow ({} + {})",
-                current_total, amount)
+            format!(
+                "[StateManager] mint: total supply arithmetic overflow ({} + {})",
+                current_total, amount
+            )
         })?;
 
         if new_total > MAX_SUPPLY {
@@ -256,8 +269,10 @@ impl StateManager {
 
         let bal = self.get_balance(address);
         let new_bal = bal.checked_add(amount).ok_or_else(|| {
-            format!("[StateManager] mint: address {} balance overflow ({} + {})",
-                address, bal, amount)
+            format!(
+                "[StateManager] mint: address {} balance overflow ({} + {})",
+                address, bal, amount
+            )
         })?;
 
         self.set_balance(address, new_bal);
@@ -280,17 +295,21 @@ impl StateManager {
         let iter = self.db.prefix_iterator(prefix);
         for item in iter {
             let (k, v) = item.map_err(|e| StateError::Storage(e.to_string()))?;
-            if !k.starts_with(prefix) { break; }
+            if !k.starts_with(prefix) {
+                break;
+            }
             let addr = std::str::from_utf8(&k[prefix.len()..])
                 .map_err(|e| StateError::Serialisation(e.to_string()))?
                 .to_string();
-            let acct: AccountState = serde_json::from_slice(&v)
-                .unwrap_or_default();
+            let acct: AccountState = serde_json::from_slice(&v).unwrap_or_default();
             if acct.balance > 0 || acct.nonce > 0 {
                 self.trie.insert(&addr, acct.balance, acct.nonce);
             }
         }
-        log::info!("[StateManager] Trie rebuilt from DB ({} accounts)", self.trie.len());
+        log::info!(
+            "[StateManager] Trie rebuilt from DB ({} accounts)",
+            self.trie.len()
+        );
         Ok(())
     }
 
@@ -322,7 +341,13 @@ impl StateManager {
     fn cache_entry(&mut self, address: &str) -> &mut CacheEntry {
         if !self.cache.contains_key(address) {
             let state = self.get_account(address);
-            self.cache.insert(address.to_string(), CacheEntry { state, dirty: false });
+            self.cache.insert(
+                address.to_string(),
+                CacheEntry {
+                    state,
+                    dirty: false,
+                },
+            );
         }
         self.cache.get_mut(address).unwrap()
     }
@@ -343,16 +368,23 @@ impl StateManager {
 
         batch.put(KEY_HEIGHT, self.block_height.to_le_bytes());
 
-        self.db.write(batch)
+        self.db
+            .write(batch)
             .map_err(|e| StateError::Storage(e.to_string()))?;
 
-        log::debug!("[StateManager] Flushed {} accounts, height={}", flushed, self.block_height);
+        log::debug!(
+            "[StateManager] Flushed {} accounts, height={}",
+            flushed,
+            self.block_height
+        );
         Ok(())
     }
 }
 
 impl Default for StateManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn account_key(address: &str) -> Vec<u8> {
@@ -373,7 +405,9 @@ fn pid_suffix() -> u64 {
 mod tests {
     use super::*;
 
-    fn fresh() -> StateManager { StateManager::new() }
+    fn fresh() -> StateManager {
+        StateManager::new()
+    }
 
     #[test]
     fn balance_roundtrip() {
@@ -397,7 +431,7 @@ mod tests {
         m.mint("alice", 500).expect("mint");
         assert!(m.apply_transfer("alice", "bob", 200));
         assert_eq!(m.get_balance("alice"), 300);
-        assert_eq!(m.get_balance("bob"),   200);
+        assert_eq!(m.get_balance("bob"), 200);
     }
 
     #[test]
@@ -405,9 +439,15 @@ mod tests {
         let mut m = fresh();
         m.mint("alice", 100).expect("mint");
         // S-06: zero-amount transfers must be rejected
-        assert!(!m.apply_transfer("alice", "bob", 0),
-            "S-06: zero-amount transfer must be rejected");
-        assert_eq!(m.get_balance("alice"), 100, "balance unchanged after zero transfer");
+        assert!(
+            !m.apply_transfer("alice", "bob", 0),
+            "S-06: zero-amount transfer must be rejected"
+        );
+        assert_eq!(
+            m.get_balance("alice"),
+            100,
+            "balance unchanged after zero transfer"
+        );
     }
 
     #[test]
@@ -432,7 +472,8 @@ mod tests {
         let mut m = fresh();
         const MAX: u128 = 200_000_000 * 100_000_000u128;
         // Mint exactly at cap — should succeed
-        m.mint("whale", MAX).expect("S-10: mint at cap must succeed");
+        m.mint("whale", MAX)
+            .expect("S-10: mint at cap must succeed");
         assert_eq!(m.total_supply(), MAX);
         // Mint one more — must fail
         let r = m.mint("whale", 1);
@@ -471,8 +512,8 @@ mod tests {
         let mut m1 = fresh();
         let mut m2 = fresh();
         m1.mint("alice", 100).expect("mint");
-        m1.mint("bob",   200).expect("mint");
-        m2.mint("bob",   200).expect("mint");
+        m1.mint("bob", 200).expect("mint");
+        m2.mint("bob", 200).expect("mint");
         m2.mint("alice", 100).expect("mint");
         // Insert order must not affect the trie root
         assert_eq!(m1.state_root(), m2.state_root());

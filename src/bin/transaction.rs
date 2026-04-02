@@ -3,9 +3,9 @@
 use bleep_core::transaction::ZKTransaction;
 use bleep_crypto::quantum_secure::QuantumSecure;
 
-use std::error::Error;
-use log::{info, error};
+use log::{error, info};
 use std::env;
+use std::error::Error;
 
 fn main() {
     env_logger::init();
@@ -29,12 +29,15 @@ fn submit_transaction() -> Result<(), Box<dyn Error>> {
     let quantum_secure = QuantumSecure::keygen();
     let tx = ZKTransaction::new("bleep:sender", recipient, amount, &quantum_secure);
 
-    if !tx.verify(&quantum_secure) {
+    if !tx.verify() {
         error!("❌ Transaction signature verification failed.");
         return Err("Transaction signature invalid".into());
     }
 
-    info!("📝 Transaction signed and verified: {} -> {} for {}", "bleep:sender", recipient, amount);
+    info!(
+        "📝 Transaction signed and verified: {} -> {} for {}",
+        "bleep:sender", recipient, amount
+    );
     println!("📤 Transaction ready: {:?}", tx);
     Ok(())
 }

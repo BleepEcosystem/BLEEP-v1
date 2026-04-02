@@ -36,12 +36,15 @@
 //!   - OracleBridgeEngine: 5 oracle operators, 3-of-5 BLEEP/USD quorum
 //!   - Standalone `bleep-executor` binary for Layer 4 intent market
 
+use parking_lot::Mutex;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
-use parking_lot::Mutex;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(target_os = "windows")))]
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    not(target_os = "windows")
+))]
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn __rust_probestack() {
@@ -53,44 +56,44 @@ pub extern "C" fn __rust_probestack() {
 }
 
 // ── Crypto ────────────────────────────────────────────────────────────────────
-use bleep_crypto::quantum_secure::QuantumSecure;
 use bleep_crypto::pq_crypto::KyberKem;
+use bleep_crypto::quantum_secure::QuantumSecure;
 use bleep_crypto::tx_signer::generate_tx_keypair;
 
 // ── Core ──────────────────────────────────────────────────────────────────────
 use bleep_core::block::Block;
 use bleep_core::blockchain::{Blockchain, BlockchainState as CoreBlockchainState};
 use bleep_core::mempool::Mempool;
-use bleep_core::transaction_pool::TransactionPool;
 use bleep_core::run_mempool_bridge;
+use bleep_core::transaction_pool::TransactionPool;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 use bleep_state::state_manager::StateManager;
 
 // ── Consensus ─────────────────────────────────────────────────────────────────
-use bleep_consensus::{run_consensus_engine, BlockProducer};
-use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
 use bleep_consensus::slashing_engine::SlashingEngine;
+use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
+use bleep_consensus::{run_consensus_engine, BlockProducer};
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
-use bleep_scheduler::{Scheduler, BlockTick};
+use bleep_scheduler::{BlockTick, Scheduler};
 
 // ── Governance ────────────────────────────────────────────────────────────────
 use bleep_governance::governance_core::GovernanceEngine;
 
 // ── P2P ───────────────────────────────────────────────────────────────────────
+use bleep_core::block_validation::BlockValidator;
+use bleep_crypto::tx_signer::{tx_payload, verify_tx_signature};
 use bleep_p2p::p2p_node::{P2PNode, P2PNodeConfig};
 use bleep_p2p::types::MessageType;
-use bleep_crypto::tx_signer::{verify_tx_signature, tx_payload};
-use bleep_core::block_validation::BlockValidator;
 
 // ── Wallet & PAT ─────────────────────────────────────────────────────────────
-use bleep_wallet_core::init_wallet_services;
 use bleep_pat::launch_asset_token_logic;
+use bleep_wallet_core::init_wallet_services;
 
 // ── Economics ─────────────────────────────────────────────────────────────────
+use bleep_economics::oracle_bridge::{OracleSource, PriceUpdate};
 use bleep_economics::{BleepEconomicsRuntime, EpochInput};
-use bleep_economics::oracle_bridge::{PriceUpdate, OracleSource};
 
 // ── Interop ───────────────────────────────────────────────────────────────────
 use bleep_interop::interoperability::start_interop_services;
@@ -99,12 +102,15 @@ use bleep_interop::interoperability::start_interop_services;
 use bleep_ai::ai_assistant::init_ai_advisory;
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
-use bleep_telemetry::{init_telemetry, metrics::{MetricCounter, MetricGauge}};
+use bleep_telemetry::{
+    init_telemetry,
+    metrics::{MetricCounter, MetricGauge},
+};
 
 // ── RPC ───────────────────────────────────────────────────────────────────────
 use bleep_rpc::{rpc_routes_with_state, RpcState};
-use warp;
 use hex;
+use warp;
 
 #[tokio::main]
 async fn main() {
@@ -127,7 +133,6 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-
     // ── Step 1: Post-quantum keypair generation ───────────────────────────────
     info!("🔐 [1/13] Generating post-quantum keypairs…");
     let _qs = QuantumSecure::keygen();
@@ -138,22 +143,31 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Generate real Kyber-1024 keypair for validator KEM binding.
     // KyberKem::keygen() returns (KyberPublicKey: 1568B, KyberSecretKey: 3168B).
-    let (kyber_pk, _kyber_sk) = KyberKem::keygen()
-        .map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
+    let (kyber_pk, _kyber_sk) =
+        KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
 
-    info!("  ✅ SPHINCS+-SHAKE-256f-simple keypair generated (PK={} bytes, SK={} bytes).",
-          sphincs_pk.len(), sphincs_sk.len());
-    info!("  ✅ Kyber-1024 keypair generated (PK={} bytes).", kyber_pk.as_bytes().len());
+    info!(
+        "  ✅ SPHINCS+-SHAKE-256f-simple keypair generated (PK={} bytes, SK={} bytes).",
+        sphincs_pk.len(),
+        sphincs_sk.len()
+    );
+    info!(
+        "  ✅ Kyber-1024 keypair generated (PK={} bytes).",
+        kyber_pk.as_bytes().len()
+    );
     info!("  ✅ Block signing PK: {}", hex::encode(&sphincs_pk[..8]));
 
     // ── Step 2: State + genesis ───────────────────────────────────────────────
     info!("⛓  [2/13] Initialising genesis block and persistent state…");
 
-    let state_dir = std::env::var("BLEEP_STATE_DIR")
-        .unwrap_or_else(|_| "/tmp/bleep-state".to_string());
+    let state_dir =
+        std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
 
     let mut state = match StateManager::open(&state_dir) {
-        Ok(s) => { info!("  ✅ StateManager at {}", state_dir); s }
+        Ok(s) => {
+            info!("  ✅ StateManager at {}", state_dir);
+            s
+        }
         Err(e) => {
             warn!("  ⚠️  StateManager open failed ({}), using temp dir", e);
             StateManager::new()
@@ -163,12 +177,24 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Mint genesis allocations only at height 0 (first start).
     // mint() now returns Result — cap violations are logged and abort startup.
     if state.block_height() == 0 {
-        state.mint("bleep:genesis:foundation", 500_000_000_000_000u128)
-            .unwrap_or_else(|e| { error!("Genesis mint foundation failed: {}", e); std::process::exit(1); });
-        state.mint("bleep:genesis:rewards",    100_000_000_000_000u128)
-            .unwrap_or_else(|e| { error!("Genesis mint rewards failed: {}", e); std::process::exit(1); });
-        state.mint("bleep:genesis:validators",  50_000_000_000_000u128)
-            .unwrap_or_else(|e| { error!("Genesis mint validators failed: {}", e); std::process::exit(1); });
+        state
+            .mint("bleep:genesis:foundation", 500_000_000_000_000u128)
+            .unwrap_or_else(|e| {
+                error!("Genesis mint foundation failed: {}", e);
+                std::process::exit(1);
+            });
+        state
+            .mint("bleep:genesis:rewards", 100_000_000_000_000u128)
+            .unwrap_or_else(|e| {
+                error!("Genesis mint rewards failed: {}", e);
+                std::process::exit(1);
+            });
+        state
+            .mint("bleep:genesis:validators", 50_000_000_000_000u128)
+            .unwrap_or_else(|e| {
+                error!("Genesis mint validators failed: {}", e);
+                std::process::exit(1);
+            });
         info!("  ✅ Genesis allocations minted (650T µBLEEP).");
     }
 
@@ -181,7 +207,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Transaction pools
     let tx_pool = TransactionPool::new(10_000);
-    let mempool  = Mempool::new();
+    let mempool = Mempool::new();
 
     // Genesis block (unsigned — trust anchor)
     let genesis = Block::new(0, vec![], "0".to_string());
@@ -218,15 +244,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 6b: ValidatorRegistry + SlashingEngine ───────────────────────────
     info!("🗳  [6b/16] Initialising ValidatorRegistry and SlashingEngine…");
     let validator_registry = Arc::new(Mutex::new(ValidatorRegistry::new()));
-    let slashing_engine    = Arc::new(Mutex::new(SlashingEngine::new()));
+    let slashing_engine = Arc::new(Mutex::new(SlashingEngine::new()));
 
     // Register the local node as the genesis validator with the real Kyber-1024 public key.
     {
         let mut reg = validator_registry.lock();
         // Use the first 8 bytes of the SPHINCS+ PK as the validator ID
-        let validator_id   = hex::encode(&sphincs_pk[..8]);
+        let validator_id = hex::encode(&sphincs_pk[..8]);
         // Real Kyber-1024 PK bytes (1568 bytes) — wired from Step 1 keygen
-        let real_kyber_pk  = kyber_pk.as_bytes().to_vec();
+        let real_kyber_pk = kyber_pk.as_bytes().to_vec();
         // S-06: pass the real SPHINCS+ public key bytes so SlashingEngine can
         // cryptographically verify evidence before slashing this validator.
         let signing_key_id = hex::encode(&sphincs_pk);
@@ -241,24 +267,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Ok(mut v) => {
                 let _ = v.activate();
                 let _ = reg.register_validator(v);
-                info!("  ✅ Genesis validator registered: id={} (Kyber-1024 + SPHINCS+ PKs wired)", validator_id);
+                info!(
+                    "  ✅ Genesis validator registered: id={} (Kyber-1024 + SPHINCS+ PKs wired)",
+                    validator_id
+                );
             }
             Err(e) => warn!("  ⚠️  Genesis validator registration skipped: {}", e),
         }
     }
 
-    // ── Step 6c: Groth16 devnet SRS ───────────────────────────────────────────
-    info!("🔐 [6c/16] Generating Groth16 devnet SRS (block circuit)…");
-    info!("   MPC ceremony COMPLETE — 5-participant SRS. See /rpc/ceremony/status.");
-    let (_block_proving_key, _block_verifying_key) = tokio::task::spawn_blocking(|| {
-        bleep_zkp::devnet_setup()
-    }).await?;
-    info!("  ✅ Groth16 block circuit SRS ready.");
+    // ── Step 6c: Post-quantum proof key generation ──────────────────────────────
+    info!("🔐 [6c/16] Generating post-quantum proof keys (block / batch circuits)…");
+    info!("   Post-quantum proof key generation complete.");
+    let (_block_proving_key, _block_verifying_key) =
+        tokio::task::spawn_blocking(|| bleep_zkp::devnet_setup()).await?;
+    info!("  ✅ Post-quantum block proof key ready.");
 
-    let (_batch_pk, _batch_vk) = tokio::task::spawn_blocking(|| {
-        bleep_zkp::devnet_batch_setup()
-    }).await?;
-    info!("  ✅ Groth16 batch tx circuit SRS ready.");
+    let (_batch_pk, _batch_vk) =
+        tokio::task::spawn_blocking(|| bleep_zkp::devnet_batch_setup()).await?;
+    info!("  ✅ Post-quantum batch proof key ready.");
 
     // ── Step 6d: BleepEconomicsRuntime ────────────────────────────────────────
     info!("💰 [6d/16] Initialising BleepEconomicsRuntime (tokenomics + fee market + oracle)…");
@@ -286,14 +313,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .as_secs();
         for i in 0u8..3 {
             let update = PriceUpdate {
-                source:         OracleSource::Custom(vec![0xAA, i, 0, 0, 0, 0, 0, 0]),
-                asset:          "BLEEP/USD".to_string(),
-                price:          10_000_000u128,  // $0.10 with 8 decimals
-                timestamp:      ts_now,
+                source: OracleSource::Custom(vec![0xAA, i, 0, 0, 0, 0, 0, 0]),
+                asset: "BLEEP/USD".to_string(),
+                price: 10_000_000u128, // $0.10 with 8 decimals
+                timestamp: ts_now,
                 confidence_bps: 100,
-                operator_id:    vec![0xAA, i, 0, 0, 0, 0, 0, 0],
+                operator_id: vec![0xAA, i, 0, 0, 0, 0, 0, 0],
                 // Empty signature = genesis bootstrap (accepted); all-zero placeholder REMOVED.
-                signature:      vec![],
+                signature: vec![],
             };
             let _ = rt.submit_price_update(update);
         }
@@ -313,8 +340,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("  🔗 Initialising BleepConnectOrchestrator (Layer 4 + Sepolia relay)…");
     let connect_orchestrator: Arc<bleep_interop::core::BleepConnectOrchestrator> = {
         use bleep_interop::core::{BleepConnectBuilder, BleepConnectConfig};
-        use bleep_interop::types::ChainId;
         use bleep_interop::crypto::ClassicalKeyPair;
+        use bleep_interop::types::ChainId;
         use std::path::PathBuf;
         let config = BleepConnectConfig {
             chain_id: ChainId::BLEEP,
@@ -339,8 +366,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
             orc_sweep.start_background_tasks().await;
         });
     }
-    info!("  ✅ BleepConnectOrchestrator running (Sepolia relay: {}).",
-          bleep_interop::SEPOLIA_BLEEP_FULFILL_ADDR);
+    info!(
+        "  ✅ BleepConnectOrchestrator running (Sepolia relay: {}).",
+        bleep_interop::SEPOLIA_BLEEP_FULFILL_ADDR
+    );
 
     // ── PAT Registry ───────────────────────────────────────────────────────────
     info!("  🪙 Initialising PAT Registry…");
@@ -354,21 +383,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 8: Telemetry ─────────────────────────────────────────────────────
     info!("📊 [8/16] Starting telemetry…");
     init_telemetry()?;
-    let blocks_produced  = MetricCounter::new("bleep_blocks_produced_total");
-    let txs_processed    = MetricCounter::new("bleep_transactions_processed_total");
-    let gas_used_gauge   = MetricGauge::new("bleep_gas_used_last_block");
+    let blocks_produced = MetricCounter::new("bleep_blocks_produced_total");
+    let txs_processed = MetricCounter::new("bleep_transactions_processed_total");
+    let gas_used_gauge = MetricGauge::new("bleep_gas_used_last_block");
     info!("  ✅ Metrics active.");
 
     // ── Step 9: P2P ───────────────────────────────────────────────────────────
     info!("🌐 [9/16] Starting P2P node…");
     let (p2p_node, p2p_handle) = P2PNode::start(P2PNodeConfig::default()).await?;
-    info!("  ✅ P2P node {} | peers: {}", p2p_node.node_id, p2p_node.peer_count());
+    info!(
+        "  ✅ P2P node {} | peers: {}",
+        p2p_node.node_id,
+        p2p_node.peer_count()
+    );
 
     // ── Step 10: MempoolBridge ────────────────────────────────────────────────
     info!("🔄 [10/16] Wiring MempoolBridge (P2P → ExecutionPool)…");
-    let bridge_mempool  = Arc::clone(&mempool);
-    let bridge_tx_pool  = Arc::clone(&tx_pool);
-    let bridge_handle   = tokio::spawn(async move {
+    let bridge_mempool = Arc::clone(&mempool);
+    let bridge_tx_pool = Arc::clone(&tx_pool);
+    let bridge_handle = tokio::spawn(async move {
         run_mempool_bridge(bridge_mempool, bridge_tx_pool).await;
     });
     info!("  ✅ MempoolBridge active (500ms drain cycle).");
@@ -379,14 +412,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx
     // GossipBridge subscribes to block_tx and handles P2P broadcast externally
     let (block_producer, block_rx) = BlockProducer::new(
-        hex::encode(&sphincs_pk[..8]),       // validator_id (first 8 bytes of SPHINCS+ PK)
-        1_000_000u64,                        // stake weight
+        hex::encode(&sphincs_pk[..8]), // validator_id (first 8 bytes of SPHINCS+ PK)
+        1_000_000u64,                  // stake weight
         Arc::clone(&tx_pool),
         Arc::clone(&blockchain),
         Arc::clone(&state),
-        sphincs_sk.clone(),                  // full SPHINCS+ SK bytes (64 bytes)
-        sphincs_pk.clone(),                  // full SPHINCS+ PK bytes (32 bytes)
-        Some(Arc::clone(&p2p_node)),         // direct gossip broadcast
+        sphincs_sk.clone(),          // full SPHINCS+ SK bytes (64 bytes)
+        sphincs_pk.clone(),          // full SPHINCS+ PK bytes (32 bytes)
+        Some(Arc::clone(&p2p_node)), // direct gossip broadcast
     );
 
     // Subscribe a second receiver for GossipBridge BEFORE the producer starts
@@ -399,11 +432,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (interval_handle, block_sched_handle) = scheduler.start();
 
     // Relay FinalizedBlock events into Scheduler + metrics + economics
-    let scheduler_relay  = Arc::clone(&scheduler);
-    let blocks_relay     = blocks_produced.clone();
-    let txs_relay        = txs_processed.clone();
-    let gas_relay        = gas_used_gauge.clone();
-    let economics_relay  = Arc::clone(&economics_runtime);
+    let scheduler_relay = Arc::clone(&scheduler);
+    let blocks_relay = blocks_produced.clone();
+    let txs_relay = txs_processed.clone();
+    let gas_relay = gas_used_gauge.clone();
+    let economics_relay = Arc::clone(&economics_runtime);
 
     // Track last epoch to fire economics only once per epoch boundary
     let mut last_economics_epoch: u64 = 0;
@@ -415,15 +448,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
             match block_rx_sched.recv().await {
                 Ok(fb) => {
                     blocks_relay.increment();
-                    for _ in 0..fb.tx_count { txs_relay.increment(); }
+                    for _ in 0..fb.tx_count {
+                        txs_relay.increment();
+                    }
                     gas_relay.set(fb.gas_used as i64);
 
                     // Accumulate fee revenue (gas_used * base_fee approximation)
-                    epoch_fee_revenue = epoch_fee_revenue.saturating_add(fb.gas_used as u128 * 1_000);
+                    epoch_fee_revenue =
+                        epoch_fee_revenue.saturating_add(fb.gas_used as u128 * 1_000);
 
                     scheduler_relay.on_new_block(BlockTick {
-                        height:    fb.height,
-                        epoch:     fb.epoch,
+                        height: fb.height,
+                        epoch: fb.epoch,
                         timestamp: chrono::Utc::now().timestamp() as u64,
                     });
 
@@ -434,12 +470,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         let fee_rev = epoch_fee_revenue;
 
                         let input = EpochInput {
-                            epoch:               completed_epoch,
-                            block_count:         100,  // devnet blocks_per_epoch
-                            fee_revenue:         fee_rev,
+                            epoch: completed_epoch,
+                            block_count: 100, // devnet blocks_per_epoch
+                            fee_revenue: fee_rev,
                             avg_utilisation_bps: 5000, // 50% default; oracle will tune
-                            validator_metrics:   vec![],
-                            oracle_updates:      vec![],
+                            validator_metrics: vec![],
+                            oracle_updates: vec![],
                         };
 
                         let mut econ = economics_relay.lock();
@@ -449,7 +485,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                       out.epoch, out.total_emitted, out.total_burned,
                                       out.circulating_supply, out.new_base_fee);
                             }
-                            Err(e) => warn!("⚠️  Economics epoch {} processing failed: {}", completed_epoch, e),
+                            Err(e) => warn!(
+                                "⚠️  Economics epoch {} processing failed: {}",
+                                completed_epoch, e
+                            ),
                         }
 
                         last_economics_epoch = fb.epoch;
@@ -458,7 +497,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                     info!(
                         "📦 Block {} | epoch={} | txs={} | gas={} | root={}",
-                        fb.height, fb.epoch, fb.tx_count, fb.gas_used,
+                        fb.height,
+                        fb.epoch,
+                        fb.tx_count,
+                        fb.gas_used,
                         hex::encode(&fb.state_root[..4])
                     );
                 }
@@ -484,9 +526,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Listens for gossip blocks from peers, validates them, and inserts
     // valid blocks into the local chain (sync-mode / light node path).
     let inbound_blockchain = Arc::clone(&blockchain);
-    let inbound_p2p_node   = Arc::clone(&p2p_node);
-    let inbound_state      = Arc::clone(&state);
-    let inbound_pk         = sphincs_pk.clone(); // SPHINCS+ PK used as fallback block verifier key
+    let inbound_p2p_node = Arc::clone(&p2p_node);
+    let inbound_state = Arc::clone(&state);
+    let inbound_pk = sphincs_pk.clone(); // SPHINCS+ PK used as fallback block verifier key
 
     let inbound_handle = tokio::spawn(async move {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
@@ -498,14 +540,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
 
                     // Deserialise
-                    let block: bleep_core::block::Block =
-                        match serde_json::from_slice(&msg.payload) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!("[InboundBlockHandler] Bad block payload: {}", e);
-                                continue;
-                            }
-                        };
+                    let block: bleep_core::block::Block = match serde_json::from_slice(&msg.payload)
+                    {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("[InboundBlockHandler] Bad block payload: {}", e);
+                            continue;
+                        }
+                    };
 
                     // Block-level validation: Fiat-Shamir ZKP + validator sig
                     let valid = BlockValidator::validate_block(&block, &inbound_pk);
@@ -527,18 +569,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             continue; // legacy / genesis tx — no sig required
                         }
                         // Reconstruct the canonical payload that was signed.
-                        let payload = tx_payload(
-                            &tx.sender,
-                            &tx.receiver,
-                            tx.amount,
-                            tx.timestamp,
-                        );
-                        // The signature blob is [pk(var) || SPHINCS+_sig].
-                        // For our wallet tx signer the PK length is fixed at
-                        // the size stored in the wallet (variable by scheme).
-                        // We attempt verify_tx_signature with the full blob as
-                        // the sig; verify_tx_signature handles scheme dispatch.
-                        if !verify_tx_signature(&payload, &tx.signature, &tx.signature) {
+                        let payload = tx_payload(&tx.sender, &tx.receiver, tx.amount, tx.timestamp);
+                        // The signature blob is [pk(32) || SPHINCS+_sig].
+                        if tx.signature.len() <= 32 {
+                            warn!(
+                                "[InboundBlockHandler] Block {} tx {}→{} has invalid signature length — discarding block",
+                                block.index, tx.sender, tx.receiver
+                            );
+                            tx_sigs_ok = false;
+                            break;
+                        }
+                        let pk_bytes = &tx.signature[..32];
+                        let sig_bytes = &tx.signature[32..];
+                        if !verify_tx_signature(&payload, sig_bytes, pk_bytes) {
                             // Signature present but invalid — reject block
                             warn!(
                                 "[InboundBlockHandler] Block {} tx {}→{} has invalid signature — discarding block",
@@ -555,7 +598,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     // Chain link validation against our tip
                     let already_have = {
                         let chain = inbound_blockchain.read().unwrap();
-                        chain.latest_block()
+                        chain
+                            .latest_block()
                             .map(|tip| tip.index >= block.index)
                             .unwrap_or(false)
                     };
@@ -608,18 +652,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_pat_registry(Arc::clone(&pat_registry));
 
     // Share atomic counters with the relay task (blocks/txs/height)
-    let rpc_blocks  = Arc::clone(&rpc_state.blocks_produced);
-    let rpc_txs     = Arc::clone(&rpc_state.txs_processed);
-    let rpc_height  = Arc::clone(&rpc_state.chain_height);
-    let rpc_peers   = Arc::clone(&rpc_state.peer_count);
+    let rpc_blocks = Arc::clone(&rpc_state.blocks_produced);
+    let rpc_txs = Arc::clone(&rpc_state.txs_processed);
+    let rpc_height = Arc::clone(&rpc_state.chain_height);
+    let rpc_peers = Arc::clone(&rpc_state.peer_count);
 
     // Seed peer counter from current P2P state
-    rpc_peers.store(
-        p2p_node.peer_count(),
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    rpc_peers.store(p2p_node.peer_count(), std::sync::atomic::Ordering::Relaxed);
 
-    let routes     = rpc_routes_with_state(rpc_state);
+    let routes = rpc_routes_with_state(rpc_state);
     let rpc_handle = tokio::spawn(async move {
         warp::serve(routes).run(([0, 0, 0, 0], 8545)).await;
     });
@@ -640,7 +681,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("══ BLEEP Connect ════════════════════════════════════════════════════");
     info!("   L4 Intents:   http://0.0.0.0:8545/rpc/connect/intents/pending");
     info!("   L3 ZK Bridge: http://0.0.0.0:8545/rpc/layer3/intents  ");
-    info!("   Sepolia:      relay contract at {}", bleep_interop::SEPOLIA_BLEEP_FULFILL_ADDR);
+    info!(
+        "   Sepolia:      relay contract at {}",
+        bleep_interop::SEPOLIA_BLEEP_FULFILL_ADDR
+    );
     info!("══ Governance (live) ════════════════════════════════════════════════");
     info!("   Proposals:    http://0.0.0.0:8545/rpc/governance/proposals  ");
     info!("   Propose:      POST http://0.0.0.0:8545/rpc/governance/propose  ");
@@ -654,7 +698,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("   Explorer:     http://0.0.0.0:8545/explorer");
     info!("   Faucet:       POST http://0.0.0.0:8545/faucet/{{address}}");
     info!("   Metrics:      http://0.0.0.0:8545/metrics");
-    info!("   P2P:          {} connected peers", p2p_node.healthy_peer_count());
+    info!(
+        "   P2P:          {} connected peers",
+        p2p_node.healthy_peer_count()
+    );
     info!("   Press Ctrl-C to stop gracefully.");
     info!("═══════════════════════════════════════════════════════════════════");
 
@@ -671,12 +718,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Persist state
     {
         let mut s = state.lock();
-        s.create_snapshot().unwrap_or_else(|e| warn!("State snapshot: {}", e));
-        info!("  ✅ State flushed to RocksDB (height={}).", s.block_height());
+        s.create_snapshot()
+            .unwrap_or_else(|e| warn!("State snapshot: {}", e));
+        info!(
+            "  ✅ State flushed to RocksDB (height={}).",
+            s.block_height()
+        );
     }
 
     // Persist governance
-    governance.persist().unwrap_or_else(|e| warn!("Governance persist: {}", e));
+    governance
+        .persist()
+        .unwrap_or_else(|e| warn!("Governance persist: {}", e));
 
     // Abort background tasks
     producer_handle.abort();

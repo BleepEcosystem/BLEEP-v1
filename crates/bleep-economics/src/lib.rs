@@ -1,3 +1,8 @@
+pub mod distribution;
+pub mod fee_market;
+pub mod game_theory;
+pub mod oracle_bridge;
+pub mod runtime;
 /// BLEEP PHASE 5: ECONOMIC NERVOUS SYSTEM
 ///
 /// This crate implements the complete economic layer for BLEEP, ensuring:
@@ -9,52 +14,57 @@
 /// - The protocol survives rational adversaries
 ///
 /// After Phase 5, BLEEP survives not just bugs — but greed.
-
 pub mod tokenomics;
-pub mod distribution;
-pub mod fee_market;
 pub mod validator_incentives;
-pub mod oracle_bridge;
-pub mod game_theory;
-pub mod runtime;
 
 // Re-export key types for easy access
 pub use tokenomics::{
-    CanonicalTokenomicsEngine, EmissionSchedule, BurnConfig, SupplyState,
-    EmissionType, BurnType, TokenomicsError,
+    BurnConfig, BurnType, CanonicalTokenomicsEngine, EmissionSchedule, EmissionType, SupplyState,
+    TokenomicsError,
 };
 
 pub use distribution::{
-    AllocationBucket, VestingPolicy, ValidatorEmissionSchedule, LinearVestingSchedule,
-    GenesisAllocation, FeeDistribution, DistributionSnapshot, BucketSnapshot,
-    SupplyDynamics, DistributionError,
-    // Distribution constants
-    MAX_SUPPLY_MICRO, ALLOCATION_TOTAL,
-    ALLOC_VALIDATOR_REWARDS, ALLOC_ECOSYSTEM_FUND, ALLOC_COMMUNITY_INCENTIVES,
-    ALLOC_FOUNDATION_TREASURY, ALLOC_CORE_CONTRIBUTORS, ALLOC_STRATEGIC_RESERVE,
+    AllocationBucket,
+    BucketSnapshot,
+    DistributionError,
+    DistributionSnapshot,
+    FeeDistribution,
+    GenesisAllocation,
+    LinearVestingSchedule,
+    SupplyDynamics,
+    ValidatorEmissionSchedule,
+    VestingPolicy,
+    ALLOCATION_TOTAL,
+    ALLOC_COMMUNITY_INCENTIVES,
+    ALLOC_CORE_CONTRIBUTORS,
+    ALLOC_ECOSYSTEM_FUND,
+    ALLOC_FOUNDATION_TREASURY,
+    ALLOC_STRATEGIC_RESERVE,
+    ALLOC_VALIDATOR_REWARDS,
+    FEE_BURN_BPS,
+    FEE_TREASURY_BPS,
+    FEE_VALIDATOR_REWARD_BPS,
     INITIAL_CIRCULATING_SUPPLY,
-    FEE_BURN_BPS, FEE_VALIDATOR_REWARD_BPS, FEE_TREASURY_BPS,
+    // Distribution constants
+    MAX_SUPPLY_MICRO,
     VALIDATOR_EMISSION_YEAR,
 };
 
 pub use fee_market::{
-    FeeMarket, BaseFeeParams, ShardCongestion, TransactionType, ResourceUsage,
-    FeeMarketError,
+    BaseFeeParams, FeeMarket, FeeMarketError, ResourceUsage, ShardCongestion, TransactionType,
 };
 
 pub use validator_incentives::{
-    ValidatorIncentivesEngine, ValidatorAccount, RewardRecord, SlashingEvidence,
-    SlashingViolationType, ValidatorStatus, RewardType, ValidatorError,
+    RewardRecord, RewardType, SlashingEvidence, SlashingViolationType, ValidatorAccount,
+    ValidatorError, ValidatorIncentivesEngine, ValidatorStatus,
 };
 
 pub use oracle_bridge::{
-    OracleBridgeEngine, PriceUpdate, AggregatedPrice, OracleOperator,
-    BridgeConfig, BridgeTransaction, OracleError, OracleSource,
+    AggregatedPrice, BridgeConfig, BridgeTransaction, OracleBridgeEngine, OracleError,
+    OracleOperator, OracleSource, PriceUpdate,
 };
 
-pub use game_theory::{
-    SafetyVerifier, SafetyAnalysis, AttackType, SafetyError,
-};
+pub use game_theory::{AttackType, SafetyAnalysis, SafetyError, SafetyVerifier};
 
 /// Economic system integrator (combines all modules)
 pub mod integration {
@@ -91,12 +101,16 @@ pub mod integration {
             self.tokenomics.supply_state.verify_hash()?;
 
             // Verify no negative balances
-            if self.tokenomics.supply_state.total_burned > self.tokenomics.supply_state.total_minted {
+            if self.tokenomics.supply_state.total_burned > self.tokenomics.supply_state.total_minted
+            {
                 return Err(EconomicError::SupplyInvariantViolation);
             }
 
             // Verify circulating supply is correct
-            let expected_circulation = self.tokenomics.supply_state.total_minted
+            let expected_circulation = self
+                .tokenomics
+                .supply_state
+                .total_minted
                 .saturating_sub(self.tokenomics.supply_state.total_burned);
             if self.tokenomics.supply_state.circulating_supply != expected_circulation {
                 return Err(EconomicError::CirculationMismatch);
@@ -144,6 +158,4 @@ mod tests {
     }
 }
 
-pub use runtime::{
-    BleepEconomicsRuntime, EpochInput, EpochOutput, RuntimeError,
-};
+pub use runtime::{BleepEconomicsRuntime, EpochInput, EpochOutput, RuntimeError};

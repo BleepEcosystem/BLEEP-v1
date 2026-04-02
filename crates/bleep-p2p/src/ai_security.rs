@@ -20,7 +20,7 @@ use std::net::{IpAddr, SocketAddr};
 use dashmap::DashMap;
 use tracing::warn;
 
-use crate::types::{NodeId, PeerStatus, unix_now};
+use crate::types::{unix_now, NodeId, PeerStatus};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -110,9 +110,15 @@ impl InteractionRecord {
         if mean < 1.0 {
             return 0.0;
         }
-        let variance = self.latency_samples.iter()
-            .map(|&x| { let d = x as f64 - mean; d * d })
-            .sum::<f64>() / n;
+        let variance = self
+            .latency_samples
+            .iter()
+            .map(|&x| {
+                let d = x as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n;
         variance.sqrt() / mean
     }
 }
@@ -132,7 +138,10 @@ impl PeerScoring {
         }
     }
 
-    fn record_mut(&self, id: &NodeId) -> dashmap::mapref::one::RefMut<'_, NodeId, InteractionRecord> {
+    fn record_mut(
+        &self,
+        id: &NodeId,
+    ) -> dashmap::mapref::one::RefMut<'_, NodeId, InteractionRecord> {
         self.records
             .entry(id.clone())
             .or_insert_with(|| InteractionRecord::new(unix_now()))
@@ -186,7 +195,8 @@ impl PeerScoring {
         //    Here we give full marks unless overridden.
         let diversity_score = 10.0;
 
-        let total = success_component + rate_score + longevity_score + latency_score + diversity_score;
+        let total =
+            success_component + rate_score + longevity_score + latency_score + diversity_score;
         total.clamp(0.0, 100.0)
     }
 
@@ -349,7 +359,9 @@ mod tests {
     fn test_score_increases_with_successes() {
         let scoring = PeerScoring::new();
         let id = nid(2);
-        scoring.records.insert(id.clone(), InteractionRecord::new(unix_now()));
+        scoring
+            .records
+            .insert(id.clone(), InteractionRecord::new(unix_now()));
         for _ in 0..10 {
             scoring.record_success(&id);
         }
@@ -371,7 +383,10 @@ mod tests {
         scoring.records.insert(id.clone(), rec);
         let score = scoring.calculate_score(&id);
         // Rate component should be 0
-        assert!(score < 80.0, "Score {score} should be penalised for flooding");
+        assert!(
+            score < 80.0,
+            "Score {score} should be penalised for flooding"
+        );
     }
 
     #[test]
@@ -392,8 +407,7 @@ mod tests {
         let addr_base = "192.168.1.1:9000";
         for i in 0..=MAX_PEERS_PER_SUBNET {
             let id = nid(i as u8);
-            let addr: std::net::SocketAddr =
-                format!("192.168.1.{}:9000", i + 1).parse().unwrap();
+            let addr: std::net::SocketAddr = format!("192.168.1.{}:9000", i + 1).parse().unwrap();
             sybil.register(&id, &addr);
         }
         // The (MAX_PEERS_PER_SUBNET+1)-th peer should be flagged

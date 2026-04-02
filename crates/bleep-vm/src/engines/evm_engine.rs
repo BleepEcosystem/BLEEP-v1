@@ -13,10 +13,7 @@
 //! the router normalises them to BLEEP gas before charging.
 
 use crate::error::{VmError, VmResult};
-use crate::execution::{
-    execution_context::ExecutionContext,
-    state_transition::StateDiff,
-};
+use crate::execution::{execution_context::ExecutionContext, state_transition::StateDiff};
 use crate::intent::TargetVm;
 use crate::router::vm_router::{Engine, EngineResult};
 use crate::types::{ExecutionLog, LogLevel};
@@ -24,17 +21,16 @@ use crate::types::{ExecutionLog, LogLevel};
 use revm::{
     db::{CacheDB, EmptyDB},
     primitives::{
-        AccountInfo, Address, Bytecode, Bytes, ExecutionResult as RevmResult,
-        Output, TransactTo, TxEnv as RevmTxEnv, U256, B256,
-        SpecId, BlockEnv as RevmBlockEnv,
+        AccountInfo, Address, BlockEnv as RevmBlockEnv, Bytecode, Bytes,
+        ExecutionResult as RevmResult, Output, SpecId, TransactTo, TxEnv as RevmTxEnv, B256, U256,
     },
     EVM,
 };
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use parking_lot::RwLock;
 use tracing::{debug, instrument};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,14 +45,14 @@ type ContractStore = Arc<RwLock<HashMap<[u8; 20], Vec<u8>>>>;
 
 pub struct EvmEngine {
     contracts: ContractStore,
-    spec_id:   SpecId,
+    spec_id: SpecId,
 }
 
 impl EvmEngine {
     pub fn new() -> Self {
         EvmEngine {
             contracts: Arc::new(RwLock::new(HashMap::new())),
-            spec_id:   SpecId::SHANGHAI,
+            spec_id: SpecId::SHANGHAI,
         }
     }
 
@@ -105,42 +101,42 @@ impl EvmEngine {
 
     fn build_evm(
         &self,
-        ctx:      &ExecutionContext,
-        db:       CacheDB<EmptyDB>,
-        to:       TransactTo,
+        ctx: &ExecutionContext,
+        db: CacheDB<EmptyDB>,
+        to: TransactTo,
         calldata: Bytes,
-        value:    U256,
-        gas:      u64,
+        value: U256,
+        gas: u64,
     ) -> EVM<CacheDB<EmptyDB>> {
         let mut evm = EVM::new();
         evm.database(db);
-        evm.env.cfg.spec_id  = self.spec_id;
+        evm.env.cfg.spec_id = self.spec_id;
         evm.env.cfg.chain_id = ctx.block.chain_id;
         evm.env.cfg.limit_contract_code_size = Some(24_576); // EIP-170
 
         evm.env.block = RevmBlockEnv {
-            number:     U256::from(ctx.block.number),
-            coinbase:   Address::from(Self::to_evm_address(&ctx.block.coinbase).into_array()),
-            timestamp:  U256::from(ctx.block.timestamp),
-            gas_limit:  U256::from(ctx.block.gas_limit),
-            basefee:    U256::from(ctx.block.base_fee),
+            number: U256::from(ctx.block.number),
+            coinbase: Address::from(Self::to_evm_address(&ctx.block.coinbase).into_array()),
+            timestamp: U256::from(ctx.block.timestamp),
+            gas_limit: U256::from(ctx.block.gas_limit),
+            basefee: U256::from(ctx.block.base_fee),
             difficulty: U256::ZERO,
             prevrandao: Some(B256::ZERO),
             blob_excess_gas_and_price: None,
         };
 
         evm.env.tx = RevmTxEnv {
-            caller:           Self::to_evm_address(&ctx.tx.caller),
-            transact_to:      to,
-            data:             calldata,
+            caller: Self::to_evm_address(&ctx.tx.caller),
+            transact_to: to,
+            data: calldata,
             value,
-            gas_limit:        gas,
-            gas_price:        U256::from(ctx.tx.gas_price),
+            gas_limit: gas,
+            gas_price: U256::from(ctx.tx.gas_price),
             gas_priority_fee: None,
-            chain_id:         Some(ctx.block.chain_id),
-            nonce:            Some(ctx.tx.nonce),
-            access_list:      Vec::new(),
-            blob_hashes:      Vec::new(),
+            chain_id: Some(ctx.block.chain_id),
+            nonce: Some(ctx.tx.nonce),
+            access_list: Vec::new(),
+            blob_hashes: Vec::new(),
             max_fee_per_blob_gas: None,
         };
         evm
@@ -150,74 +146,84 @@ impl EvmEngine {
         use sha3::{Digest, Keccak256};
         let contracts = self.contracts.read();
         for (addr_bytes, bytecode) in contracts.iter() {
-            let addr      = Address::from(*addr_bytes);
+            let addr = Address::from(*addr_bytes);
             let code_hash = B256::from_slice(&Keccak256::digest(bytecode));
-            let bytecode  = Bytecode::new_raw(Bytes::from(bytecode.clone()));
-            db.insert_account_info(addr, AccountInfo {
-                balance:   U256::ZERO,
-                nonce:     0,
-                code_hash,
-                code:      Some(bytecode),
-            });
+            let bytecode = Bytecode::new_raw(Bytes::from(bytecode.clone()));
+            db.insert_account_info(
+                addr,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash,
+                    code: Some(bytecode),
+                },
+            );
         }
     }
 
     fn convert_result(
         revm_result: RevmResult,
-        state_diff:  StateDiff,
-        start:       Instant,
+        state_diff: StateDiff,
+        start: Instant,
     ) -> EngineResult {
         match revm_result {
-            RevmResult::Success { reason: _, gas_used, gas_refunded: _, logs, output } => {
+            RevmResult::Success {
+                reason: _,
+                gas_used,
+                gas_refunded: _,
+                logs,
+                output,
+            } => {
                 let output_bytes = match output {
-                    Output::Call(b)      => b.to_vec(),
+                    Output::Call(b) => b.to_vec(),
                     Output::Create(b, _) => b.to_vec(),
                 };
-                let engine_logs: Vec<ExecutionLog> = logs.iter().map(|l| ExecutionLog {
-                    level:   LogLevel::Info,
-                    message: format!("LOG{} addr={:x}", l.topics.len(), l.address),
-                    data:    l.data.clone().to_vec(),
-                }).collect();
+                let engine_logs: Vec<ExecutionLog> = logs
+                    .iter()
+                    .map(|l| ExecutionLog {
+                        level: LogLevel::Info,
+                        message: format!("LOG{} addr={:x}", l.topics.len(), l.address),
+                        data: l.data.clone().to_vec(),
+                    })
+                    .collect();
                 EngineResult {
-                    success:       true,
-                    output:        output_bytes,
+                    success: true,
+                    output: output_bytes,
                     gas_used,
                     state_diff,
-                    logs:          engine_logs,
+                    logs: engine_logs,
                     revert_reason: None,
-                    exec_time:     start.elapsed(),
+                    exec_time: start.elapsed(),
                 }
             }
             RevmResult::Revert { gas_used, output } => {
                 let reason = decode_revert_reason(&output);
                 EngineResult {
-                    success:       false,
-                    output:        output.to_vec(),
+                    success: false,
+                    output: output.to_vec(),
                     gas_used,
-                    state_diff:    StateDiff::empty(),
-                    logs:          Vec::new(),
+                    state_diff: StateDiff::empty(),
+                    logs: Vec::new(),
                     revert_reason: Some(reason),
-                    exec_time:     start.elapsed(),
+                    exec_time: start.elapsed(),
                 }
             }
-            RevmResult::Halt { reason, gas_used } => {
-                EngineResult {
-                    success:       false,
-                    output:        Vec::new(),
-                    gas_used,
-                    state_diff:    StateDiff::empty(),
-                    logs:          Vec::new(),
-                    revert_reason: Some(format!("HALT: {reason:?}")),
-                    exec_time:     start.elapsed(),
-                }
-            }
+            RevmResult::Halt { reason, gas_used } => EngineResult {
+                success: false,
+                output: Vec::new(),
+                gas_used,
+                state_diff: StateDiff::empty(),
+                logs: Vec::new(),
+                revert_reason: Some(format!("HALT: {reason:?}")),
+                exec_time: start.elapsed(),
+            },
         }
     }
 
     fn extract_state_diff(
         _contract_addr: Address,
-        evm_result:     &RevmResult,
-        calldata:       &[u8],
+        evm_result: &RevmResult,
+        calldata: &[u8],
     ) -> StateDiff {
         let mut diff = StateDiff::empty();
 
@@ -228,10 +234,7 @@ impl EvmEngine {
                     b[12..].copy_from_slice(log.address.as_slice());
                     b
                 };
-                let topics: Vec<[u8; 32]> = log.topics
-                    .iter()
-                    .map(|t| **t)
-                    .collect();
+                let topics: Vec<[u8; 32]> = log.topics.iter().map(|t| **t).collect();
                 diff.emit_event(contract_bytes, topics, log.data.clone().to_vec());
             }
 
@@ -250,12 +253,16 @@ impl EvmEngine {
 }
 
 impl Default for EvmEngine {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait::async_trait]
 impl Engine for EvmEngine {
-    fn name(&self) -> &'static str { "evm-revm" }
+    fn name(&self) -> &'static str {
+        "evm-revm"
+    }
 
     fn supports(&self, vm: &TargetVm) -> bool {
         matches!(vm, TargetVm::Evm)
@@ -264,9 +271,9 @@ impl Engine for EvmEngine {
     #[instrument(skip(self, ctx, bytecode, calldata), fields(engine = "evm-revm"))]
     async fn execute(
         &self,
-        ctx:       &ExecutionContext,
-        bytecode:  &[u8],
-        calldata:  &[u8],
+        ctx: &ExecutionContext,
+        bytecode: &[u8],
+        calldata: &[u8],
         gas_limit: u64,
     ) -> VmResult<EngineResult> {
         let start = Instant::now();
@@ -280,15 +287,18 @@ impl Engine for EvmEngine {
         if !bytecode.is_empty() {
             use sha3::{Digest, Keccak256};
             let code_hash = B256::from_slice(&Keccak256::digest(bytecode));
-            db.insert_account_info(contract_addr, AccountInfo {
-                balance:   U256::from(ctx.tx.value),
-                nonce:     0,
-                code_hash,
-                code:      Some(Bytecode::new_raw(Bytes::from(bytecode.to_vec()))),
-            });
+            db.insert_account_info(
+                contract_addr,
+                AccountInfo {
+                    balance: U256::from(ctx.tx.value),
+                    nonce: 0,
+                    code_hash,
+                    code: Some(Bytecode::new_raw(Bytes::from(bytecode.to_vec()))),
+                },
+            );
         }
 
-        let value         = U256::from(ctx.tx.value);
+        let value = U256::from(ctx.tx.value);
         let calldata_bytes = Bytes::from(calldata.to_vec());
 
         let mut evm = self.build_evm(ctx, db, to, calldata_bytes, value, gas_limit);
@@ -297,13 +307,13 @@ impl Engine for EvmEngine {
             .transact_commit()
             .map_err(|e| VmError::ExecutionFailed(format!("revm error: {e:?}")))?;
 
-        let diff   = Self::extract_state_diff(contract_addr, &revm_result, calldata);
+        let diff = Self::extract_state_diff(contract_addr, &revm_result, calldata);
         let result = Self::convert_result(revm_result, diff, start);
 
         debug!(
-            success  = result.success,
+            success = result.success,
             gas_used = result.gas_used,
-            exec_us  = result.exec_time.as_micros(),
+            exec_us = result.exec_time.as_micros(),
             "EVM execution complete"
         );
 
@@ -313,11 +323,11 @@ impl Engine for EvmEngine {
     #[instrument(skip(self, ctx, bytecode, init_args), fields(engine = "evm-revm"))]
     async fn deploy(
         &self,
-        ctx:       &ExecutionContext,
-        bytecode:  &[u8],
+        ctx: &ExecutionContext,
+        bytecode: &[u8],
         init_args: &[u8],
         gas_limit: u64,
-        _salt:     Option<[u8; 32]>,
+        _salt: Option<[u8; 32]>,
     ) -> VmResult<EngineResult> {
         let start = Instant::now();
 
@@ -329,16 +339,19 @@ impl Engine for EvmEngine {
 
         let caller_addr = Self::to_evm_address(&ctx.tx.caller);
 
-        db.insert_account_info(caller_addr, AccountInfo {
-            balance:   U256::from(1_000_000_000_000_000_000u128), // 1 ETH
-            nonce:     ctx.tx.nonce,
-            code_hash: B256::ZERO,
-            code:      None,
-        });
+        db.insert_account_info(
+            caller_addr,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u128), // 1 ETH
+                nonce: ctx.tx.nonce,
+                code_hash: B256::ZERO,
+                code: None,
+            },
+        );
 
-        let to         = TransactTo::Create(revm::primitives::CreateScheme::Create);
+        let to = TransactTo::Create(revm::primitives::CreateScheme::Create);
         let init_bytes = Bytes::from(init_code.clone());
-        let value      = U256::from(ctx.tx.value);
+        let value = U256::from(ctx.tx.value);
 
         let mut evm = self.build_evm(ctx, db, to, init_bytes, value, gas_limit);
 
@@ -346,14 +359,18 @@ impl Engine for EvmEngine {
             .transact_commit()
             .map_err(|e| VmError::ExecutionFailed(format!("revm deploy error: {e:?}")))?;
 
-        if let RevmResult::Success { output: Output::Create(_, Some(addr)), .. } = &revm_result {
+        if let RevmResult::Success {
+            output: Output::Create(_, Some(addr)),
+            ..
+        } = &revm_result
+        {
             let addr_bytes: [u8; 20] = addr.into_array();
             let mut contracts = self.contracts.write();
             contracts.insert(addr_bytes, bytecode.to_vec());
             debug!(address = ?addr, "EVM contract deployed");
         }
 
-        let diff   = Self::extract_state_diff(caller_addr, &revm_result, &init_code);
+        let diff = Self::extract_state_diff(caller_addr, &revm_result, &init_code);
         let result = Self::convert_result(revm_result, diff, start);
         Ok(result)
     }
@@ -410,10 +427,14 @@ mod tests {
     async fn test_simple_push_return() {
         // PUSH1 0x42  PUSH1 0x00  MSTORE  PUSH1 0x20  PUSH1 0x00  RETURN
         let bytecode = hex::decode("604260005260206000f3").unwrap();
-        let engine   = EvmEngine::new();
-        let ctx      = test_ctx(100_000);
-        let result   = engine.execute(&ctx, &bytecode, &[], 100_000).await.unwrap();
-        assert!(result.success, "Expected success: {:?}", result.revert_reason);
+        let engine = EvmEngine::new();
+        let ctx = test_ctx(100_000);
+        let result = engine.execute(&ctx, &bytecode, &[], 100_000).await.unwrap();
+        assert!(
+            result.success,
+            "Expected success: {:?}",
+            result.revert_reason
+        );
     }
 
     #[tokio::test]
@@ -425,9 +446,9 @@ mod tests {
     async fn test_out_of_gas_halts() {
         // PUSH1 0x00 SLOAD — expensive op with tiny gas budget
         let bytecode = hex::decode("600054").unwrap();
-        let engine   = EvmEngine::new();
-        let ctx      = test_ctx(100);
-        let result   = engine.execute(&ctx, &bytecode, &[], 100).await.unwrap();
+        let engine = EvmEngine::new();
+        let ctx = test_ctx(100);
+        let result = engine.execute(&ctx, &bytecode, &[], 100).await.unwrap();
         assert!(!result.success);
     }
 
@@ -440,8 +461,8 @@ mod tests {
     #[test]
     fn test_create_address_deterministic() {
         let sender = Address::from([0x01u8; 20]);
-        let addr1  = EvmEngine::create_address(sender, 0);
-        let addr2  = EvmEngine::create_address(sender, 0);
+        let addr1 = EvmEngine::create_address(sender, 0);
+        let addr2 = EvmEngine::create_address(sender, 0);
         assert_eq!(addr1, addr2);
         let addr3 = EvmEngine::create_address(sender, 1);
         assert_ne!(addr1, addr3);
@@ -450,9 +471,9 @@ mod tests {
     #[test]
     fn test_create2_address_uses_salt() {
         let sender = Address::from([0x01u8; 20]);
-        let salt1  = [0x00u8; 32];
-        let salt2  = [0x01u8; 32];
-        let code   = b"\x60\x00";
+        let salt1 = [0x00u8; 32];
+        let salt2 = [0x01u8; 32];
+        let code = b"\x60\x00";
         let a1 = EvmEngine::create2_address(sender, salt1, code);
         let a2 = EvmEngine::create2_address(sender, salt2, code);
         assert_ne!(a1, a2);

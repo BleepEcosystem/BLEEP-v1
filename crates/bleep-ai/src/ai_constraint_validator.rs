@@ -22,11 +22,9 @@
 /// - Any constraint failure means proposal is rejected
 /// - No silent degradation or defaults
 /// - All failures are explicitly logged
-
 use crate::ai_proposal_types::{
-    AIProposal, ConsensusModeProposal,
-    ShardRebalanceProposal, ShardRollbackProposal, TokenomicsProposal,
-    ValidatorSecurityProposal,
+    AIProposal, ConsensusModeProposal, ShardRebalanceProposal, ShardRollbackProposal,
+    TokenomicsProposal, ValidatorSecurityProposal,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -50,10 +48,14 @@ impl fmt::Display for ConstraintError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SafetyMarginViolation(msg) => write!(f, "Safety margin violated: {}", msg),
-            Self::ProtocolInvariantViolation(msg) => write!(f, "Protocol invariant violated: {}", msg),
+            Self::ProtocolInvariantViolation(msg) => {
+                write!(f, "Protocol invariant violated: {}", msg)
+            }
             Self::PrivilegeEscalation(msg) => write!(f, "Privilege escalation: {}", msg),
             Self::RiskBoundsExceeded(msg) => write!(f, "Risk bounds exceeded: {}", msg),
-            Self::GovernanceOverrideRequired(msg) => write!(f, "Governance override required: {}", msg),
+            Self::GovernanceOverrideRequired(msg) => {
+                write!(f, "Governance override required: {}", msg)
+            }
             Self::ByzantineTolerance(msg) => write!(f, "Byzantine tolerance: {}", msg),
             Self::CooldownViolation(msg) => write!(f, "Cooldown violation: {}", msg),
             Self::RateLimitExceeded(msg) => write!(f, "Rate limit exceeded: {}", msg),
@@ -107,7 +109,7 @@ impl ProtocolInvariants {
             min_validators: 20,
             min_participation_rate: 0.67,
             max_slashing_per_epoch: 0.05, // 5%
-            max_fee_change_rate: 1.2, // 20% increase max
+            max_fee_change_rate: 1.2,     // 20% increase max
             max_reward_change_rate: 1.2,
             min_finality_latency_blocks: 2,
             max_finality_latency_blocks: 100,
@@ -399,7 +401,10 @@ impl ConstraintValidator {
         Ok(())
     }
 
-    fn validate_mode_switch_risk(&mut self, proposal: &ConsensusModeProposal) -> ConstraintResult<()> {
+    fn validate_mode_switch_risk(
+        &mut self,
+        proposal: &ConsensusModeProposal,
+    ) -> ConstraintResult<()> {
         if proposal.risk_score > 75 {
             return Err(ConstraintError::RiskBoundsExceeded(format!(
                 "Risk score too high: {}",
@@ -413,7 +418,10 @@ impl ConstraintValidator {
 
     // ==================== ROLLBACK CONSTRAINTS ====================
 
-    fn validate_rollback_distance(&mut self, proposal: &ShardRollbackProposal) -> ConstraintResult<()> {
+    fn validate_rollback_distance(
+        &mut self,
+        proposal: &ShardRollbackProposal,
+    ) -> ConstraintResult<()> {
         // Distance check would require block height context
         // For now, just validate the proposal is reasonable
         if proposal.reason.is_empty() {
@@ -476,7 +484,10 @@ impl ConstraintValidator {
         Ok(())
     }
 
-    fn validate_rebalance_not_removal(&mut self, proposal: &ShardRebalanceProposal) -> ConstraintResult<()> {
+    fn validate_rebalance_not_removal(
+        &mut self,
+        proposal: &ShardRebalanceProposal,
+    ) -> ConstraintResult<()> {
         // Rebalance should move validators, not remove them all
         for count in proposal.new_distribution.values() {
             if *count == 0 {
@@ -527,7 +538,10 @@ impl ConstraintValidator {
 
     // ==================== TOKENOMICS CONSTRAINTS ====================
 
-    fn validate_tokenomics_fee_change(&mut self, proposal: &TokenomicsProposal) -> ConstraintResult<()> {
+    fn validate_tokenomics_fee_change(
+        &mut self,
+        proposal: &TokenomicsProposal,
+    ) -> ConstraintResult<()> {
         if proposal.parameter == "base_fee" {
             let ratio = proposal.new_value as f32 / proposal.current_value as f32;
             if ratio > self.invariants.max_fee_change_rate

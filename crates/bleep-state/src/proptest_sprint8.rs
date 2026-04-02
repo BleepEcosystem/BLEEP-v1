@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod proptest_merkle {
-    use crate::state_merkle::{MerkleTrie, MerkleProof};
+    use crate::state_merkle::{MerkleProof, MerkleTrie};
     use proptest::prelude::*;
 
     // Arbitrary key/value pair strategy
@@ -136,8 +136,7 @@ mod proptest_state {
     use proptest::prelude::*;
 
     fn address() -> impl Strategy<Value = String> {
-        prop::collection::vec(any::<u8>(), 20)
-            .prop_map(|b| format!("0x{}", hex::encode(b)))
+        prop::collection::vec(any::<u8>(), 20).prop_map(|b| format!("0x{}", hex::encode(b)))
     }
 
     proptest! {

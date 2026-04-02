@@ -13,11 +13,11 @@
 
 #[cfg(test)]
 mod phase2_integration_tests {
-    use bleep_state::snapshot_engine::*;
-    use bleep_state::rollback_engine::*;
     use bleep_state::advanced_fault_detector::*;
+    use bleep_state::rollback_engine::*;
     use bleep_state::self_healing_orchestrator::*;
     use bleep_state::shard_registry::*;
+    use bleep_state::snapshot_engine::*;
 
     /// Test 1: State corruption detection triggers autonomous recovery
     #[test]
@@ -38,13 +38,7 @@ mod phase2_integration_tests {
 
         let snapshot_id = orchestrator
             .snapshot_engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                100,
-                root,
-                "merkle_10".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 100, root, "merkle_10".to_string())
             .unwrap();
 
         orchestrator
@@ -73,7 +67,9 @@ mod phase2_integration_tests {
         };
 
         // Trigger healing
-        let op = orchestrator.on_fault_detected(ShardId(0), fault_evidence).unwrap();
+        let op = orchestrator
+            .on_fault_detected(ShardId(0), fault_evidence)
+            .unwrap();
 
         assert_eq!(op.shard_id, ShardId(0));
         assert_eq!(op.fault_evidence.severity, FaultSeverity::Critical);
@@ -107,13 +103,7 @@ mod phase2_integration_tests {
             .unwrap();
 
         let id_b = engine_b
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                100,
-                root,
-                "merkle".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 100, root, "merkle".to_string())
             .unwrap();
 
         // Both must derive identical snapshot ID
@@ -182,13 +172,7 @@ mod phase2_integration_tests {
 
         let snapshot_id = engine
             .snapshot_engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                100,
-                root,
-                "merkle".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 100, root, "merkle".to_string())
             .unwrap();
 
         engine
@@ -261,7 +245,9 @@ mod phase2_integration_tests {
             investigation_status: InvestigationStatus::Confirmed,
         };
 
-        let op = orchestrator.on_fault_detected(ShardId(0), fault_evidence).unwrap();
+        let op = orchestrator
+            .on_fault_detected(ShardId(0), fault_evidence)
+            .unwrap();
 
         assert_eq!(op.shard_id, ShardId(0));
         assert!(op.requires_consensus);
@@ -305,13 +291,7 @@ mod phase2_integration_tests {
         engine.finalize_snapshot(id2, vec![]).unwrap();
 
         let id3 = engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(30),
-                300,
-                root,
-                "merkle3".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(30), 300, root, "merkle3".to_string())
             .unwrap();
 
         engine.finalize_snapshot(id3, vec![]).unwrap();
@@ -351,7 +331,9 @@ mod phase2_integration_tests {
             investigation_status: InvestigationStatus::Confirmed,
         };
 
-        let op = orchestrator.on_fault_detected(ShardId(0), fault_evidence).unwrap();
+        let op = orchestrator
+            .on_fault_detected(ShardId(0), fault_evidence)
+            .unwrap();
 
         // Critical faults REQUIRE consensus
         assert!(op.requires_consensus);
@@ -382,12 +364,8 @@ mod phase2_integration_tests {
         engine.update_height(100);
 
         // Try to rollback to non-existent snapshot
-        let result = engine.initiate_rollback(
-            ShardId(0),
-            SnapshotId(999),
-            "test".to_string(),
-            EpochId(10),
-        );
+        let result =
+            engine.initiate_rollback(ShardId(0), SnapshotId(999), "test".to_string(), EpochId(10));
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
@@ -471,13 +449,7 @@ mod phase2_integration_tests {
 
         let snapshot_id = engine
             .snapshot_engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                100,
-                root,
-                "merkle".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 100, root, "merkle".to_string())
             .unwrap();
 
         engine
@@ -486,16 +458,13 @@ mod phase2_integration_tests {
             .unwrap();
 
         let _rollback = engine
-            .initiate_rollback(
-                ShardId(0),
-                snapshot_id,
-                "test".to_string(),
-                EpochId(20),
-            )
+            .initiate_rollback(ShardId(0), snapshot_id, "test".to_string(), EpochId(20))
             .unwrap();
 
         // Abort transactions
-        engine.abort_in_flight_transactions(ShardId(0), vec![]).unwrap();
+        engine
+            .abort_in_flight_transactions(ShardId(0), vec![])
+            .unwrap();
 
         // Verify supply invariant (shard state < total supply)
         let result = engine.verify_supply_invariants(

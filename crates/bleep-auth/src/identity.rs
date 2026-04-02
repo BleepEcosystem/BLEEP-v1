@@ -22,17 +22,17 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeIdentity {
     /// Deterministic ID: hex(SHA3-256("node" ∥ operator_handle ∥ kyber_pubkey))
-    pub id:                  String,
+    pub id: String,
     /// Human-readable handle, e.g. "node-operator-dubai-1"
-    pub operator_handle:     String,
+    pub operator_handle: String,
     /// Display name shown in explorer / governance UI
-    pub display_name:        String,
+    pub display_name: String,
     /// Kyber1024 public key for post-quantum key exchange (1568 bytes, hex-encoded)
-    pub kyber_pubkey_hex:    String,
-    pub registered_at:       chrono::DateTime<chrono::Utc>,
-    pub active:              bool,
+    pub kyber_pubkey_hex: String,
+    pub registered_at: chrono::DateTime<chrono::Utc>,
+    pub active: bool,
     /// Optional: geographic / organisational metadata
-    pub metadata:            HashMap<String, String>,
+    pub metadata: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,12 +42,12 @@ pub struct NodeIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DappIdentity {
     /// Deterministic ID: hex(SHA3-256("dapp" ∥ developer_handle))
-    pub id:               String,
+    pub id: String,
     pub developer_handle: String,
-    pub display_name:     String,
-    pub registered_at:    chrono::DateTime<chrono::Utc>,
-    pub active:           bool,
-    pub metadata:         HashMap<String, String>,
+    pub display_name: String,
+    pub registered_at: chrono::DateTime<chrono::Utc>,
+    pub active: bool,
+    pub metadata: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -69,8 +69,8 @@ pub enum IdentityKind {
 /// In production: persist to an encrypted database and add an index
 /// on `operator_handle` / `developer_handle` for uniqueness enforcement.
 pub struct IdentityRegistry {
-    nodes: HashMap<String, NodeIdentity>,   // id → identity
-    dapps: HashMap<String, DappIdentity>,   // id → identity
+    nodes: HashMap<String, NodeIdentity>, // id → identity
+    dapps: HashMap<String, DappIdentity>, // id → identity
     /// Reverse index: handle → id (uniqueness guard)
     node_handles: HashMap<String, String>,
     dapp_handles: HashMap<String, String>,
@@ -79,8 +79,8 @@ pub struct IdentityRegistry {
 impl IdentityRegistry {
     pub fn new() -> Self {
         Self {
-            nodes:        HashMap::new(),
-            dapps:        HashMap::new(),
+            nodes: HashMap::new(),
+            dapps: HashMap::new(),
             node_handles: HashMap::new(),
             dapp_handles: HashMap::new(),
         }
@@ -90,8 +90,8 @@ impl IdentityRegistry {
 
     pub fn register_node_operator(
         &mut self,
-        operator_handle:  String,
-        display_name:     String,
+        operator_handle: String,
+        display_name: String,
         kyber_public_key: Vec<u8>,
     ) -> AuthResult<NodeIdentity> {
         // Validate Kyber1024 key length
@@ -140,11 +140,14 @@ impl IdentityRegistry {
     }
 
     pub fn get_node_by_handle(&self, handle: &str) -> Option<&NodeIdentity> {
-        self.node_handles.get(handle).and_then(|id| self.nodes.get(id))
+        self.node_handles
+            .get(handle)
+            .and_then(|id| self.nodes.get(id))
     }
 
     pub fn deactivate_node(&mut self, id: &str) -> AuthResult<()> {
-        self.nodes.get_mut(id)
+        self.nodes
+            .get_mut(id)
             .ok_or_else(|| AuthError::IdentityNotFound(id.to_string()))
             .map(|i| i.active = false)
     }
@@ -154,7 +157,7 @@ impl IdentityRegistry {
     pub fn register_dapp_developer(
         &mut self,
         developer_handle: String,
-        display_name:     String,
+        display_name: String,
     ) -> AuthResult<DappIdentity> {
         if self.dapp_handles.contains_key(&developer_handle) {
             return Err(AuthError::IdentityAlreadyExists(developer_handle));
@@ -186,15 +189,20 @@ impl IdentityRegistry {
     }
 
     pub fn deactivate_dapp(&mut self, id: &str) -> AuthResult<()> {
-        self.dapps.get_mut(id)
+        self.dapps
+            .get_mut(id)
             .ok_or_else(|| AuthError::IdentityNotFound(id.to_string()))
             .map(|i| i.active = false)
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────
 
-    pub fn node_count(&self) -> usize { self.nodes.len() }
-    pub fn dapp_count(&self) -> usize { self.dapps.len() }
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+    pub fn dapp_count(&self) -> usize {
+        self.dapps.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,29 +212,36 @@ impl IdentityRegistry {
 mod tests {
     use super::*;
 
-    fn valid_kyber_key() -> Vec<u8> { vec![0xABu8; 1568] }
+    fn valid_kyber_key() -> Vec<u8> {
+        vec![0xABu8; 1568]
+    }
 
     #[test]
     fn register_node_operator() {
         let mut reg = IdentityRegistry::new();
-        let id = reg.register_node_operator(
-            "node-op-1".into(), "Test Node".into(), valid_kyber_key()
-        ).unwrap();
+        let id = reg
+            .register_node_operator("node-op-1".into(), "Test Node".into(), valid_kyber_key())
+            .unwrap();
         assert!(reg.get_node(&id.id).is_some());
     }
 
     #[test]
     fn duplicate_handle_rejected() {
         let mut reg = IdentityRegistry::new();
-        reg.register_node_operator("handle".into(), "N1".into(), valid_kyber_key()).unwrap();
-        assert!(reg.register_node_operator("handle".into(), "N2".into(), valid_kyber_key()).is_err());
+        reg.register_node_operator("handle".into(), "N1".into(), valid_kyber_key())
+            .unwrap();
+        assert!(reg
+            .register_node_operator("handle".into(), "N2".into(), valid_kyber_key())
+            .is_err());
     }
 
     #[test]
     fn bad_kyber_key_rejected() {
         let mut reg = IdentityRegistry::new();
         let bad_key = vec![0u8; 100]; // wrong length
-        assert!(reg.register_node_operator("h".into(), "N".into(), bad_key).is_err());
+        assert!(reg
+            .register_node_operator("h".into(), "N".into(), bad_key)
+            .is_err());
     }
 
     #[test]
@@ -234,8 +249,14 @@ mod tests {
         let mut r1 = IdentityRegistry::new();
         let mut r2 = IdentityRegistry::new();
         let key = valid_kyber_key();
-        let id1 = r1.register_node_operator("op".into(), "X".into(), key.clone()).unwrap().id;
-        let id2 = r2.register_node_operator("op".into(), "X".into(), key).unwrap().id;
+        let id1 = r1
+            .register_node_operator("op".into(), "X".into(), key.clone())
+            .unwrap()
+            .id;
+        let id2 = r2
+            .register_node_operator("op".into(), "X".into(), key)
+            .unwrap()
+            .id;
         assert_eq!(id1, id2, "IDs must be deterministic");
     }
 }

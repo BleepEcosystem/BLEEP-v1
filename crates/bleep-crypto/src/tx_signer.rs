@@ -17,7 +17,7 @@
 //! 3. On receipt validation: call `TxSigner::verify_tx_signature()`
 
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
-use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _, DetachedSignature as _};
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use sha3::{Digest, Sha3_256};
 
 /// Sign a transaction payload using SPHINCS+-SHAKE-256.

@@ -9,10 +9,10 @@
 // 5. All recovery is deterministic and replayable
 // 6. Epoch boundaries trigger automatic abort for cross-epoch transactions
 
-use crate::cross_shard_transaction::TransactionId;
 use crate::cross_shard_2pc::CoordinatorStateSnapshot;
-use serde::{Serialize, Deserialize};
+use crate::cross_shard_transaction::TransactionId;
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Recovery strategy for failed transactions
@@ -20,10 +20,10 @@ use std::collections::BTreeMap;
 pub enum RecoveryStrategy {
     /// Block height at which coordinator failure was detected
     CoordinatorFailureRecovery { failure_height: u64 },
-    
+
     /// Network partition detected
     PartitionRecovery { partition_height: u64 },
-    
+
     /// Shard crashed during prepare
     ShardCrashRecovery { crash_height: u64 },
 }
@@ -33,13 +33,13 @@ pub enum RecoveryStrategy {
 pub struct TransactionRecovery {
     /// Transaction ID
     pub transaction_id: TransactionId,
-    
+
     /// Recovery strategy
     pub strategy: RecoveryStrategy,
-    
+
     /// Last known coordinator snapshot
     pub last_snapshot: Option<CoordinatorStateSnapshot>,
-    
+
     /// Attempt count (to prevent infinite retries)
     pub attempt_count: u32,
 }
@@ -58,12 +58,12 @@ impl TransactionRecovery {
             attempt_count: 0,
         }
     }
-    
+
     /// Increment attempt count
     pub fn increment_attempt(&mut self) {
         self.attempt_count += 1;
     }
-    
+
     /// Check if recovery should give up
     pub fn should_give_up(&self) -> bool {
         self.attempt_count > 5 // Max 5 recovery attempts
@@ -71,7 +71,7 @@ impl TransactionRecovery {
 }
 
 /// Epoch boundary handler for cross-shard transactions
-/// 
+///
 /// SAFETY: Ensures no cross-shard transaction spans epochs
 pub struct EpochBoundaryHandler {
     /// Transactions to abort at epoch boundary
@@ -85,15 +85,15 @@ impl EpochBoundaryHandler {
             transactions_to_abort: Vec::new(),
         }
     }
-    
+
     /// Check for transactions that exceed timeout epoch
-    /// 
+    ///
     /// SAFETY: All cross-shard transactions must complete within their epoch
     pub fn scan_for_epoch_boundary_aborts(&mut self) -> Vec<TransactionId> {
         // Return and clear the list
         std::mem::take(&mut self.transactions_to_abort)
     }
-    
+
     /// Force abort all transactions exceeding epoch
     pub fn force_abort_at_epoch_boundary(&mut self) -> Result<(), String> {
         self.transactions_to_abort.clear();
@@ -102,7 +102,7 @@ impl EpochBoundaryHandler {
 }
 
 /// Byzantine failure detector
-/// 
+///
 /// SAFETY: Detects and mitigates Byzantine validator behavior
 pub struct ByzantineFailureDetector {
     /// Misbehavior count by shard
@@ -116,22 +116,25 @@ impl ByzantineFailureDetector {
             misbehavior_counts: BTreeMap::new(),
         }
     }
-    
+
     /// Detect if a shard validator behaved byzantinely
-    /// 
+    ///
     /// SAFETY: Produces deterministic evidence of Byzantine behavior
     pub fn detect_prepare_vote_violation() -> Option<String> {
         None
     }
-    
+
     /// Record a misbehavior incident
     pub fn record_misbehavior(&mut self, evidence: String) {
         let count = self.misbehavior_counts.entry(evidence.clone()).or_insert(0);
         *count += 1;
-        
-        warn!("Recorded Byzantine behavior: {} (count: {})", evidence, count);
+
+        warn!(
+            "Recorded Byzantine behavior: {} (count: {})",
+            evidence, count
+        );
     }
-    
+
     /// Get misbehavior evidence
     pub fn get_misbehavior_evidence(&self) -> BTreeMap<String, u32> {
         self.misbehavior_counts.clone()
@@ -139,15 +142,15 @@ impl ByzantineFailureDetector {
 }
 
 /// Recovery orchestrator
-/// 
+///
 /// SAFETY: Deterministically recovers failed transactions
 pub struct RecoveryOrchestrator {
     /// Active recovery operations
     recoveries: BTreeMap<TransactionId, TransactionRecovery>,
-    
+
     /// Failure detector
     failure_detector: ByzantineFailureDetector,
-    
+
     /// Current block height
     current_height: u64,
 }
@@ -161,25 +164,16 @@ impl RecoveryOrchestrator {
             current_height: 0,
         }
     }
-    
+
     /// Register a recovery operation
-    pub fn register_recovery(
-        &mut self,
-        recovery: TransactionRecovery,
-    ) {
+    pub fn register_recovery(&mut self, recovery: TransactionRecovery) {
         let tx_id = recovery.transaction_id;
         self.recoveries.insert(tx_id, recovery);
-        info!(
-            "Registered recovery for transaction {}",
-            tx_id.as_hex()
-        );
+        info!("Registered recovery for transaction {}", tx_id.as_hex());
     }
-    
+
     /// Check if recovery succeeded
-    pub fn check_recovery_status(
-        &self,
-        transaction_id: &TransactionId,
-    ) -> Option<RecoveryStatus> {
+    pub fn check_recovery_status(&self, transaction_id: &TransactionId) -> Option<RecoveryStatus> {
         self.recoveries.get(transaction_id).map(|recovery| {
             if recovery.should_give_up() {
                 RecoveryStatus::GivenUp
@@ -190,17 +184,16 @@ impl RecoveryOrchestrator {
             }
         })
     }
-    
+
     /// Execute recovery procedure
-    pub fn execute_recovery(
-        &mut self,
-        transaction_id: TransactionId,
-    ) -> Result<(), String> {
-        let recovery = self.recoveries.get_mut(&transaction_id)
+    pub fn execute_recovery(&mut self, transaction_id: TransactionId) -> Result<(), String> {
+        let recovery = self
+            .recoveries
+            .get_mut(&transaction_id)
             .ok_or("Recovery not found")?;
-        
+
         recovery.increment_attempt();
-        
+
         // If last snapshot exists, use it to rebuild state
         if let Some(_snapshot) = &recovery.last_snapshot {
             info!(
@@ -209,7 +202,7 @@ impl RecoveryOrchestrator {
                 transaction_id.as_hex()
             );
         }
-        
+
         if recovery.should_give_up() {
             warn!(
                 "Giving up recovery for transaction {} after {} attempts",
@@ -218,15 +211,15 @@ impl RecoveryOrchestrator {
             );
             self.recoveries.remove(&transaction_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Advance to next block
     pub fn advance_block(&mut self, new_height: u64) {
         self.current_height = new_height;
     }
-    
+
     /// Get failure detector evidence
     pub fn get_failure_evidence(&self) -> BTreeMap<String, u32> {
         self.failure_detector.get_misbehavior_evidence()
@@ -238,10 +231,10 @@ impl RecoveryOrchestrator {
 pub enum RecoveryStatus {
     /// Recovery is in progress
     InProgress,
-    
+
     /// Recovery is retrying
     Retrying,
-    
+
     /// Recovery has been given up
     GivenUp,
 }
@@ -257,10 +250,12 @@ mod tests {
         let tx_id = TransactionId::compute(b"test", 0);
         let recovery = TransactionRecovery::new(
             tx_id,
-            RecoveryStrategy::CoordinatorFailureRecovery { failure_height: 100 },
+            RecoveryStrategy::CoordinatorFailureRecovery {
+                failure_height: 100,
+            },
             None,
         );
-        
+
         assert_eq!(recovery.attempt_count, 0);
         assert!(!recovery.should_give_up());
     }
@@ -270,30 +265,34 @@ mod tests {
         let tx_id = TransactionId::compute(b"test", 0);
         let mut recovery = TransactionRecovery::new(
             tx_id,
-            RecoveryStrategy::CoordinatorFailureRecovery { failure_height: 100 },
+            RecoveryStrategy::CoordinatorFailureRecovery {
+                failure_height: 100,
+            },
             None,
         );
-        
+
         for _ in 0..6 {
             recovery.increment_attempt();
         }
-        
+
         assert!(recovery.should_give_up());
     }
 
     #[test]
     fn test_recovery_orchestrator_registration() {
         let mut orchestrator = RecoveryOrchestrator::new();
-        
+
         let tx_id = TransactionId::compute(b"test", 0);
         let recovery = TransactionRecovery::new(
             tx_id,
-            RecoveryStrategy::CoordinatorFailureRecovery { failure_height: 100 },
+            RecoveryStrategy::CoordinatorFailureRecovery {
+                failure_height: 100,
+            },
             None,
         );
-        
+
         orchestrator.register_recovery(recovery);
-        
+
         let status = orchestrator.check_recovery_status(&tx_id);
         assert_eq!(status, Some(RecoveryStatus::InProgress));
     }

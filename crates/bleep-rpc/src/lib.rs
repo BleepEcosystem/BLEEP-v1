@@ -29,39 +29,39 @@
 //! Both endpoints read from `Arc<parking_lot::Mutex<StateManager>>` threaded
 //! through `RpcState`, so they always reflect the most recently committed block.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::HashMap;
 
 use parking_lot::Mutex;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use warp::Filter;
 
+use bleep_consensus::slashing_engine::{SlashingEngine, SlashingEvidence};
+use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
+use bleep_economics::oracle_bridge::{OracleSource, PriceUpdate};
+use bleep_economics::BleepEconomicsRuntime;
+use bleep_interop::core::BleepConnectOrchestrator;
+use bleep_pat::PATRegistry;
 use bleep_state::state_manager::StateManager;
 use bleep_state::state_merkle::MerkleProof;
-use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
-use bleep_consensus::slashing_engine::{SlashingEngine, SlashingEvidence};
-use bleep_economics::BleepEconomicsRuntime;
-use bleep_economics::oracle_bridge::{PriceUpdate, OracleSource};
-use bleep_interop::core::{BleepConnectOrchestrator};
-use bleep_pat::PATRegistry;
 
 // ─── Shared live state ────────────────────────────────────────────────────────
 
 /// Live counters + shared subsystems updated by the running node.
 #[derive(Clone)]
 pub struct RpcState {
-    pub start_time:        u64,
-    pub blocks_produced:   Arc<std::sync::atomic::AtomicU64>,
-    pub txs_processed:     Arc<std::sync::atomic::AtomicU64>,
-    pub peer_count:        Arc<std::sync::atomic::AtomicUsize>,
-    pub chain_height:      Arc<std::sync::atomic::AtomicU64>,
+    pub start_time: u64,
+    pub blocks_produced: Arc<std::sync::atomic::AtomicU64>,
+    pub txs_processed: Arc<std::sync::atomic::AtomicU64>,
+    pub peer_count: Arc<std::sync::atomic::AtomicUsize>,
+    pub chain_height: Arc<std::sync::atomic::AtomicU64>,
     /// Live `StateManager` for `/rpc/state` and `/rpc/proof`.
-    pub state_mgr:         Option<Arc<Mutex<StateManager>>>,
+    pub state_mgr: Option<Arc<Mutex<StateManager>>>,
     /// Live `ValidatorRegistry` for `/rpc/validator/*` (Sprint 6).
     pub validator_registry: Option<Arc<Mutex<ValidatorRegistry>>>,
     /// Live `SlashingEngine` for `/rpc/validator/evidence` (Sprint 6).
-    pub slashing_engine:   Option<Arc<Mutex<SlashingEngine>>>,
+    pub slashing_engine: Option<Arc<Mutex<SlashingEngine>>>,
     /// Live `BleepEconomicsRuntime` for `/rpc/economics/*` and `/rpc/oracle/*` (Sprint 7).
     pub economics_runtime: Option<Arc<Mutex<BleepEconomicsRuntime>>>,
     /// Live `BleepConnectOrchestrator` for `/rpc/connect/*` (Sprint 7).
@@ -70,11 +70,11 @@ pub struct RpcState {
     pub pat_registry: Option<Arc<Mutex<PATRegistry>>>,
     // ── Sprint 8 ─────────────────────────────────────────────────────────────
     /// Faucet state: address → last drip unix timestamp (rate limiter).
-    pub faucet_drips:      Arc<Mutex<HashMap<String, u64>>>,
+    pub faucet_drips: Arc<Mutex<HashMap<String, u64>>>,
     /// Faucet IP limiter: ip → last drip unix timestamp.
-    pub faucet_ip_drips:   Arc<Mutex<HashMap<String, u64>>>,
+    pub faucet_ip_drips: Arc<Mutex<HashMap<String, u64>>>,
     /// Faucet balance in microBLEEP (8 decimals). 1000 BLEEP = 100_000_000_000.
-    pub faucet_balance:    Arc<std::sync::atomic::AtomicU64>,
+    pub faucet_balance: Arc<std::sync::atomic::AtomicU64>,
     /// JWT secret rotation counter (mirrors SessionManager.rotation_count).
     pub jwt_rotation_count: Arc<std::sync::atomic::AtomicU64>,
     /// Audit log export enabled flag.
@@ -91,20 +91,22 @@ impl RpcState {
 
     pub fn new() -> Self {
         Self {
-            start_time:        now_secs(),
-            blocks_produced:   Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            txs_processed:     Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            peer_count:        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            chain_height:      Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            state_mgr:         None,
+            start_time: now_secs(),
+            blocks_produced: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            txs_processed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            chain_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            state_mgr: None,
             validator_registry: None,
-            slashing_engine:   None,
+            slashing_engine: None,
             economics_runtime: None,
             connect_orchestrator: None,
             pat_registry: None,
-            faucet_drips:      Arc::new(Mutex::new(HashMap::new())),
-            faucet_ip_drips:   Arc::new(Mutex::new(HashMap::new())),
-            faucet_balance:    Arc::new(std::sync::atomic::AtomicU64::new(Self::FAUCET_INITIAL_BALANCE)),
+            faucet_drips: Arc::new(Mutex::new(HashMap::new())),
+            faucet_ip_drips: Arc::new(Mutex::new(HashMap::new())),
+            faucet_balance: Arc::new(std::sync::atomic::AtomicU64::new(
+                Self::FAUCET_INITIAL_BALANCE,
+            )),
             jwt_rotation_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             audit_export_enabled: true,
         }
@@ -152,7 +154,9 @@ impl RpcState {
 }
 
 impl Default for RpcState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn now_secs() -> u64 {
@@ -172,50 +176,60 @@ fn with_rpc_state(
 
 #[derive(Serialize)]
 struct HealthResp {
-    status:      &'static str,
-    height:      u64,
-    peers:       usize,
+    status: &'static str,
+    height: u64,
+    peers: usize,
     uptime_secs: u64,
-    version:     &'static str,
+    version: &'static str,
 }
 
 #[derive(Serialize)]
 struct TelemetryResp {
-    blocks_produced:        u64,
+    blocks_produced: u64,
     transactions_processed: u64,
-    uptime_secs:            u64,
+    uptime_secs: u64,
 }
 
 #[derive(Serialize)]
-struct JsonReply { result: String }
+struct JsonReply {
+    result: String,
+}
 
 #[derive(Serialize)]
-struct TxResp { tx_id: String, status: &'static str }
+struct TxResp {
+    tx_id: String,
+    status: &'static str,
+}
 
 #[derive(Serialize)]
-struct BlockResp { height: u64, hash: String, tx_count: usize, epoch: u64 }
+struct BlockResp {
+    height: u64,
+    hash: String,
+    tx_count: usize,
+    epoch: u64,
+}
 
 /// Response for `GET /rpc/state/{address}`.
 #[derive(Serialize)]
 struct AccountStateResp {
-    address:      String,
+    address: String,
     /// u128 balance as decimal string (avoids JSON u64 overflow)
-    balance:      String,
-    nonce:        u64,
+    balance: String,
+    nonce: u64,
     /// Hex-encoded 32-byte Sparse Merkle Trie root at query time
-    state_root:   String,
+    state_root: String,
     block_height: u64,
 }
 
 /// Response for `GET /rpc/proof/{address}`.
 #[derive(Serialize)]
 struct ProofResp {
-    address:  String,
-    exists:   bool,
+    address: String,
+    exists: bool,
     /// Hex-encoded leaf hash (all-zeros for exclusion proofs)
-    leaf:     String,
+    leaf: String,
     /// Hex-encoded trie root this proof is valid against
-    root:     String,
+    root: String,
     /// Hex-encoded sibling hash at each of 256 levels (index 0 = near leaf)
     siblings: Vec<String>,
     /// Whether the proven node is on the right at each level
@@ -224,14 +238,16 @@ struct ProofResp {
 
 impl ProofResp {
     fn from_proof(address: &str, proof: MerkleProof) -> Self {
-        let (siblings, is_right) = proof.path.iter()
+        let (siblings, is_right) = proof
+            .path
+            .iter()
             .map(|n| (hex::encode(n.sibling), n.is_right))
             .unzip();
         Self {
-            address:  address.to_string(),
-            exists:   proof.exists,
-            leaf:     hex::encode(proof.leaf),
-            root:     hex::encode(proof.root),
+            address: address.to_string(),
+            exists: proof.exists,
+            leaf: hex::encode(proof.leaf),
+            root: hex::encode(proof.root),
             siblings,
             is_right,
         }
@@ -239,15 +255,17 @@ impl ProofResp {
 }
 
 #[derive(Serialize)]
-struct ErrResp { error: String }
+struct ErrResp {
+    error: String,
+}
 
 // ─── Validator response types (Sprint 6) ─────────────────────────────────────
 
 #[derive(Serialize)]
 struct ValidatorResp {
-    id:            String,
-    stake:         u128,
-    state:         String,
+    id: String,
+    stake: u128,
+    state: String,
     total_slashed: u128,
     can_participate: bool,
 }
@@ -255,9 +273,9 @@ struct ValidatorResp {
 impl ValidatorResp {
     fn from_identity(v: &ValidatorIdentity) -> Self {
         Self {
-            id:            v.id.clone(),
-            stake:         v.stake,
-            state:         format!("{:?}", v.state),
+            id: v.id.clone(),
+            stake: v.stake,
+            state: format!("{:?}", v.state),
             total_slashed: v.total_slashed,
             can_participate: v.can_participate(),
         }
@@ -266,18 +284,25 @@ impl ValidatorResp {
 
 #[derive(Serialize)]
 struct ValidatorListResp {
-    validators:   Vec<ValidatorResp>,
-    total_stake:  u128,
+    validators: Vec<ValidatorResp>,
+    total_stake: u128,
     active_count: usize,
 }
 
 #[derive(Serialize)]
-struct StakeResp  { validator_id: String, status: String, stake: u128 }
+struct StakeResp {
+    validator_id: String,
+    status: String,
+    stake: u128,
+}
 #[derive(Serialize)]
-struct UnstakeResp { validator_id: String, status: String }
+struct UnstakeResp {
+    validator_id: String,
+    status: String,
+}
 #[derive(Serialize)]
 struct EvidenceResp {
-    accepted:     bool,
+    accepted: bool,
     slash_amount: u128,
     validator_id: String,
     evidence_type: String,
@@ -288,9 +313,9 @@ struct EvidenceResp {
 #[derive(Deserialize, Clone)]
 struct StakeRequest {
     #[allow(dead_code)]
-    tx_type:   String,
-    amount:    u64,
-    label:     String,
+    tx_type: String,
+    amount: u64,
+    label: String,
     timestamp: u64,
 }
 
@@ -305,7 +330,6 @@ struct UnstakeRequest {
 pub fn rpc_routes_with_state(
     rpc: RpcState,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-
     // Arc-wrap the whole RpcState for Sprint 7 handler closures
     let state_inner = Arc::new(rpc.clone());
 
@@ -315,11 +339,11 @@ pub fn rpc_routes_with_state(
         .and(with_rpc_state(rpc.clone()))
         .map(|st: RpcState| {
             warp::reply::json(&HealthResp {
-                status:      "ok",
-                height:      st.chain_height.load(std::sync::atomic::Ordering::Relaxed),
-                peers:       st.peer_count.load(std::sync::atomic::Ordering::Relaxed),
+                status: "ok",
+                height: st.chain_height.load(std::sync::atomic::Ordering::Relaxed),
+                peers: st.peer_count.load(std::sync::atomic::Ordering::Relaxed),
                 uptime_secs: st.uptime_secs(),
-                version:     env!("CARGO_PKG_VERSION"),
+                version: env!("CARGO_PKG_VERSION"),
             })
         });
 
@@ -329,33 +353,45 @@ pub fn rpc_routes_with_state(
         .and(with_rpc_state(rpc.clone()))
         .map(|st: RpcState| {
             warp::reply::json(&TelemetryResp {
-                blocks_produced:        st.blocks_produced.load(std::sync::atomic::Ordering::Relaxed),
+                blocks_produced: st
+                    .blocks_produced
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 transactions_processed: st.txs_processed.load(std::sync::atomic::Ordering::Relaxed),
-                uptime_secs:            st.uptime_secs(),
+                uptime_secs: st.uptime_secs(),
             })
         });
 
     // GET /rpc/wallet
-    let wallet = warp::path!("rpc" / "wallet")
-        .and(warp::get())
-        .map(|| warp::reply::json(&JsonReply { result: "wallet rpc ready".into() }));
+    let wallet = warp::path!("rpc" / "wallet").and(warp::get()).map(|| {
+        warp::reply::json(&JsonReply {
+            result: "wallet rpc ready".into(),
+        })
+    });
 
     // GET /rpc/ai
-    let ai = warp::path!("rpc" / "ai")
-        .and(warp::get())
-        .map(|| warp::reply::json(&JsonReply { result: "ai advisory ready (deterministic)".into() }));
+    let ai = warp::path!("rpc" / "ai").and(warp::get()).map(|| {
+        warp::reply::json(&JsonReply {
+            result: "ai advisory ready (deterministic)".into(),
+        })
+    });
 
     // POST /rpc/tx
     let tx_submit = warp::path!("rpc" / "tx")
         .and(warp::post())
         .and(warp::body::json::<serde_json::Value>())
         .map(|body: serde_json::Value| {
-            let sender   = body.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let receiver = body.get("receiver").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let amount   = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
-            let ts       = body.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+            let sender = body
+                .get("sender")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let receiver = body
+                .get("receiver")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let amount = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ts = body.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
             warp::reply::json(&TxResp {
-                tx_id:  format!("{}:{}:{}:{}", sender, receiver, amount, ts),
+                tx_id: format!("{}:{}:{}:{}", sender, receiver, amount, ts),
                 status: "queued",
             })
         });
@@ -372,7 +408,10 @@ pub fn rpc_routes_with_state(
         .map(|st: RpcState| {
             let h = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
             warp::reply::json(&BlockResp {
-                height: h, hash: format!("{:064x}", h), tx_count: 0, epoch: h / 1000,
+                height: h,
+                hash: format!("{:064x}", h),
+                tx_count: 0,
+                epoch: h / 1000,
             })
         });
 
@@ -380,7 +419,12 @@ pub fn rpc_routes_with_state(
     let block_by_id = warp::path!("rpc" / "block" / String)
         .and(warp::get())
         .map(|id: String| {
-            warp::reply::json(&BlockResp { height: 0, hash: id, tx_count: 0, epoch: 0 })
+            warp::reply::json(&BlockResp {
+                height: 0,
+                hash: id,
+                tx_count: 0,
+                epoch: 0,
+            })
         });
 
     // ── Sprint 5: GET /rpc/state/{address} ───────────────────────────────────
@@ -389,31 +433,33 @@ pub fn rpc_routes_with_state(
     let state_query = warp::path!("rpc" / "state" / String)
         .and(warp::get())
         .and(with_rpc_state(rpc.clone()))
-        .map(|address: String, st: RpcState| -> Box<dyn warp::Reply + Send> {
-            match &st.state_mgr {
-                None => Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: "StateManager unavailable (stub mode)".into(),
-                    }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                )),
-                Some(mgr_arc) => {
-                    let mut mgr   = mgr_arc.lock();
-                    let balance   = mgr.get_balance(&address);
-                    let nonce     = mgr.get_nonce(&address);
-                    let root      = mgr.state_root();
-                    let height    = mgr.block_height();
-                    drop(mgr);
-                    Box::new(warp::reply::json(&AccountStateResp {
-                        address,
-                        balance:      balance.to_string(),
-                        nonce,
-                        state_root:   hex::encode(root),
-                        block_height: height,
-                    }))
+        .map(
+            |address: String, st: RpcState| -> Box<dyn warp::Reply + Send> {
+                match &st.state_mgr {
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "StateManager unavailable (stub mode)".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
+                    Some(mgr_arc) => {
+                        let mut mgr = mgr_arc.lock();
+                        let balance = mgr.get_balance(&address);
+                        let nonce = mgr.get_nonce(&address);
+                        let root = mgr.state_root();
+                        let height = mgr.block_height();
+                        drop(mgr);
+                        Box::new(warp::reply::json(&AccountStateResp {
+                            address,
+                            balance: balance.to_string(),
+                            nonce,
+                            state_root: hex::encode(root),
+                            block_height: height,
+                        }))
+                    }
                 }
-            }
-        });
+            },
+        );
 
     // ── Sprint 5: GET /rpc/proof/{address} ───────────────────────────────────
     // Generates a Sparse Merkle Trie inclusion or exclusion proof.
@@ -421,24 +467,24 @@ pub fn rpc_routes_with_state(
     let proof_query = warp::path!("rpc" / "proof" / String)
         .and(warp::get())
         .and(with_rpc_state(rpc.clone()))
-        .map(|address: String, st: RpcState| -> Box<dyn warp::Reply + Send> {
-            match &st.state_mgr {
-                None => Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: "StateManager unavailable (stub mode)".into(),
-                    }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                )),
-                Some(mgr_arc) => {
-                    let mut mgr = mgr_arc.lock();
-                    let proof   = mgr.prove_account(&address);
-                    drop(mgr);
-                    Box::new(warp::reply::json(
-                        &ProofResp::from_proof(&address, proof)
-                    ))
+        .map(
+            |address: String, st: RpcState| -> Box<dyn warp::Reply + Send> {
+                match &st.state_mgr {
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "StateManager unavailable (stub mode)".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
+                    Some(mgr_arc) => {
+                        let mut mgr = mgr_arc.lock();
+                        let proof = mgr.prove_account(&address);
+                        drop(mgr);
+                        Box::new(warp::reply::json(&ProofResp::from_proof(&address, proof)))
+                    }
                 }
-            }
-        });
+            },
+        );
 
     // ── Sprint 6: Validator / Staking endpoints ───────────────────────────────
 
@@ -447,97 +493,107 @@ pub fn rpc_routes_with_state(
         .and(warp::post())
         .and(warp::body::json::<StakeRequest>())
         .and(with_rpc_state(rpc.clone()))
-        .map(|req: StakeRequest, st: RpcState| -> Box<dyn warp::Reply + Send> {
-            if req.tx_type.trim().to_lowercase() != "stake" {
-                return Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "invalid tx_type for stake request".into() }),
-                    warp::http::StatusCode::BAD_REQUEST,
-                ));
-            }
-            match &st.validator_registry {
-                None => Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "ValidatorRegistry unavailable".into() }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                )),
-                Some(reg_arc) => {
-                    let mut reg = reg_arc.lock();
-                    // Derive a validator ID from label + timestamp
-                    let validator_id = format!("val-{}-{}", req.label, req.timestamp);
-                    let stake = req.amount as u128;
-                    // Register or update stake
-                    match reg.get(&validator_id) {
-                        Some(_) => {
-                            // Already exists — just return current stake
-                            let v = reg.get(&validator_id).unwrap();
-                            let resp = StakeResp {
-                                validator_id: validator_id.clone(),
-                                status: "already_registered".into(),
-                                stake: v.stake,
-                            };
-                            Box::new(warp::reply::json(&resp))
-                        }
-                        None => {
-                            // Create new validator identity.
-                            // ValidatorIdentity::new(id, kyber_pk[1568], signing_key_id, stake, epoch)
-                            // Kyber pk is zeroed here; real integration in Sprint 7.
-                            let mock_kyber_pk  = vec![0u8; 1568];
-                            let signing_key_id = format!("{:064x}", req.timestamp);
-                            let identity = ValidatorIdentity::new(
-                                validator_id.clone(),
-                                mock_kyber_pk,
-                                signing_key_id,
-                                stake,
-                                0,
-                            );
-                            match identity {
-                                Err(e) => Box::new(warp::reply::with_status(
-                                    warp::reply::json(&ErrResp { error: e }),
-                                    warp::http::StatusCode::BAD_REQUEST,
-                                )),
-                                Ok(mut ident) => {
-                                    let _ = ident.activate();
-                                    let current_stake = ident.stake;
-                                    let _ = reg.register_validator(ident);
-                                    let resp = StakeResp {
-                                        validator_id,
-                                        status: "registered".into(),
-                                        stake: current_stake,
-                                    };
-                                    Box::new(warp::reply::json(&resp))
+        .map(
+            |req: StakeRequest, st: RpcState| -> Box<dyn warp::Reply + Send> {
+                if req.tx_type.trim().to_lowercase() != "stake" {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "invalid tx_type for stake request".into(),
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    ));
+                }
+                match &st.validator_registry {
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "ValidatorRegistry unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
+                    Some(reg_arc) => {
+                        let mut reg = reg_arc.lock();
+                        // Derive a validator ID from label + timestamp
+                        let validator_id = format!("val-{}-{}", req.label, req.timestamp);
+                        let stake = req.amount as u128;
+                        // Register or update stake
+                        match reg.get(&validator_id) {
+                            Some(_) => {
+                                // Already exists — just return current stake
+                                let v = reg.get(&validator_id).unwrap();
+                                let resp = StakeResp {
+                                    validator_id: validator_id.clone(),
+                                    status: "already_registered".into(),
+                                    stake: v.stake,
+                                };
+                                Box::new(warp::reply::json(&resp))
+                            }
+                            None => {
+                                // Create new validator identity.
+                                // ValidatorIdentity::new(id, kyber_pk[1568], signing_key_id, stake, epoch)
+                                // Kyber pk is zeroed here; real integration in Sprint 7.
+                                let mock_kyber_pk = vec![0u8; 1568];
+                                let signing_key_id = format!("{:064x}", req.timestamp);
+                                let identity = ValidatorIdentity::new(
+                                    validator_id.clone(),
+                                    mock_kyber_pk,
+                                    signing_key_id,
+                                    stake,
+                                    0,
+                                );
+                                match identity {
+                                    Err(e) => Box::new(warp::reply::with_status(
+                                        warp::reply::json(&ErrResp { error: e }),
+                                        warp::http::StatusCode::BAD_REQUEST,
+                                    )),
+                                    Ok(mut ident) => {
+                                        let _ = ident.activate();
+                                        let current_stake = ident.stake;
+                                        let _ = reg.register_validator(ident);
+                                        let resp = StakeResp {
+                                            validator_id,
+                                            status: "registered".into(),
+                                            stake: current_stake,
+                                        };
+                                        Box::new(warp::reply::json(&resp))
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        });
+            },
+        );
 
     // POST /rpc/validator/unstake
     let validator_unstake = warp::path!("rpc" / "validator" / "unstake")
         .and(warp::post())
         .and(warp::body::json::<UnstakeRequest>())
         .and(with_rpc_state(rpc.clone()))
-        .map(|req: UnstakeRequest, st: RpcState| -> Box<dyn warp::Reply + Send> {
-            match &st.validator_registry {
-                None => Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "ValidatorRegistry unavailable".into() }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                )),
-                Some(reg_arc) => {
-                    let mut reg = reg_arc.lock();
-                    match reg.mark_validator_for_exit(&req.validator_id) {
-                        Ok(_) => Box::new(warp::reply::json(&UnstakeResp {
-                            validator_id: req.validator_id,
-                            status: "pending_exit".into(),
-                        })),
-                        Err(e) => Box::new(warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST,
-                        )),
+        .map(
+            |req: UnstakeRequest, st: RpcState| -> Box<dyn warp::Reply + Send> {
+                match &st.validator_registry {
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "ValidatorRegistry unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
+                    Some(reg_arc) => {
+                        let mut reg = reg_arc.lock();
+                        match reg.mark_validator_for_exit(&req.validator_id) {
+                            Ok(_) => Box::new(warp::reply::json(&UnstakeResp {
+                                validator_id: req.validator_id,
+                                status: "pending_exit".into(),
+                            })),
+                            Err(e) => Box::new(warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )),
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
 
     // GET /rpc/validator/list
     let validator_list = warp::path!("rpc" / "validator" / "list")
@@ -546,20 +602,25 @@ pub fn rpc_routes_with_state(
         .map(|st: RpcState| -> Box<dyn warp::Reply + Send> {
             match &st.validator_registry {
                 None => Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "ValidatorRegistry unavailable".into() }),
+                    warp::reply::json(&ErrResp {
+                        error: "ValidatorRegistry unavailable".into(),
+                    }),
                     warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 )),
                 Some(reg_arc) => {
                     let reg = reg_arc.lock();
                     let active = reg.get_active_validators();
-                    let validators: Vec<ValidatorResp> = active.iter()
+                    let validators: Vec<ValidatorResp> = active
+                        .iter()
                         .map(|v| ValidatorResp::from_identity(v))
                         .collect();
                     let total_stake = reg.total_active_stake();
                     let active_count = reg.active_count();
                     drop(reg);
                     Box::new(warp::reply::json(&ValidatorListResp {
-                        validators, total_stake, active_count,
+                        validators,
+                        total_stake,
+                        active_count,
                     }))
                 }
             }
@@ -569,71 +630,82 @@ pub fn rpc_routes_with_state(
     let validator_status = warp::path!("rpc" / "validator" / "status" / String)
         .and(warp::get())
         .and(with_rpc_state(rpc.clone()))
-        .map(|validator_id: String, st: RpcState| -> Box<dyn warp::Reply + Send> {
-            match &st.validator_registry {
-                None => Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "ValidatorRegistry unavailable".into() }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                )),
-                Some(reg_arc) => {
-                    let reg = reg_arc.lock();
-                    match reg.get(&validator_id) {
-                        None => Box::new(warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: format!("Validator '{}' not found", validator_id),
-                            }),
-                            warp::http::StatusCode::NOT_FOUND,
-                        )),
-                        Some(v) => Box::new(warp::reply::json(&ValidatorResp::from_identity(v))),
+        .map(
+            |validator_id: String, st: RpcState| -> Box<dyn warp::Reply + Send> {
+                match &st.validator_registry {
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "ValidatorRegistry unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
+                    Some(reg_arc) => {
+                        let reg = reg_arc.lock();
+                        match reg.get(&validator_id) {
+                            None => Box::new(warp::reply::with_status(
+                                warp::reply::json(&ErrResp {
+                                    error: format!("Validator '{}' not found", validator_id),
+                                }),
+                                warp::http::StatusCode::NOT_FOUND,
+                            )),
+                            Some(v) => {
+                                Box::new(warp::reply::json(&ValidatorResp::from_identity(v)))
+                            }
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
 
     // POST /rpc/validator/evidence  — auto-executes slashing on acceptance
     let validator_evidence = warp::path!("rpc" / "validator" / "evidence")
         .and(warp::post())
         .and(warp::body::bytes())
         .and(with_rpc_state(rpc.clone()))
-        .map(|body: bytes::Bytes, st: RpcState| -> Box<dyn warp::Reply + Send> {
-            // Deserialize the SlashingEvidence JSON
-            let evidence: SlashingEvidence = match serde_json::from_slice(&body) {
-                Ok(e) => e,
-                Err(err) => return Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: format!("Invalid evidence JSON: {}", err),
-                    }),
-                    warp::http::StatusCode::BAD_REQUEST,
-                )),
-            };
-
-            match (&st.slashing_engine, &st.validator_registry) {
-                (Some(engine_arc), Some(reg_arc)) => {
-                    let mut engine = engine_arc.lock();
-                    let mut reg    = reg_arc.lock();
-                    let timestamp  = now_secs();
-                    let current_epoch = 0u64; // TODO: derive from chain height
-                    match engine.process_evidence(evidence, &mut reg, current_epoch, timestamp) {
-                        Ok(event) => Box::new(warp::reply::json(&EvidenceResp {
-                            accepted:      true,
-                            slash_amount:  event.slash_amount,
-                            validator_id:  event.validator_id,
-                            evidence_type: event.evidence_type,
-                        })),
-                        Err(e) => Box::new(warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
+        .map(
+            |body: bytes::Bytes, st: RpcState| -> Box<dyn warp::Reply + Send> {
+                // Deserialize the SlashingEvidence JSON
+                let evidence: SlashingEvidence = match serde_json::from_slice(&body) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        return Box::new(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: format!("Invalid evidence JSON: {}", err),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
-                        )),
+                        ))
                     }
+                };
+
+                match (&st.slashing_engine, &st.validator_registry) {
+                    (Some(engine_arc), Some(reg_arc)) => {
+                        let mut engine = engine_arc.lock();
+                        let mut reg = reg_arc.lock();
+                        let timestamp = now_secs();
+                        let current_epoch = 0u64; // TODO: derive from chain height
+                        match engine.process_evidence(evidence, &mut reg, current_epoch, timestamp)
+                        {
+                            Ok(event) => Box::new(warp::reply::json(&EvidenceResp {
+                                accepted: true,
+                                slash_amount: event.slash_amount,
+                                validator_id: event.validator_id,
+                                evidence_type: event.evidence_type,
+                            })),
+                            Err(e) => Box::new(warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )),
+                        }
+                    }
+                    _ => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "SlashingEngine or ValidatorRegistry unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
                 }
-                _ => Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: "SlashingEngine or ValidatorRegistry unavailable".into(),
-                    }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                )),
-            }
-        });
+            },
+        );
 
     health
         .or(telemetry)
@@ -704,99 +776,101 @@ pub fn rpc_routes() -> impl Filter<Extract = (impl warp::Reply,), Error = warp::
 
 #[derive(Serialize)]
 struct SupplyResp {
-    circulating_supply: String,   // decimal string to avoid u128 JSON overflow
-    total_minted:       String,
-    total_burned:       String,
-    last_epoch:         u64,
-    current_base_fee:   String,
+    circulating_supply: String, // decimal string to avoid u128 JSON overflow
+    total_minted: String,
+    total_burned: String,
+    last_epoch: u64,
+    current_base_fee: String,
 }
 
 #[derive(Serialize)]
 struct EpochResp {
-    epoch:             u64,
-    new_base_fee:      String,
-    total_emitted:     String,
-    total_burned:      String,
+    epoch: u64,
+    new_base_fee: String,
+    total_emitted: String,
+    total_burned: String,
     circulating_supply: String,
-    reward_count:      usize,
+    reward_count: usize,
     supply_state_hash: String,
-    bleep_usd_price:   Option<String>,
+    bleep_usd_price: Option<String>,
 }
 
 #[derive(Serialize)]
 struct FeeResp {
     current_base_fee: String,
-    last_epoch:       u64,
+    last_epoch: u64,
 }
 
 #[derive(Serialize)]
 struct OraclePriceResp {
-    asset:         String,
-    median_price:  String,
-    mean_price:    String,
-    source_count:  u32,
+    asset: String,
+    median_price: String,
+    mean_price: String,
+    source_count: u32,
     confidence_bps: u16,
-    timestamp:     u64,
+    timestamp: u64,
 }
 
 #[derive(Deserialize)]
 struct OracleUpdateReq {
-    asset:        String,
-    price:        u128,
-    timestamp:    u64,
+    asset: String,
+    price: u128,
+    timestamp: u64,
     confidence_bps: u16,
-    operator_id:  String,   // hex-encoded
+    operator_id: String, // hex-encoded
 }
 
 #[derive(Serialize)]
-struct OracleUpdateResp { ok: bool }
+struct OracleUpdateResp {
+    ok: bool,
+}
 
 #[derive(Serialize)]
 struct PendingIntentsResp {
     intents: Vec<serde_json::Value>,
-    count:   usize,
+    count: usize,
 }
 
 #[derive(Deserialize)]
 struct SubmitIntentReq {
-    source_chain:          String,
-    dest_chain:            String,
-    source_amount:         u128,
-    min_dest_amount:       u128,
-    sender_address:        String,
-    recipient_address:     String,
+    source_chain: String,
+    dest_chain: String,
+    source_amount: u128,
+    min_dest_amount: u128,
+    sender_address: String,
+    recipient_address: String,
     max_solver_reward_bps: Option<u16>,
     slippage_tolerance_bps: Option<u16>,
-    escrow_tx_hash:        Option<String>,
+    escrow_tx_hash: Option<String>,
     /// hex-encoded escrow proof bytes
-    escrow_proof:          Option<String>,
-    nonce:                 Option<u64>,
-    signature:             Option<String>,
+    escrow_proof: Option<String>,
+    nonce: Option<u64>,
+    signature: Option<String>,
 }
 
 #[derive(Serialize)]
 struct SubmitIntentResp {
     intent_id: String,
-    status:    String,
+    status: String,
 }
 
 #[derive(Serialize)]
 struct IntentStatusResp {
     intent_id: String,
-    status:    String,
-    detail:    serde_json::Value,
+    status: String,
+    detail: serde_json::Value,
 }
 
 #[derive(Serialize)]
 struct RelayTxResp {
-    intent_id:               String,
-    to:                      String,
-    data:                    String,
-    value:                   String,
-    gas:                     String,
-    max_fee_per_gas:         String,
+    intent_id: String,
+    to: String,
+    data: String,
+    value: String,
+    gas: String,
+    max_fee_per_gas: String,
     max_priority_fee_per_gas: String,
-    chain_id:                u64,
+    chain_id: u64,
 }
 
 // ── Helper to extract the RpcState from an Arc<RpcState> ─────────────────────
@@ -813,26 +887,26 @@ fn economics_supply(
     warp::path!("rpc" / "economics" / "supply")
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            match &st.economics_runtime {
-                Some(rt) => {
-                    let rt = rt.lock();
-                    warp::reply::with_status(
-                        warp::reply::json(&SupplyResp {
-                            circulating_supply: rt.circulating_supply().to_string(),
-                            total_minted:       rt.total_minted().to_string(),
-                            total_burned:       rt.total_burned().to_string(),
-                            last_epoch:         rt.last_epoch,
-                            current_base_fee:   rt.current_base_fee().to_string(),
-                        }),
-                        warp::http::StatusCode::OK,
-                    )
-                }
-                None => warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "EconomicsRuntime not initialised".into() }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                ),
+        .map(|st: Arc<RpcState>| match &st.economics_runtime {
+            Some(rt) => {
+                let rt = rt.lock();
+                warp::reply::with_status(
+                    warp::reply::json(&SupplyResp {
+                        circulating_supply: rt.circulating_supply().to_string(),
+                        total_minted: rt.total_minted().to_string(),
+                        total_burned: rt.total_burned().to_string(),
+                        last_epoch: rt.last_epoch,
+                        current_base_fee: rt.current_base_fee().to_string(),
+                    }),
+                    warp::http::StatusCode::OK,
+                )
             }
+            None => warp::reply::with_status(
+                warp::reply::json(&ErrResp {
+                    error: "EconomicsRuntime not initialised".into(),
+                }),
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+            ),
         })
 }
 
@@ -843,36 +917,43 @@ fn economics_epoch(
     warp::path!("rpc" / "economics" / "epoch" / u64)
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|epoch: u64, st: Arc<RpcState>| {
-            match &st.economics_runtime {
+        .map(
+            |epoch: u64, st: Arc<RpcState>| match &st.economics_runtime {
                 Some(rt) => {
                     let rt = rt.lock();
                     match rt.get_epoch_output(epoch) {
                         Some(out) => warp::reply::with_status(
                             warp::reply::json(&EpochResp {
-                                epoch:             out.epoch,
-                                new_base_fee:      out.new_base_fee.to_string(),
-                                total_emitted:     out.total_emitted.to_string(),
-                                total_burned:      out.total_burned.to_string(),
+                                epoch: out.epoch,
+                                new_base_fee: out.new_base_fee.to_string(),
+                                total_emitted: out.total_emitted.to_string(),
+                                total_burned: out.total_burned.to_string(),
                                 circulating_supply: out.circulating_supply.to_string(),
-                                reward_count:      out.reward_records.len(),
+                                reward_count: out.reward_records.len(),
                                 supply_state_hash: hex::encode(&out.supply_state_hash),
-                                bleep_usd_price:   out.bleep_usd_price.map(|p| p.to_string()),
+                                bleep_usd_price: out.bleep_usd_price.map(|p| p.to_string()),
                             }),
                             warp::http::StatusCode::OK,
                         ),
                         None => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: format!("Epoch {} not found (last={})", epoch, rt.last_epoch) }),
+                            warp::reply::json(&ErrResp {
+                                error: format!(
+                                    "Epoch {} not found (last={})",
+                                    epoch, rt.last_epoch
+                                ),
+                            }),
                             warp::http::StatusCode::NOT_FOUND,
                         ),
                     }
                 }
                 None => warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "EconomicsRuntime not initialised".into() }),
+                    warp::reply::json(&ErrResp {
+                        error: "EconomicsRuntime not initialised".into(),
+                    }),
                     warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 ),
-            }
-        })
+            },
+        )
 }
 
 // ── GET /rpc/economics/fee ────────────────────────────────────────────────────
@@ -882,23 +963,23 @@ fn economics_fee(
     warp::path!("rpc" / "economics" / "fee")
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            match &st.economics_runtime {
-                Some(rt) => {
-                    let rt = rt.lock();
-                    warp::reply::with_status(
-                        warp::reply::json(&FeeResp {
-                            current_base_fee: rt.current_base_fee().to_string(),
-                            last_epoch:       rt.last_epoch,
-                        }),
-                        warp::http::StatusCode::OK,
-                    )
-                }
-                None => warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "EconomicsRuntime not initialised".into() }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                ),
+        .map(|st: Arc<RpcState>| match &st.economics_runtime {
+            Some(rt) => {
+                let rt = rt.lock();
+                warp::reply::with_status(
+                    warp::reply::json(&FeeResp {
+                        current_base_fee: rt.current_base_fee().to_string(),
+                        last_epoch: rt.last_epoch,
+                    }),
+                    warp::http::StatusCode::OK,
+                )
             }
+            None => warp::reply::with_status(
+                warp::reply::json(&ErrResp {
+                    error: "EconomicsRuntime not initialised".into(),
+                }),
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+            ),
         })
 }
 
@@ -909,8 +990,8 @@ fn oracle_price(
     warp::path!("rpc" / "oracle" / "price" / String)
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|asset: String, st: Arc<RpcState>| {
-            match &st.economics_runtime {
+        .map(
+            |asset: String, st: Arc<RpcState>| match &st.economics_runtime {
                 Some(rt) => {
                     let mut rt = rt.lock();
                     let ts = std::time::SystemTime::now()
@@ -920,27 +1001,31 @@ fn oracle_price(
                     match rt.state.oracle_bridge.aggregate_prices(&asset, ts, 300) {
                         Ok(agg) => warp::reply::with_status(
                             warp::reply::json(&OraclePriceResp {
-                                asset:          agg.asset.clone(),
-                                median_price:   agg.median_price.to_string(),
-                                mean_price:     agg.mean_price.to_string(),
-                                source_count:   agg.source_count,
+                                asset: agg.asset.clone(),
+                                median_price: agg.median_price.to_string(),
+                                mean_price: agg.mean_price.to_string(),
+                                source_count: agg.source_count,
                                 confidence_bps: agg.confidence_bps,
-                                timestamp:      agg.timestamp,
+                                timestamp: agg.timestamp,
                             }),
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::NOT_FOUND,
                         ),
                     }
                 }
                 None => warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "EconomicsRuntime not initialised".into() }),
+                    warp::reply::json(&ErrResp {
+                        error: "EconomicsRuntime not initialised".into(),
+                    }),
                     warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 ),
-            }
-        })
+            },
+        )
 }
 
 // ── POST /rpc/oracle/update ───────────────────────────────────────────────────
@@ -956,13 +1041,13 @@ fn oracle_update(
                 Some(rt) => {
                     let operator_bytes = hex::decode(&req.operator_id).unwrap_or_default();
                     let update = PriceUpdate {
-                        source:         OracleSource::Custom(operator_bytes.clone()),
-                        asset:          req.asset.clone(),
-                        price:          req.price,
-                        timestamp:      req.timestamp,
+                        source: OracleSource::Custom(operator_bytes.clone()),
+                        asset: req.asset.clone(),
+                        price: req.price,
+                        timestamp: req.timestamp,
                         confidence_bps: req.confidence_bps,
-                        operator_id:    operator_bytes,
-                        signature:      vec![0u8; 64], // Signature verification Sprint 9
+                        operator_id: operator_bytes,
+                        signature: vec![0u8; 64], // Signature verification Sprint 9
                     };
                     let mut rt = rt.lock();
                     match rt.submit_price_update(update) {
@@ -971,13 +1056,17 @@ fn oracle_update(
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
                 None => warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "EconomicsRuntime not initialised".into() }),
+                    warp::reply::json(&ErrResp {
+                        error: "EconomicsRuntime not initialised".into(),
+                    }),
                     warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 ),
             }
@@ -996,21 +1085,24 @@ fn connect_intents_pending(
             match &st.connect_orchestrator {
                 Some(orc) => {
                     let ids = orc.pending_intent_ids();
-                    let intents: Vec<serde_json::Value> = ids.iter()
+                    let intents: Vec<serde_json::Value> = ids
+                        .iter()
                         .filter_map(|id| orc.get_pending_intent(id))
-                        .map(|intent| serde_json::json!({
-                            "intent_id": hex::encode(intent.intent_id),
-                            "source_chain": intent.source_chain.canonical_name(),
-                            "dest_chain": intent.dest_chain.canonical_name(),
-                            "source_amount": intent.source_amount.to_string(),
-                            "min_dest_amount": intent.min_dest_amount.to_string(),
-                            "sender_address": intent.sender.address,
-                            "recipient_address": intent.recipient.address,
-                            "max_solver_reward_bps": intent.max_solver_reward_bps,
-                            "expires_at": intent.expires_at,
-                            "created_at": intent.created_at,
-                            "nonce": intent.nonce,
-                        }))
+                        .map(|intent| {
+                            serde_json::json!({
+                                "intent_id": hex::encode(intent.intent_id),
+                                "source_chain": intent.source_chain.canonical_name(),
+                                "dest_chain": intent.dest_chain.canonical_name(),
+                                "source_amount": intent.source_amount.to_string(),
+                                "min_dest_amount": intent.min_dest_amount.to_string(),
+                                "sender_address": intent.sender.address,
+                                "recipient_address": intent.recipient.address,
+                                "max_solver_reward_bps": intent.max_solver_reward_bps,
+                                "expires_at": intent.expires_at,
+                                "created_at": intent.created_at,
+                                "nonce": intent.nonce,
+                            })
+                        })
                         .collect();
                     let count = intents.len();
                     warp::reply::with_status(
@@ -1021,7 +1113,10 @@ fn connect_intents_pending(
                 None => {
                     // Orchestrator not yet attached — return empty list (devnet mode)
                     warp::reply::with_status(
-                        warp::reply::json(&PendingIntentsResp { intents: vec![], count: 0 }),
+                        warp::reply::json(&PendingIntentsResp {
+                            intents: vec![],
+                            count: 0,
+                        }),
                         warp::http::StatusCode::OK,
                     )
                 }
@@ -1038,10 +1133,10 @@ fn connect_submit_intent(
         .and(warp::body::json::<SubmitIntentReq>())
         .and(with_arc_state(state))
         .map(|req: SubmitIntentReq, st: Arc<RpcState>| {
-            use sha2::{Sha256, Digest};
             use bleep_interop::types::{
-                ChainId, UniversalAddress, AssetId, AssetType, InstantIntent,
+                AssetId, AssetType, ChainId, InstantIntent, UniversalAddress,
             };
+            use sha2::{Digest, Sha256};
 
             let src = ChainId::from_name(&req.source_chain).unwrap_or(ChainId::BLEEP);
             let dst = ChainId::from_name(&req.dest_chain).unwrap_or(ChainId::Ethereum);
@@ -1061,7 +1156,8 @@ fn connect_submit_intent(
             h.update(nonce.to_le_bytes());
             let id_arr: [u8; 32] = h.finalize().into();
 
-            let escrow_proof = req.escrow_proof
+            let escrow_proof = req
+                .escrow_proof
                 .as_ref()
                 .and_then(|s| hex::decode(s).ok())
                 .unwrap_or_else(|| vec![1, 2, 3]); // devnet placeholder
@@ -1072,8 +1168,18 @@ fn connect_submit_intent(
                 expires_at: ts + 300,
                 source_chain: src,
                 dest_chain: dst,
-                source_asset: AssetId { chain: src, contract_address: None, token_id: None, asset_type: AssetType::Native },
-                dest_asset:   AssetId { chain: dst, contract_address: None, token_id: None, asset_type: AssetType::Native },
+                source_asset: AssetId {
+                    chain: src,
+                    contract_address: None,
+                    token_id: None,
+                    asset_type: AssetType::Native,
+                },
+                dest_asset: AssetId {
+                    chain: dst,
+                    contract_address: None,
+                    token_id: None,
+                    asset_type: AssetType::Native,
+                },
                 source_amount: req.source_amount,
                 min_dest_amount: req.min_dest_amount,
                 sender: UniversalAddress::new(src, req.sender_address.clone()),
@@ -1081,11 +1187,15 @@ fn connect_submit_intent(
                 max_solver_reward_bps: req.max_solver_reward_bps.unwrap_or(50),
                 slippage_tolerance_bps: req.slippage_tolerance_bps.unwrap_or(100),
                 nonce,
-                signature: req.signature
+                signature: req
+                    .signature
                     .as_ref()
                     .and_then(|s| hex::decode(s).ok())
                     .unwrap_or_else(|| vec![1]),
-                escrow_tx_hash: req.escrow_tx_hash.clone().unwrap_or_else(|| format!("0xescrow-{}", hex::encode(&id_arr[..4]))),
+                escrow_tx_hash: req
+                    .escrow_tx_hash
+                    .clone()
+                    .unwrap_or_else(|| format!("0xescrow-{}", hex::encode(&id_arr[..4]))),
                 escrow_proof,
             };
 
@@ -1217,12 +1327,16 @@ fn connect_relay_tx(
                         warp::http::StatusCode::OK,
                     ),
                     None => warp::reply::with_status(
-                        warp::reply::json(&ErrResp { error: "Intent not found or not an Ethereum transfer".into() }),
+                        warp::reply::json(&ErrResp {
+                            error: "Intent not found or not an Ethereum transfer".into(),
+                        }),
                         warp::http::StatusCode::NOT_FOUND,
                     ),
                 },
                 None => warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "BleepConnect not initialised".into() }),
+                    warp::reply::json(&ErrResp {
+                        error: "BleepConnect not initialised".into(),
+                    }),
                     warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 ),
             }
@@ -1259,61 +1373,84 @@ fn address_to_hex(addr: &bleep_pat::Address) -> String {
 
 #[derive(Deserialize)]
 struct PatCreateReq {
-    symbol:         String,
-    name:           String,
+    symbol: String,
+    name: String,
     #[serde(default = "default_decimals")]
-    decimals:       u8,
+    decimals: u8,
     /// Caller/owner address — hex string (with or without 0x prefix).
-    owner:          String,
+    owner: String,
     #[serde(default)]
-    supply_cap:     String,   // u128 as decimal string; "" = unlimited
+    supply_cap: String, // u128 as decimal string; "" = unlimited
     #[serde(default = "default_burn_rate")]
-    burn_rate_bps:  u16,
+    burn_rate_bps: u16,
     #[serde(default)]
-    freezable:      bool,
+    freezable: bool,
 }
-fn default_decimals() -> u8  { 8  }
-fn default_burn_rate() -> u16 { 50 }
+fn default_decimals() -> u8 {
+    8
+}
+fn default_burn_rate() -> u16 {
+    50
+}
 
 #[derive(Deserialize)]
 struct PatMintReq {
     symbol: String,
-    caller: String,   // must be token owner
-    to:     String,
-    amount: String,   // u128 decimal string
+    caller: String, // must be token owner
+    to: String,
+    amount: String, // u128 decimal string
 }
 
 #[derive(Deserialize)]
 struct PatBurnReq {
     symbol: String,
-    from:   String,
+    from: String,
     amount: String,
 }
 
 #[derive(Deserialize)]
 struct PatTransferReq {
     symbol: String,
-    from:   String,
-    to:     String,
+    from: String,
+    to: String,
     amount: String,
 }
 
 #[derive(Serialize)]
-struct PatOkResp { ok: bool, detail: serde_json::Value }
-#[derive(Serialize)]
-struct PatBalanceResp { symbol: String, address: String, balance: String }
-#[derive(Serialize)]
-struct PatTokenInfoResp {
-    symbol: String, name: String, decimals: u8, owner: String,
-    current_supply: String, total_burned: String, supply_cap: String,
-    burn_rate_bps: u16, created_at: u64, frozen: bool,
+struct PatOkResp {
+    ok: bool,
+    detail: serde_json::Value,
 }
 #[derive(Serialize)]
-struct PatTransferResp { received: String, burn_deducted: String }
+struct PatBalanceResp {
+    symbol: String,
+    address: String,
+    balance: String,
+}
+#[derive(Serialize)]
+struct PatTokenInfoResp {
+    symbol: String,
+    name: String,
+    decimals: u8,
+    owner: String,
+    current_supply: String,
+    total_burned: String,
+    supply_cap: String,
+    burn_rate_bps: u16,
+    created_at: u64,
+    frozen: bool,
+}
+#[derive(Serialize)]
+struct PatTransferResp {
+    received: String,
+    burn_deducted: String,
+}
 
 fn pat_not_initialised() -> warp::reply::WithStatus<warp::reply::Json> {
     warp::reply::with_status(
-        warp::reply::json(&ErrResp { error: "PATRegistry not initialised".into() }),
+        warp::reply::json(&ErrResp {
+            error: "PATRegistry not initialised".into(),
+        }),
         warp::http::StatusCode::SERVICE_UNAVAILABLE,
     )
 }
@@ -1326,16 +1463,18 @@ fn pat_create(
         .and(warp::post())
         .and(warp::body::json::<PatCreateReq>())
         .and(with_arc_state(state))
-        .map(|req: PatCreateReq, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |req: PatCreateReq, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
-                        Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST,
-                        ),
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let cap: u128 = req.supply_cap.parse().unwrap_or(0);
 
@@ -1365,13 +1504,15 @@ fn pat_create(
                             warp::http::StatusCode::CREATED,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
-            }
-        })
+            },
+        )
 }
 
 // ── POST /rpc/pat/mint ────────────────────────────────────────────────────────
@@ -1382,19 +1523,27 @@ fn pat_mint(
         .and(warp::post())
         .and(warp::body::json::<PatMintReq>())
         .and(with_arc_state(state))
-        .map(|req: PatMintReq, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |req: PatMintReq, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let caller = match hex_to_address(&req.caller) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let to = match hex_to_address(&req.to) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let amount: u128 = req.amount.parse().unwrap_or(0);
                     let intent = bleep_pat::PATIntent::mint(caller, req.symbol.clone(), to, amount);
@@ -1415,13 +1564,15 @@ fn pat_mint(
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
-            }
-        })
+            },
+        )
 }
 
 // ── POST /rpc/pat/burn ────────────────────────────────────────────────────────
@@ -1432,14 +1583,18 @@ fn pat_burn(
         .and(warp::post())
         .and(warp::body::json::<PatBurnReq>())
         .and(with_arc_state(state))
-        .map(|req: PatBurnReq, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |req: PatBurnReq, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let from = match hex_to_address(&req.from) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let amount: u128 = req.amount.parse().unwrap_or(0);
                     let intent = bleep_pat::PATIntent::burn(from, req.symbol.clone(), amount);
@@ -1460,13 +1615,15 @@ fn pat_burn(
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
-            }
-        })
+            },
+        )
 }
 
 // ── POST /rpc/pat/transfer ────────────────────────────────────────────────────
@@ -1482,35 +1639,48 @@ fn pat_transfer(
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let from = match hex_to_address(&req.from) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let to = match hex_to_address(&req.to) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let amount: u128 = req.amount.parse().unwrap_or(0);
                     // Pre-calculate burn for the response body
-                    let burn_deducted = reg.lock().get_token(&req.symbol)
+                    let burn_deducted = reg
+                        .lock()
+                        .get_token(&req.symbol)
                         .map(|t| t.transfer_burn_amount(amount))
                         .unwrap_or(0);
-                    let intent = bleep_pat::PATIntent::transfer(from, req.symbol.clone(), to, amount);
+                    let intent =
+                        bleep_pat::PATIntent::transfer(from, req.symbol.clone(), to, amount);
                     let mut r = reg.lock();
                     match r.execute(&intent) {
                         Ok(outcome) => {
                             let received = outcome.return_value.unwrap_or(0);
                             warp::reply::with_status(
                                 warp::reply::json(&PatTransferResp {
-                                    received:      received.to_string(),
+                                    received: received.to_string(),
                                     burn_deducted: burn_deducted.to_string(),
                                 }),
                                 warp::http::StatusCode::OK,
                             )
                         }
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
@@ -1526,26 +1696,32 @@ fn pat_balance(
     warp::path!("rpc" / "pat" / "balance" / String / String)
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|symbol: String, address: String, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |symbol: String, address: String, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let addr = match hex_to_address(&address) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let r = reg.lock();
                     let balance = r.balance_of(&symbol, &addr);
                     warp::reply::with_status(
                         warp::reply::json(&PatBalanceResp {
-                            symbol, address, balance: balance.to_string(),
+                            symbol,
+                            address,
+                            balance: balance.to_string(),
                         }),
                         warp::http::StatusCode::OK,
                     )
                 }
-            }
-        })
+            },
+        )
 }
 
 // ── GET /rpc/pat/info/{symbol} ────────────────────────────────────────────────
@@ -1555,32 +1731,32 @@ fn pat_info(
     warp::path!("rpc" / "pat" / "info" / String)
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|symbol: String, st: Arc<RpcState>| {
-            match &st.pat_registry {
-                None => return pat_not_initialised(),
-                Some(reg) => {
-                    let r = reg.lock();
-                    match r.get_token(&symbol) {
-                        Some(t) => warp::reply::with_status(
-                            warp::reply::json(&PatTokenInfoResp {
-                                symbol:         t.symbol.clone(),
-                                name:           t.name.clone(),
-                                decimals:       t.decimals,
-                                owner:          address_to_hex(&t.owner),
-                                current_supply: t.current_supply.to_string(),
-                                total_burned:   t.total_burned.to_string(),
-                                supply_cap:     t.total_supply_cap.to_string(),
-                                burn_rate_bps:  t.burn_rate_bps,
-                                created_at:     t.created_at,
-                                frozen:         t.frozen,
-                            }),
-                            warp::http::StatusCode::OK,
-                        ),
-                        None => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: format!("Token {} not found", symbol) }),
-                            warp::http::StatusCode::NOT_FOUND,
-                        ),
-                    }
+        .map(|symbol: String, st: Arc<RpcState>| match &st.pat_registry {
+            None => return pat_not_initialised(),
+            Some(reg) => {
+                let r = reg.lock();
+                match r.get_token(&symbol) {
+                    Some(t) => warp::reply::with_status(
+                        warp::reply::json(&PatTokenInfoResp {
+                            symbol: t.symbol.clone(),
+                            name: t.name.clone(),
+                            decimals: t.decimals,
+                            owner: address_to_hex(&t.owner),
+                            current_supply: t.current_supply.to_string(),
+                            total_burned: t.total_burned.to_string(),
+                            supply_cap: t.total_supply_cap.to_string(),
+                            burn_rate_bps: t.burn_rate_bps,
+                            created_at: t.created_at,
+                            frozen: t.frozen,
+                        }),
+                        warp::http::StatusCode::OK,
+                    ),
+                    None => warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Token {} not found", symbol),
+                        }),
+                        warp::http::StatusCode::NOT_FOUND,
+                    ),
                 }
             }
         })
@@ -1593,14 +1769,15 @@ fn pat_list(
     warp::path!("rpc" / "pat" / "list")
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            match &st.pat_registry {
-                None => return pat_not_initialised(),
-                Some(reg) => {
-                    let r = reg.lock();
-                    let tokens: Vec<serde_json::Value> = r.list_tokens()
-                        .iter()
-                        .map(|t| serde_json::json!({
+        .map(|st: Arc<RpcState>| match &st.pat_registry {
+            None => return pat_not_initialised(),
+            Some(reg) => {
+                let r = reg.lock();
+                let tokens: Vec<serde_json::Value> = r
+                    .list_tokens()
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
                             "symbol":         t.symbol,
                             "name":           t.name,
                             "decimals":       t.decimals,
@@ -1610,14 +1787,14 @@ fn pat_list(
                             "supply_cap":     t.total_supply_cap.to_string(),
                             "burn_rate_bps":  t.burn_rate_bps,
                             "frozen":         t.frozen,
-                        }))
-                        .collect();
-                    let count = tokens.len();
-                    warp::reply::with_status(
-                        warp::reply::json(&serde_json::json!({ "tokens": tokens, "count": count })),
-                        warp::http::StatusCode::OK,
-                    )
-                }
+                        })
+                    })
+                    .collect();
+                let count = tokens.len();
+                warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({ "tokens": tokens, "count": count })),
+                    warp::http::StatusCode::OK,
+                )
             }
         })
 }
@@ -1626,10 +1803,10 @@ fn pat_list(
 
 #[derive(Deserialize)]
 struct PatApproveReq {
-    symbol:  String,
-    owner:   String,
+    symbol: String,
+    owner: String,
     spender: String,
-    amount:  String,
+    amount: String,
 }
 
 fn pat_approve(
@@ -1639,27 +1816,39 @@ fn pat_approve(
         .and(warp::post())
         .and(warp::body::json::<PatApproveReq>())
         .and(with_arc_state(state))
-        .map(|req: PatApproveReq, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |req: PatApproveReq, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let spender = match hex_to_address(&req.spender) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let amount: u128 = req.amount.parse().unwrap_or(0);
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::Approve(bleep_pat::ApproveIntent {
-                            symbol: req.symbol.clone(), spender, amount,
+                            symbol: req.symbol.clone(),
+                            spender,
+                            amount,
                         }),
-                        15_000, 0, 0,
+                        15_000,
+                        0,
+                        0,
                     );
                     let mut r = reg.lock();
                     match r.execute(&intent) {
@@ -1676,13 +1865,15 @@ fn pat_approve(
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
-            }
-        })
+            },
+        )
 }
 
 // ── POST /rpc/pat/freeze ──────────────────────────────────────────────────────
@@ -1690,7 +1881,7 @@ fn pat_approve(
 #[derive(Deserialize)]
 struct PatFreezeReq {
     symbol: String,
-    owner:  String,
+    owner: String,
     frozen: bool,
 }
 
@@ -1701,21 +1892,28 @@ fn pat_freeze(
         .and(warp::post())
         .and(warp::body::json::<PatFreezeReq>())
         .and(with_arc_state(state))
-        .map(|req: PatFreezeReq, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |req: PatFreezeReq, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::Freeze(bleep_pat::FreezeIntent {
-                            symbol: req.symbol.clone(), frozen: req.frozen,
+                            symbol: req.symbol.clone(),
+                            frozen: req.frozen,
                         }),
-                        10_000, 0, 0,
+                        10_000,
+                        0,
+                        0,
                     );
                     let mut r = reg.lock();
                     match r.execute(&intent) {
@@ -1730,21 +1928,23 @@ fn pat_freeze(
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
-            }
-        })
+            },
+        )
 }
 
 // ── POST /rpc/pat/set-burn-rate ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct PatSetBurnRateReq {
-    symbol:       String,
-    owner:        String,
+    symbol: String,
+    owner: String,
     new_rate_bps: u16,
 }
 
@@ -1755,21 +1955,28 @@ fn pat_set_burn_rate(
         .and(warp::post())
         .and(warp::body::json::<PatSetBurnRateReq>())
         .and(with_arc_state(state))
-        .map(|req: PatSetBurnRateReq, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |req: PatSetBurnRateReq, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::UpdateBurnRate(bleep_pat::UpdateBurnRateIntent {
-                            symbol: req.symbol.clone(), new_rate_bps: req.new_rate_bps,
+                            symbol: req.symbol.clone(),
+                            new_rate_bps: req.new_rate_bps,
                         }),
-                        10_000, 0, 0,
+                        10_000,
+                        0,
+                        0,
                     );
                     let mut r = reg.lock();
                     match r.execute(&intent) {
@@ -1784,21 +1991,23 @@ fn pat_set_burn_rate(
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
-            }
-        })
+            },
+        )
 }
 
 // ── POST /rpc/pat/set-owner ───────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct PatSetOwnerReq {
-    symbol:    String,
-    owner:     String,
+    symbol: String,
+    owner: String,
     new_owner: String,
 }
 
@@ -1809,28 +2018,39 @@ fn pat_set_owner(
         .and(warp::post())
         .and(warp::body::json::<PatSetOwnerReq>())
         .and(with_arc_state(state))
-        .map(|req: PatSetOwnerReq, st: Arc<RpcState>| {
-            match &st.pat_registry {
+        .map(
+            |req: PatSetOwnerReq, st: Arc<RpcState>| match &st.pat_registry {
                 None => return pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let new_owner = match hex_to_address(&req.new_owner) {
-                        Ok(a) => a, Err(e) => return warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e }),
-                            warp::http::StatusCode::BAD_REQUEST),
+                        Ok(a) => a,
+                        Err(e) => {
+                            return warp::reply::with_status(
+                                warp::reply::json(&ErrResp { error: e }),
+                                warp::http::StatusCode::BAD_REQUEST,
+                            )
+                        }
                     };
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::TransferOwnership(
                             bleep_pat::TransferOwnershipIntent {
-                                symbol: req.symbol.clone(), new_owner,
-                            }
+                                symbol: req.symbol.clone(),
+                                new_owner,
+                            },
                         ),
-                        20_000, 0, 0,
+                        20_000,
+                        0,
+                        0,
                     );
                     let mut r = reg.lock();
                     match r.execute(&intent) {
@@ -1845,15 +2065,16 @@ fn pat_set_owner(
                             warp::http::StatusCode::OK,
                         ),
                         Err(e) => warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: e.to_string() }),
+                            warp::reply::json(&ErrResp {
+                                error: e.to_string(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ),
                     }
                 }
-            }
-        })
+            },
+        )
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SPRINT 8 — FAUCET, AUTH HARDENING, EXPLORER, PROMETHEUS METRICS
@@ -1863,27 +2084,27 @@ fn pat_set_owner(
 
 #[derive(Serialize)]
 struct FaucetDripResp {
-    address:       String,
-    amount_bleep:  u64,   // human-readable BLEEP (no decimals)
-    amount_micro:  u64,   // microBLEEP (8 decimals)
+    address: String,
+    amount_bleep: u64, // human-readable BLEEP (no decimals)
+    amount_micro: u64, // microBLEEP (8 decimals)
     cooldown_secs: u64,
-    message:       String,
+    message: String,
 }
 
 #[derive(Serialize)]
 struct FaucetStatusResp {
-    balance_bleep:     u64,
-    balance_micro:     u64,
+    balance_bleep: u64,
+    balance_micro: u64,
     drip_amount_bleep: u64,
-    cooldown_secs:     u64,
-    total_drips:       usize,
+    cooldown_secs: u64,
+    total_drips: usize,
 }
 
 #[derive(Serialize)]
 struct AuthRotateResp {
-    ok:             bool,
+    ok: bool,
     rotation_count: u64,
-    message:        String,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -1906,7 +2127,7 @@ fn faucet_drip(
         .and(with_arc_state(state))
         .map(|address: String, xff: Option<String>, st: Arc<RpcState>| {
             let now = now_secs();
-            let ip  = xff
+            let ip = xff
                 .and_then(|h| h.split(',').next().map(|s| s.trim().to_string()))
                 .unwrap_or_else(|| "unknown".to_string());
 
@@ -1921,7 +2142,10 @@ fn faucet_drip(
                             warp::reply::json(&ErrResp {
                                 error: format!(
                                     "Address {} already dripped. Wait {} s ({} h {} m).",
-                                    address, wait, wait / 3600, (wait % 3600) / 60
+                                    address,
+                                    wait,
+                                    wait / 3600,
+                                    (wait % 3600) / 60
                                 ),
                             }),
                             warp::http::StatusCode::TOO_MANY_REQUESTS,
@@ -1939,9 +2163,7 @@ fn faucet_drip(
                         let wait = RpcState::FAUCET_COOLDOWN_SECS - elapsed;
                         return Box::new(warp::reply::with_status(
                             warp::reply::json(&ErrResp {
-                                error: format!(
-                                    "IP {} already dripped. Wait {} s.", ip, wait
-                                ),
+                                error: format!("IP {} already dripped. Wait {} s.", ip, wait),
                             }),
                             warp::http::StatusCode::TOO_MANY_REQUESTS,
                         )) as Box<dyn warp::Reply + Send>;
@@ -1953,23 +2175,31 @@ fn faucet_drip(
             let balance = st.faucet_balance.load(std::sync::atomic::Ordering::SeqCst);
             if balance < RpcState::FAUCET_DRIP_AMOUNT {
                 return Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: "Faucet balance depleted.".into() }),
+                    warp::reply::json(&ErrResp {
+                        error: "Faucet balance depleted.".into(),
+                    }),
                     warp::http::StatusCode::SERVICE_UNAVAILABLE,
                 )) as Box<dyn warp::Reply + Send>;
             }
 
             // ── Dispense ──
-            st.faucet_balance.fetch_sub(RpcState::FAUCET_DRIP_AMOUNT, std::sync::atomic::Ordering::SeqCst);
+            st.faucet_balance.fetch_sub(
+                RpcState::FAUCET_DRIP_AMOUNT,
+                std::sync::atomic::Ordering::SeqCst,
+            );
             st.faucet_drips.lock().insert(address.clone(), now);
             st.faucet_ip_drips.lock().insert(ip, now);
 
             Box::new(warp::reply::with_status(
                 warp::reply::json(&FaucetDripResp {
-                    address:       address.clone(),
-                    amount_bleep:  1_000,
-                    amount_micro:  RpcState::FAUCET_DRIP_AMOUNT,
+                    address: address.clone(),
+                    amount_bleep: 1_000,
+                    amount_micro: RpcState::FAUCET_DRIP_AMOUNT,
                     cooldown_secs: RpcState::FAUCET_COOLDOWN_SECS,
-                    message:       format!("1,000 test BLEEP sent to {}. Valid on bleep-testnet-1.", address),
+                    message: format!(
+                        "1,000 test BLEEP sent to {}. Valid on bleep-testnet-1.",
+                        address
+                    ),
                 }),
                 warp::http::StatusCode::OK,
             )) as Box<dyn warp::Reply + Send>
@@ -1985,12 +2215,12 @@ fn faucet_status(
         .and(with_arc_state(state))
         .map(|st: Arc<RpcState>| {
             let balance_micro = st.faucet_balance.load(std::sync::atomic::Ordering::Relaxed);
-            let total_drips   = st.faucet_drips.lock().len();
+            let total_drips = st.faucet_drips.lock().len();
             warp::reply::json(&FaucetStatusResp {
-                balance_bleep:     balance_micro / 100_000_000,
+                balance_bleep: balance_micro / 100_000_000,
                 balance_micro,
                 drip_amount_bleep: 1_000,
-                cooldown_secs:     RpcState::FAUCET_COOLDOWN_SECS,
+                cooldown_secs: RpcState::FAUCET_COOLDOWN_SECS,
                 total_drips,
             })
         })
@@ -2012,14 +2242,16 @@ fn auth_rotate_secret(
             // Validate that the base64 secret decodes to ≥32 bytes
             match base64::decode(&req.new_secret_b64) {
                 Ok(bytes) if bytes.len() >= 32 => {
-                    let count = st.jwt_rotation_count
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let count = st
+                        .jwt_rotation_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
                     log::info!("JWT secret rotation #{} accepted via RPC", count);
                     Box::new(warp::reply::with_status(
                         warp::reply::json(&AuthRotateResp {
-                            ok:             true,
+                            ok: true,
                             rotation_count: count,
-                            message:        format!(
+                            message: format!(
                                 "Secret rotated successfully (rotation #{}). \
                                  All existing sessions will be invalidated on next validation.",
                                 count
@@ -2141,15 +2373,13 @@ fn auth_audit_export(
 // endpoints (/rpc/block/latest, /rpc/health, /rpc/validator/list).
 // Served as inline HTML + vanilla JS — no build step required.
 fn explorer_ui() -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-    warp::path!("explorer")
-        .and(warp::get())
-        .map(|| {
-            warp::http::Response::builder()
-                .status(200)
-                .header("content-type", "text/html; charset=utf-8")
-                .body(EXPLORER_HTML)
-                .unwrap()
-        })
+    warp::path!("explorer").and(warp::get()).map(|| {
+        warp::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/html; charset=utf-8")
+            .body(EXPLORER_HTML)
+            .unwrap()
+    })
 }
 
 // ── GET /rpc/explorer/blocks ──────────────────────────────────────────────────
@@ -2163,15 +2393,17 @@ fn explorer_api_blocks(
             let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
             let blocks: Vec<serde_json::Value> = (0..10u64)
                 .filter_map(|i| height.checked_sub(i).map(|h| (i, h)))
-                .map(|(i, h)| serde_json::json!({
-                    "height":    h,
-                    "hash":      format!("{:064x}", h ^ 0xb1ee_b1ee_b1ee_b1ee),
-                    "tx_count":  (h % 64) as u32,
-                    "epoch":     h / 100,
-                    "timestamp": now_secs().saturating_sub(i * 3),
-                    "proposer":  format!("validator-{}", h % 7),
-                    "size_bytes": 1024 + (h % 3072) as u32,
-                }))
+                .map(|(i, h)| {
+                    serde_json::json!({
+                        "height":    h,
+                        "hash":      format!("{:064x}", h ^ 0xb1ee_b1ee_b1ee_b1ee),
+                        "tx_count":  (h % 64) as u32,
+                        "epoch":     h / 100,
+                        "timestamp": now_secs().saturating_sub(i * 3),
+                        "proposer":  format!("validator-{}", h % 7),
+                        "size_bytes": 1024 + (h % 3072) as u32,
+                    })
+                })
                 .collect();
             warp::reply::json(&serde_json::json!({ "blocks": blocks, "latest_height": height }))
         })
@@ -2224,17 +2456,21 @@ fn metrics_prometheus(
         .and(warp::get())
         .and(with_arc_state(state))
         .map(|st: Arc<RpcState>| {
-            let height  = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            let blocks  = st.blocks_produced.load(std::sync::atomic::Ordering::Relaxed);
-            let txs     = st.txs_processed.load(std::sync::atomic::Ordering::Relaxed);
-            let peers   = st.peer_count.load(std::sync::atomic::Ordering::Relaxed);
-            let uptime  = st.uptime_secs();
-            let drips   = st.faucet_drips.lock().len();
+            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
+            let blocks = st
+                .blocks_produced
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let txs = st.txs_processed.load(std::sync::atomic::Ordering::Relaxed);
+            let peers = st.peer_count.load(std::sync::atomic::Ordering::Relaxed);
+            let uptime = st.uptime_secs();
+            let drips = st.faucet_drips.lock().len();
             let faucet_bal = st.faucet_balance.load(std::sync::atomic::Ordering::Relaxed);
-            let jwt_rot = st.jwt_rotation_count.load(std::sync::atomic::Ordering::Relaxed);
+            let jwt_rot = st
+                .jwt_rotation_count
+                .load(std::sync::atomic::Ordering::Relaxed);
 
             let body = format!(
-r#"# HELP bleep_chain_height Current canonical chain height (block number).
+                r#"# HELP bleep_chain_height Current canonical chain height (block number).
 # TYPE bleep_chain_height gauge
 bleep_chain_height {height}
 
@@ -2456,16 +2692,18 @@ mod base64 {
         use std::collections::HashMap;
         let alphabet: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut map = HashMap::new();
-        for (i, &c) in alphabet.iter().enumerate() { map.insert(c, i as u8); }
+        for (i, &c) in alphabet.iter().enumerate() {
+            map.insert(c, i as u8);
+        }
         let s = s.trim_end_matches('=').as_bytes();
         let mut out = Vec::with_capacity(s.len() * 3 / 4 + 1);
         let mut i = 0;
         while i + 3 < s.len() {
-            let (a,b,c,d) = (
+            let (a, b, c, d) = (
                 *map.get(&s[i]).ok_or("bad char")?,
-                *map.get(&s[i+1]).ok_or("bad char")?,
-                *map.get(&s[i+2]).ok_or("bad char")?,
-                *map.get(&s[i+3]).ok_or("bad char")?,
+                *map.get(&s[i + 1]).ok_or("bad char")?,
+                *map.get(&s[i + 2]).ok_or("bad char")?,
+                *map.get(&s[i + 3]).ok_or("bad char")?,
             );
             out.push((a << 2) | (b >> 4));
             out.push((b << 4) | (c >> 2));
@@ -2474,11 +2712,18 @@ mod base64 {
         }
         match s.len() - i {
             2 => {
-                let (a,b) = (*map.get(&s[i]).ok_or("bad char")?, *map.get(&s[i+1]).ok_or("bad char")?);
+                let (a, b) = (
+                    *map.get(&s[i]).ok_or("bad char")?,
+                    *map.get(&s[i + 1]).ok_or("bad char")?,
+                );
                 out.push((a << 2) | (b >> 4));
             }
             3 => {
-                let (a,b,c) = (*map.get(&s[i]).ok_or("bad char")?, *map.get(&s[i+1]).ok_or("bad char")?, *map.get(&s[i+2]).ok_or("bad char")?);
+                let (a, b, c) = (
+                    *map.get(&s[i]).ok_or("bad char")?,
+                    *map.get(&s[i + 1]).ok_or("bad char")?,
+                    *map.get(&s[i + 2]).ok_or("bad char")?,
+                );
                 out.push((a << 2) | (b >> 4));
                 out.push((b << 4) | (c >> 2));
             }
@@ -2506,7 +2751,10 @@ mod tests_sprint8 {
     fn faucet_drip_decrements_balance() {
         let st = Arc::new(RpcState::new());
         let before = st.faucet_balance.load(std::sync::atomic::Ordering::Relaxed);
-        st.faucet_balance.fetch_sub(RpcState::FAUCET_DRIP_AMOUNT, std::sync::atomic::Ordering::SeqCst);
+        st.faucet_balance.fetch_sub(
+            RpcState::FAUCET_DRIP_AMOUNT,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         let after = st.faucet_balance.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(before - after, RpcState::FAUCET_DRIP_AMOUNT);
     }
@@ -2525,9 +2773,18 @@ mod tests_sprint8 {
     #[test]
     fn jwt_rotation_counter_increments() {
         let st = Arc::new(RpcState::new());
-        assert_eq!(st.jwt_rotation_count.load(std::sync::atomic::Ordering::Relaxed), 0);
-        st.jwt_rotation_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(st.jwt_rotation_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            st.jwt_rotation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        st.jwt_rotation_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            st.jwt_rotation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -2546,7 +2803,8 @@ mod tests_sprint8 {
     #[test]
     fn prometheus_output_contains_keys() {
         let st = Arc::new(RpcState::new());
-        st.chain_height.store(42, std::sync::atomic::Ordering::Relaxed);
+        st.chain_height
+            .store(42, std::sync::atomic::Ordering::Relaxed);
         let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(height, 42);
     }
@@ -2677,9 +2935,15 @@ pub fn governance_propose_route(
         .and(warp::body::content_length_limit(65_536))
         .and(warp::body::json())
         .map(move |body: serde_json::Value| {
-            let title       = body.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)");
-            let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let deposit     = body.get("deposit").and_then(|v| v.as_u64()).unwrap_or(0);
+            let title = body
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(untitled)");
+            let description = body
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let deposit = body.get("deposit").and_then(|v| v.as_u64()).unwrap_or(0);
             if deposit < 10_000_000_000_000 {
                 return warp::reply::json(&serde_json::json!({
                     "error": "insufficient_deposit",
@@ -2687,7 +2951,9 @@ pub fn governance_propose_route(
                     "provided": deposit
                 }));
             }
-            let pid: u64 = (title.len() as u64).wrapping_mul(0x9e3779b9).wrapping_add(deposit);
+            let pid: u64 = (title.len() as u64)
+                .wrapping_mul(0x9e3779b9)
+                .wrapping_add(deposit);
             warp::reply::json(&serde_json::json!({
                 "proposal_id":       pid,
                 "title":             title,
@@ -2712,9 +2978,18 @@ pub fn governance_vote_route(
         .and(warp::body::content_length_limit(65_536))
         .and(warp::body::json())
         .map(move |body: serde_json::Value| {
-            let proposal_id = body.get("proposal_id").and_then(|v| v.as_u64()).unwrap_or(0);
-            let voter       = body.get("voter").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let vote        = body.get("vote").and_then(|v| v.as_str()).unwrap_or("abstain");
+            let proposal_id = body
+                .get("proposal_id")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let voter = body
+                .get("voter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let vote = body
+                .get("vote")
+                .and_then(|v| v.as_str())
+                .unwrap_or("abstain");
             warp::reply::json(&serde_json::json!({
                 "proposal_id":  proposal_id,
                 "voter":        voter,
@@ -2763,11 +3038,19 @@ pub fn layer3_intent_submit_route(
         .and(warp::body::content_length_limit(65_536))
         .and(warp::body::json())
         .map(move |body: serde_json::Value| {
-            let sender    = body.get("sender").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let recipient = body.get("recipient").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let amount    = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let sender = body
+                .get("sender")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let recipient = body
+                .get("recipient")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let amount = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
             // Generate deterministic intent ID
-            let seed = sender.bytes().fold(0u64, |a,b| a.wrapping_add(b as u64))
+            let seed = sender
+                .bytes()
+                .fold(0u64, |a, b| a.wrapping_add(b as u64))
                 .wrapping_add(amount);
             let intent_id = format!("{:064x}", seed.wrapping_mul(0x9e3779b97f4a7c15));
             warp::reply::json(&serde_json::json!({

@@ -29,17 +29,17 @@ pub type Address = [u8; 32];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTokenIntent {
     /// Unique token symbol (e.g. "USDB", "WETH-PAT").  Max 16 chars.
-    pub symbol:           String,
+    pub symbol: String,
     /// Human-readable name.  Max 64 chars.
-    pub name:             String,
+    pub name: String,
     /// Decimal places (0–18).
-    pub decimals:         u8,
+    pub decimals: u8,
     /// Maximum total supply (0 = unlimited).
     pub total_supply_cap: u128,
     /// Deflationary burn rate on each transfer (basis points, 0–1000 = 0–10%).
-    pub burn_rate_bps:    u16,
+    pub burn_rate_bps: u16,
     /// Whether transfers can be frozen by the owner (compliance use-case).
-    pub freezable:        bool,
+    pub freezable: bool,
 }
 
 /// Mint `amount` tokens of `symbol` to `to`.
@@ -47,7 +47,7 @@ pub struct CreateTokenIntent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MintIntent {
     pub symbol: String,
-    pub to:     Address,
+    pub to: Address,
     pub amount: u128,
 }
 
@@ -63,26 +63,26 @@ pub struct BurnIntent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferIntent {
     pub symbol: String,
-    pub to:     Address,
+    pub to: Address,
     pub amount: u128,
     /// Optional memo attached to the transfer (max 128 bytes).
-    pub memo:   Option<Vec<u8>>,
+    pub memo: Option<Vec<u8>>,
 }
 
 /// Approve `spender` to transfer up to `amount` from caller's balance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApproveIntent {
-    pub symbol:  String,
+    pub symbol: String,
     pub spender: Address,
-    pub amount:  u128,
+    pub amount: u128,
 }
 
 /// Transfer `amount` tokens from `from` to `to` using a prior approval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferFromIntent {
     pub symbol: String,
-    pub from:   Address,
-    pub to:     Address,
+    pub from: Address,
+    pub to: Address,
     pub amount: u128,
 }
 
@@ -96,14 +96,14 @@ pub struct FreezeIntent {
 /// Update the token's burn rate (owner only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateBurnRateIntent {
-    pub symbol:        String,
-    pub new_rate_bps:  u16,
+    pub symbol: String,
+    pub new_rate_bps: u16,
 }
 
 /// Transfer token ownership to a new address (owner only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferOwnershipIntent {
-    pub symbol:    String,
+    pub symbol: String,
     pub new_owner: Address,
 }
 
@@ -132,25 +132,37 @@ pub struct PATIntent {
     /// The authenticated caller address.
     /// In production this is verified against the transaction signature
     /// before the intent reaches the PAT engine.
-    pub caller:    Address,
+    pub caller: Address,
 
     /// The operation to perform.
-    pub kind:      PATIntentKind,
+    pub kind: PATIntentKind,
 
     /// Maximum gas the caller authorises for this intent.
     pub gas_limit: u64,
 
     /// Block number at submission (used for replay-protection window).
-    pub block:     u64,
+    pub block: u64,
 
     /// Unique nonce for this caller (prevents replay within same block).
-    pub nonce:     u64,
+    pub nonce: u64,
 }
 
 impl PATIntent {
     /// Build a new intent.
-    pub fn new(caller: Address, kind: PATIntentKind, gas_limit: u64, block: u64, nonce: u64) -> Self {
-        PATIntent { caller, kind, gas_limit, block, nonce }
+    pub fn new(
+        caller: Address,
+        kind: PATIntentKind,
+        gas_limit: u64,
+        block: u64,
+        nonce: u64,
+    ) -> Self {
+        PATIntent {
+            caller,
+            kind,
+            gas_limit,
+            block,
+            nonce,
+        }
     }
 
     /// Compute a 32-byte canonical hash of this intent.
@@ -165,15 +177,15 @@ impl PATIntent {
     /// Human-readable operation name for logging.
     pub fn op_name(&self) -> &'static str {
         match &self.kind {
-            PATIntentKind::CreateToken(_)        => "CreateToken",
-            PATIntentKind::Mint(_)               => "Mint",
-            PATIntentKind::Burn(_)               => "Burn",
-            PATIntentKind::Transfer(_)           => "Transfer",
-            PATIntentKind::Approve(_)            => "Approve",
-            PATIntentKind::TransferFrom(_)       => "TransferFrom",
-            PATIntentKind::Freeze(_)             => "Freeze",
-            PATIntentKind::UpdateBurnRate(_)     => "UpdateBurnRate",
-            PATIntentKind::TransferOwnership(_)  => "TransferOwnership",
+            PATIntentKind::CreateToken(_) => "CreateToken",
+            PATIntentKind::Mint(_) => "Mint",
+            PATIntentKind::Burn(_) => "Burn",
+            PATIntentKind::Transfer(_) => "Transfer",
+            PATIntentKind::Approve(_) => "Approve",
+            PATIntentKind::TransferFrom(_) => "TransferFrom",
+            PATIntentKind::Freeze(_) => "Freeze",
+            PATIntentKind::UpdateBurnRate(_) => "UpdateBurnRate",
+            PATIntentKind::TransferOwnership(_) => "TransferOwnership",
         }
     }
 }
@@ -209,7 +221,11 @@ impl PATIntent {
     pub fn mint(caller: Address, symbol: impl Into<String>, to: Address, amount: u128) -> Self {
         Self::new(
             caller,
-            PATIntentKind::Mint(MintIntent { symbol: symbol.into(), to, amount }),
+            PATIntentKind::Mint(MintIntent {
+                symbol: symbol.into(),
+                to,
+                amount,
+            }),
             21_000,
             0,
             0,
@@ -234,10 +250,13 @@ impl PATIntent {
     pub fn burn(caller: Address, symbol: impl Into<String>, amount: u128) -> Self {
         Self::new(
             caller,
-            PATIntentKind::Burn(BurnIntent { symbol: symbol.into(), amount }),
+            PATIntentKind::Burn(BurnIntent {
+                symbol: symbol.into(),
+                amount,
+            }),
             21_000,
             0,
             0,
         )
     }
-} 
+}

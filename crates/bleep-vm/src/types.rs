@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub enum ChainId {
     Bleep,
     Ethereum,
-    EthereumL2(String),   // Arbitrum, Optimism, Base …
+    EthereumL2(String), // Arbitrum, Optimism, Base …
     Bitcoin,
     Solana,
     CosmosHub,
@@ -28,17 +28,17 @@ pub enum ChainId {
 impl fmt::Display for ChainId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ChainId::Bleep              => write!(f, "bleep"),
-            ChainId::Ethereum           => write!(f, "ethereum"),
-            ChainId::EthereumL2(name)   => write!(f, "evm-l2:{name}"),
-            ChainId::Bitcoin            => write!(f, "bitcoin"),
-            ChainId::Solana             => write!(f, "solana"),
-            ChainId::CosmosHub          => write!(f, "cosmos"),
-            ChainId::Polkadot           => write!(f, "polkadot"),
-            ChainId::Near               => write!(f, "near"),
-            ChainId::Sui                => write!(f, "sui"),
-            ChainId::Aptos              => write!(f, "aptos"),
-            ChainId::Custom(s)          => write!(f, "custom:{s}"),
+            ChainId::Bleep => write!(f, "bleep"),
+            ChainId::Ethereum => write!(f, "ethereum"),
+            ChainId::EthereumL2(name) => write!(f, "evm-l2:{name}"),
+            ChainId::Bitcoin => write!(f, "bitcoin"),
+            ChainId::Solana => write!(f, "solana"),
+            ChainId::CosmosHub => write!(f, "cosmos"),
+            ChainId::Polkadot => write!(f, "polkadot"),
+            ChainId::Near => write!(f, "near"),
+            ChainId::Sui => write!(f, "sui"),
+            ChainId::Aptos => write!(f, "aptos"),
+            ChainId::Custom(s) => write!(f, "custom:{s}"),
         }
     }
 }
@@ -146,8 +146,8 @@ impl SignedTransaction {
 /// A single state-storage write (key/value pair).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateWrite {
-    pub key:         Vec<u8>,
-    pub value:       Vec<u8>,
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
     /// Monotonically increasing counter so writes are hashed in order.
     pub write_index: u64,
 }
@@ -155,9 +155,9 @@ pub struct StateWrite {
 /// Committed state snapshot: ordered set of writes + a Merkle-like root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSnapshot {
-    pub writes:     Vec<StateWrite>,
+    pub writes: Vec<StateWrite>,
     pub state_root: [u8; 32],
-    pub block_num:  u64,
+    pub block_num: u64,
 }
 
 impl StateSnapshot {
@@ -184,23 +184,23 @@ impl StateSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {
     /// ABI-encoded return data.
-    pub output:         Vec<u8>,
+    pub output: Vec<u8>,
     /// Actual gas consumed.
-    pub gas_used:       u64,
+    pub gas_used: u64,
     /// State root after all writes committed.
-    pub state_root:     [u8; 32],
+    pub state_root: [u8; 32],
     /// Wall-clock execution time.
     pub execution_time: Duration,
     /// Peak memory in bytes.
-    pub memory_peak:    usize,
+    pub memory_peak: usize,
     /// ZK proof of correct execution (optional — generated when requested).
-    pub zk_proof:       Option<ZkExecutionProof>,
+    pub zk_proof: Option<ZkExecutionProof>,
     /// Logs emitted by the contract.
-    pub logs:           Vec<ExecutionLog>,
+    pub logs: Vec<ExecutionLog>,
     /// Chain-specific return code.
-    pub return_code:    i32,
+    pub return_code: i32,
     /// Optimisation report.
-    pub opt_report:     OptimisationReport,
+    pub opt_report: OptimisationReport,
 }
 
 impl ExecutionResult {
@@ -215,13 +215,18 @@ impl ExecutionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionLog {
-    pub level:   LogLevel,
+    pub level: LogLevel,
     pub message: String,
-    pub data:    Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LogLevel { Debug, Info, Warning, Error }
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ZK PROOF
@@ -231,11 +236,11 @@ pub enum LogLevel { Debug, Info, Warning, Error }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZkExecutionProof {
     /// Serialised ark-groth16 proof bytes.
-    pub proof_bytes:    Vec<u8>,
+    pub proof_bytes: Vec<u8>,
     /// Public inputs: [state_root_before, state_root_after, gas_used, tx_hash].
-    pub public_inputs:  Vec<Vec<u8>>,
+    pub public_inputs: Vec<Vec<u8>>,
     /// SHA-256 of the verification key used.
-    pub vk_hash:        [u8; 32],
+    pub vk_hash: [u8; 32],
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -255,25 +260,27 @@ pub enum OptimisationLevel {
 }
 
 impl Default for OptimisationLevel {
-    fn default() -> Self { OptimisationLevel::Standard }
+    fn default() -> Self {
+        OptimisationLevel::Standard
+    }
 }
 
 /// Summary of all transformations applied.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OptimisationReport {
-    pub level:              OptimisationLevel,
+    pub level: OptimisationLevel,
     /// Original bytecode size in bytes.
-    pub original_size:      usize,
+    pub original_size: usize,
     /// Optimised bytecode size in bytes.
-    pub optimised_size:     usize,
+    pub optimised_size: usize,
     /// Estimated gas saving (%).
-    pub gas_saving_pct:     f64,
+    pub gas_saving_pct: f64,
     /// List of passes applied.
-    pub passes_applied:     Vec<String>,
+    pub passes_applied: Vec<String>,
     /// Dead instructions removed.
     pub dead_instr_removed: u32,
     /// Constants folded.
-    pub constants_folded:   u32,
+    pub constants_folded: u32,
 }
 
 impl OptimisationReport {
@@ -309,48 +316,48 @@ impl Default for GasSchedule {
     fn default() -> Self {
         let mut costs = BTreeMap::new();
         // WASM numeric operations
-        costs.insert(WasmOpcode::I32Const,    1);
-        costs.insert(WasmOpcode::I64Const,    1);
-        costs.insert(WasmOpcode::I32Add,      3);
-        costs.insert(WasmOpcode::I64Add,      3);
-        costs.insert(WasmOpcode::I32Sub,      3);
-        costs.insert(WasmOpcode::I64Sub,      3);
-        costs.insert(WasmOpcode::I32Mul,      5);
-        costs.insert(WasmOpcode::I64Mul,      5);
-        costs.insert(WasmOpcode::I32DivU,    10);
-        costs.insert(WasmOpcode::I64DivU,    10);
-        costs.insert(WasmOpcode::I32DivS,    10);
-        costs.insert(WasmOpcode::I64DivS,    10);
-        costs.insert(WasmOpcode::I32RemU,    10);
-        costs.insert(WasmOpcode::I32RemS,    10);
-        costs.insert(WasmOpcode::F32Add,      5);
-        costs.insert(WasmOpcode::F64Add,      5);
-        costs.insert(WasmOpcode::F32Mul,      8);
-        costs.insert(WasmOpcode::F64Mul,      8);
+        costs.insert(WasmOpcode::I32Const, 1);
+        costs.insert(WasmOpcode::I64Const, 1);
+        costs.insert(WasmOpcode::I32Add, 3);
+        costs.insert(WasmOpcode::I64Add, 3);
+        costs.insert(WasmOpcode::I32Sub, 3);
+        costs.insert(WasmOpcode::I64Sub, 3);
+        costs.insert(WasmOpcode::I32Mul, 5);
+        costs.insert(WasmOpcode::I64Mul, 5);
+        costs.insert(WasmOpcode::I32DivU, 10);
+        costs.insert(WasmOpcode::I64DivU, 10);
+        costs.insert(WasmOpcode::I32DivS, 10);
+        costs.insert(WasmOpcode::I64DivS, 10);
+        costs.insert(WasmOpcode::I32RemU, 10);
+        costs.insert(WasmOpcode::I32RemS, 10);
+        costs.insert(WasmOpcode::F32Add, 5);
+        costs.insert(WasmOpcode::F64Add, 5);
+        costs.insert(WasmOpcode::F32Mul, 8);
+        costs.insert(WasmOpcode::F64Mul, 8);
         // Memory
-        costs.insert(WasmOpcode::I32Load,     3);
-        costs.insert(WasmOpcode::I64Load,     3);
-        costs.insert(WasmOpcode::I32Store,    5);
-        costs.insert(WasmOpcode::I64Store,    5);
+        costs.insert(WasmOpcode::I32Load, 3);
+        costs.insert(WasmOpcode::I64Load, 3);
+        costs.insert(WasmOpcode::I32Store, 5);
+        costs.insert(WasmOpcode::I64Store, 5);
         costs.insert(WasmOpcode::MemoryGrow, 200);
-        costs.insert(WasmOpcode::MemorySize,   2);
+        costs.insert(WasmOpcode::MemorySize, 2);
         // Control flow
-        costs.insert(WasmOpcode::Call,        20);
-        costs.insert(WasmOpcode::CallIndirect,25);
-        costs.insert(WasmOpcode::If,           2);
-        costs.insert(WasmOpcode::BrIf,         3);
-        costs.insert(WasmOpcode::Return,       2);
+        costs.insert(WasmOpcode::Call, 20);
+        costs.insert(WasmOpcode::CallIndirect, 25);
+        costs.insert(WasmOpcode::If, 2);
+        costs.insert(WasmOpcode::BrIf, 3);
+        costs.insert(WasmOpcode::Return, 2);
         // Bulk memory
         costs.insert(WasmOpcode::MemoryCopy, 10);
-        costs.insert(WasmOpcode::MemoryFill,  8);
+        costs.insert(WasmOpcode::MemoryFill, 8);
 
         GasSchedule {
             costs,
-            memory_per_page:  6400, // 64k page
-            storage_per_byte:   50,
-            cross_call_base:  2000,
-            sha256_per_chunk:  100,
-            log_base:           50,
+            memory_per_page: 6400, // 64k page
+            storage_per_byte: 50,
+            cross_call_base: 2000,
+            sha256_per_chunk: 100,
+            log_base: 50,
         }
     }
 }
@@ -358,19 +365,54 @@ impl Default for GasSchedule {
 /// WASM opcodes we track individually for gas purposes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum WasmOpcode {
-    I32Const, I64Const, F32Const, F64Const,
-    I32Add, I64Add, I32Sub, I64Sub,
-    I32Mul, I64Mul, I32DivU, I64DivU, I32DivS, I64DivS,
-    I32RemU, I32RemS,
-    F32Add, F64Add, F32Mul, F64Mul,
-    I32Load, I64Load, F32Load, F64Load,
-    I32Store, I64Store, F32Store, F64Store,
-    MemoryGrow, MemorySize, MemoryCopy, MemoryFill,
-    Call, CallIndirect,
-    If, Block, Loop, Br, BrIf, BrTable,
-    Return, Unreachable, Nop,
-    LocalGet, LocalSet, LocalTee,
-    GlobalGet, GlobalSet,
+    I32Const,
+    I64Const,
+    F32Const,
+    F64Const,
+    I32Add,
+    I64Add,
+    I32Sub,
+    I64Sub,
+    I32Mul,
+    I64Mul,
+    I32DivU,
+    I64DivU,
+    I32DivS,
+    I64DivS,
+    I32RemU,
+    I32RemS,
+    F32Add,
+    F64Add,
+    F32Mul,
+    F64Mul,
+    I32Load,
+    I64Load,
+    F32Load,
+    F64Load,
+    I32Store,
+    I64Store,
+    F32Store,
+    F64Store,
+    MemoryGrow,
+    MemorySize,
+    MemoryCopy,
+    MemoryFill,
+    Call,
+    CallIndirect,
+    If,
+    Block,
+    Loop,
+    Br,
+    BrIf,
+    BrTable,
+    Return,
+    Unreachable,
+    Nop,
+    LocalGet,
+    LocalSet,
+    LocalTee,
+    GlobalGet,
+    GlobalSet,
     Select,
     Other(u8),
 }

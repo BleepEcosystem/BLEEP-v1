@@ -1,10 +1,10 @@
+use bleep_crypto::quantum_secure::QuantumSecure;
+use dashmap::DashMap;
+use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use thiserror::Error;
-use serde::{Deserialize, Serialize};
-use log::{info, warn, error};
-use dashmap::DashMap;
-use sha2::{Digest, Sha256};
-use bleep_crypto::quantum_secure::QuantumSecure;
 // BLEEPZKPModule — use the canonical definition from bleep-crypto
 use bleep_crypto::zkp_verification::BLEEPZKPModule;
 // BLEEPInteroperabilityModule — from bleep-interop (now a proper crate)
@@ -81,7 +81,12 @@ impl SelfAmendingGovernance {
     }
 
     /// Register a new user securely
-    pub async fn register_user(&self, username: &str, role: &str, public_key: Vec<u8>) -> Result<u64, SelfAmendingError> {
+    pub async fn register_user(
+        &self,
+        username: &str,
+        role: &str,
+        public_key: Vec<u8>,
+    ) -> Result<u64, SelfAmendingError> {
         let user_id = self.users.len() as u64 + 1;
         let user = User {
             id: user_id,
@@ -95,7 +100,12 @@ impl SelfAmendingGovernance {
     }
 
     /// Submit a proposal
-    pub async fn submit_proposal(&self, proposer: User, title: &str, description: &str) -> Result<u64, SelfAmendingError> {
+    pub async fn submit_proposal(
+        &self,
+        proposer: User,
+        title: &str,
+        description: &str,
+    ) -> Result<u64, SelfAmendingError> {
         let proposal_id = self.proposals.len() as u64 + 1;
 
         // Categorize the proposal using the ML model
@@ -127,7 +137,7 @@ impl SelfAmendingGovernance {
     async fn categorize_proposal(&self, description: &str) -> Result<String, SelfAmendingError> {
         // Simple heuristic categorization based on keywords
         let _categories = vec!["Governance", "Development", "Update", "Miscellaneous"];
-        
+
         let description_lower = description.to_lowercase();
         if description_lower.contains("governance") || description_lower.contains("vote") {
             Ok("Governance".to_string())
@@ -152,7 +162,9 @@ impl SelfAmendingGovernance {
 
         // Generate a ZKP for the vote
         let vote_bytes = format!("{}:{}", proposal_id, if support { 1 } else { 0 }).into_bytes();
-        let _proof = self.zkp_module.generate_proof(&vote_bytes)
+        let _proof = self
+            .zkp_module
+            .generate_proof(&vote_bytes)
             .map_err(|_| SelfAmendingError::ZKPGenerationError)?;
 
         if let Some(mut proposal) = self.proposals.get_mut(&proposal_id) {
@@ -204,18 +216,19 @@ impl SelfAmendingGovernance {
     /// Log proposal execution to the blockchain
     async fn log_to_blockchain(&self, log: &str) -> Result<(), SelfAmendingError> {
         let log_data = log.as_bytes();
-        
+
         // Use secure hashing instead of encryption for logging
         let mut hasher = Sha256::new();
         hasher.update(log_data);
         let _log_hash = hasher.finalize().to_vec();
 
         // Relay to the blockchain using interoperability
-        let _exchange: Result<Vec<u8>, String> = self.interoperability
+        let _exchange: Result<Vec<u8>, String> = self
+            .interoperability
             .adapt("ethereum", log_data)
             .await
             .map_err(|e| format!("{:?}", e));
-        
+
         _exchange.map_err(|_| SelfAmendingError::BlockchainIntegrationError)?;
 
         info!("Execution log recorded on the blockchain.");

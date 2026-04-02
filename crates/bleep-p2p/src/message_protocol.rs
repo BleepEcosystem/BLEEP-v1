@@ -21,10 +21,9 @@ use tracing::{debug, error, info, warn};
 use crate::error::{P2PError, P2PResult};
 use crate::peer_manager::PeerManager;
 use crate::quantum_crypto::{
-    kyber_decapsulate, kyber_encapsulate, ed25519_verify,
-    Ed25519Keypair, KyberKeypair, SessionKey,
+    ed25519_verify, kyber_decapsulate, kyber_encapsulate, Ed25519Keypair, KyberKeypair, SessionKey,
 };
-use crate::types::{NodeId, SecureMessage, MessageType, unix_now};
+use crate::types::{unix_now, MessageType, NodeId, SecureMessage};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -62,7 +61,9 @@ struct NonceCache {
 
 impl NonceCache {
     fn new() -> Self {
-        NonceCache { seen: HashMap::new() }
+        NonceCache {
+            seen: HashMap::new(),
+        }
     }
 
     /// Returns `true` if this nonce was already seen (replay).
@@ -131,7 +132,10 @@ impl MessageProtocol {
         let session_key = SessionKey::from_shared_secret(&shared_secret, peer_id.as_bytes());
         self.sessions.insert(
             peer_id.clone(),
-            Session { key: session_key, established_at: unix_now() },
+            Session {
+                key: session_key,
+                established_at: unix_now(),
+            },
         );
         debug!(peer = %peer_id, "Session initiated (encapsulator)");
         Ok(ciphertext)
@@ -143,7 +147,10 @@ impl MessageProtocol {
         let session_key = SessionKey::from_shared_secret(&shared_secret, peer_id.as_bytes());
         self.sessions.insert(
             peer_id.clone(),
-            Session { key: session_key, established_at: unix_now() },
+            Session {
+                key: session_key,
+                established_at: unix_now(),
+            },
         );
         debug!(peer = %peer_id, "Session accepted (decapsulator)");
         Ok(())
@@ -165,7 +172,9 @@ impl MessageProtocol {
         let session = self
             .sessions
             .get(peer_id)
-            .ok_or_else(|| P2PError::PeerNotFound { peer_id: peer_id.to_string() })?;
+            .ok_or_else(|| P2PError::PeerNotFound {
+                peer_id: peer_id.to_string(),
+            })?;
 
         let mut nonce = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
@@ -215,7 +224,9 @@ impl MessageProtocol {
         let session = self
             .sessions
             .get(&msg.sender_id)
-            .ok_or_else(|| P2PError::PeerNotFound { peer_id: msg.sender_id.to_string() })?;
+            .ok_or_else(|| P2PError::PeerNotFound {
+                peer_id: msg.sender_id.to_string(),
+            })?;
         session.key.decrypt(&msg.payload)
     }
 
@@ -223,8 +234,8 @@ impl MessageProtocol {
 
     /// Encode a `SecureMessage` as a length-prefixed frame: `[u32 BE length][bincode bytes]`.
     pub fn encode_frame(msg: &SecureMessage) -> P2PResult<Bytes> {
-        let encoded = bincode::serialize(msg)
-            .map_err(|e| P2PError::Serialization(e.to_string()))?;
+        let encoded =
+            bincode::serialize(msg).map_err(|e| P2PError::Serialization(e.to_string()))?;
         if encoded.len() > MAX_FRAME_BYTES {
             return Err(P2PError::Serialization(format!(
                 "Frame too large: {} bytes",
@@ -243,7 +254,9 @@ impl MessageProtocol {
         let mut len_buf = [0u8; 4];
         timeout(READ_TIMEOUT, stream.read_exact(&mut len_buf))
             .await
-            .map_err(|_| P2PError::ConnectionTimeout { addr: "unknown".into() })?
+            .map_err(|_| P2PError::ConnectionTimeout {
+                addr: "unknown".into(),
+            })?
             .map_err(P2PError::Io)?;
 
         let frame_len = u32::from_be_bytes(len_buf) as usize;
@@ -257,11 +270,12 @@ impl MessageProtocol {
         let mut payload = vec![0u8; frame_len];
         timeout(READ_TIMEOUT, stream.read_exact(&mut payload))
             .await
-            .map_err(|_| P2PError::ConnectionTimeout { addr: "unknown".into() })?
+            .map_err(|_| P2PError::ConnectionTimeout {
+                addr: "unknown".into(),
+            })?
             .map_err(P2PError::Io)?;
 
-        bincode::deserialize(&payload)
-            .map_err(|e| P2PError::Serialization(e.to_string()))
+        bincode::deserialize(&payload).map_err(|e| P2PError::Serialization(e.to_string()))
     }
 
     // ── SEND ─────────────────────────────────────────────────────────────────
@@ -271,12 +285,16 @@ impl MessageProtocol {
         let frame = Self::encode_frame(msg)?;
         let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(peer_addr))
             .await
-            .map_err(|_| P2PError::ConnectionTimeout { addr: peer_addr.to_string() })?
+            .map_err(|_| P2PError::ConnectionTimeout {
+                addr: peer_addr.to_string(),
+            })?
             .map_err(P2PError::Io)?;
 
         timeout(READ_TIMEOUT, stream.write_all(&frame))
             .await
-            .map_err(|_| P2PError::ConnectionTimeout { addr: peer_addr.to_string() })?
+            .map_err(|_| P2PError::ConnectionTimeout {
+                addr: peer_addr.to_string(),
+            })?
             .map_err(P2PError::Io)?;
 
         stream.flush().await.map_err(P2PError::Io)?;
@@ -308,7 +326,11 @@ impl MessageProtocol {
         }
     }
 
-    async fn handle_incoming(&self, mut stream: TcpStream, _peer_addr: SocketAddr) -> P2PResult<()> {
+    async fn handle_incoming(
+        &self,
+        mut stream: TcpStream,
+        _peer_addr: SocketAddr,
+    ) -> P2PResult<()> {
         let msg = Self::decode_frame(&mut stream).await?;
         let sender_id = msg.sender_id.clone();
 
@@ -317,10 +339,15 @@ impl MessageProtocol {
             .peer_manager
             .get_peer(&sender_id)
             .map(|p| p.public_key.clone())
-            .ok_or_else(|| P2PError::PeerNotFound { peer_id: sender_id.to_string() })?;
+            .ok_or_else(|| P2PError::PeerNotFound {
+                peer_id: sender_id.to_string(),
+            })?;
 
         // Anomaly check
-        if let Some(reason) = self.peer_manager.check_message_anomaly(&sender_id, &msg.payload, msg.hop_count) {
+        if let Some(reason) =
+            self.peer_manager
+                .check_message_anomaly(&sender_id, &msg.payload, msg.hop_count)
+        {
             warn!(peer = %sender_id, reason = %reason, "Anomaly detected, flagging peer");
             self.peer_manager.record_failure(&sender_id);
             return Err(P2PError::AuthenticationFailed);
@@ -346,9 +373,13 @@ mod tests {
     use super::*;
     use crate::kademlia_dht::KademliaDht;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, SphincsKeypair, sphincs_sign};
+    use crate::quantum_crypto::{sphincs_sign, Ed25519Keypair, KyberKeypair, SphincsKeypair};
 
-    fn make_proto() -> (Arc<MessageProtocol>, mpsc::Receiver<(NodeId, SecureMessage)>, Arc<PeerManager>) {
+    fn make_proto() -> (
+        Arc<MessageProtocol>,
+        mpsc::Receiver<(NodeId, SecureMessage)>,
+        Arc<PeerManager>,
+    ) {
         let ed = Ed25519Keypair::generate();
         let kyber = KyberKeypair::generate();
         let local_id = NodeId::from_bytes(&ed.public_key_bytes());
@@ -365,13 +396,17 @@ mod tests {
         let peer_id_b = proto_b.local_id.clone();
 
         // A initiates session to B
-        let kem_ct = proto_a.initiate_session(&peer_id_b, &proto_b.local_kyber.public_key.0).unwrap();
+        let kem_ct = proto_a
+            .initiate_session(&peer_id_b, &proto_b.local_kyber.public_key.0)
+            .unwrap();
 
         // B accepts
         proto_b.accept_session(&proto_a.local_id, &kem_ct).unwrap();
 
         // A seals a message
-        let msg = proto_a.seal_message(&peer_id_b, MessageType::Transaction, b"hello bleep").unwrap();
+        let msg = proto_a
+            .seal_message(&peer_id_b, MessageType::Transaction, b"hello bleep")
+            .unwrap();
 
         // Verify the signing bytes are non-empty
         assert!(!msg.signature.is_empty());
@@ -418,13 +453,17 @@ mod tests {
         let (proto_b, _, _) = make_proto();
         let peer_id_b = proto_b.local_id.clone();
 
-        let kem_ct = proto_a.initiate_session(&peer_id_b, &proto_b.local_kyber.public_key.0).unwrap();
+        let kem_ct = proto_a
+            .initiate_session(&peer_id_b, &proto_b.local_kyber.public_key.0)
+            .unwrap();
         proto_b.accept_session(&proto_a.local_id, &kem_ct).unwrap();
 
         // Register peer_a in proto_b's peer manager (normally done during handshake)
         // Skipped here — open_message would fail on peer lookup, which is expected
         // This test validates the nonce-cache path specifically
-        let msg = proto_a.seal_message(&peer_id_b, MessageType::Ping, b"ping").unwrap();
+        let msg = proto_a
+            .seal_message(&peer_id_b, MessageType::Ping, b"ping")
+            .unwrap();
 
         let mut cache = proto_b.nonce_cache.lock().await;
         let now = unix_now();

@@ -80,7 +80,11 @@ impl OnionRouter {
         message_protocol: Arc<MessageProtocol>,
         scoring: Arc<PeerScoring>,
     ) -> Self {
-        OnionRouter { peer_manager, message_protocol, scoring }
+        OnionRouter {
+            peer_manager,
+            message_protocol,
+            scoring,
+        }
     }
 
     // ── ROUTE SELECTION ───────────────────────────────────────────────────────
@@ -101,7 +105,9 @@ impl OnionRouter {
             .collect();
 
         if candidates.is_empty() {
-            return Err(P2PError::NoRoute { sender: sender_id.to_string() });
+            return Err(P2PError::NoRoute {
+                sender: sender_id.to_string(),
+            });
         }
 
         // Shuffle for unlinkability, then truncate
@@ -158,7 +164,8 @@ impl OnionRouter {
             layers.push(layer);
 
             // The payload for the next (outer) layer includes this encrypted layer
-            let last_layer = layers.last().expect("just pushed a layer, cannot be empty"); current_payload = bincode::serialize(last_layer)
+            let last_layer = layers.last().expect("just pushed a layer, cannot be empty");
+            current_payload = bincode::serialize(last_layer)
                 .map_err(|e| P2PError::Serialization(e.to_string()))?;
         }
 
@@ -200,7 +207,9 @@ impl OnionRouter {
         let route = self.select_route(sender_id, MAX_HOPS)?;
 
         if hop_shared_secrets.len() < route.hops.len() {
-            return Err(P2PError::Crypto("Insufficient shared secrets for route".into()));
+            return Err(P2PError::Crypto(
+                "Insufficient shared secrets for route".into(),
+            ));
         }
 
         let circuit = self.wrap(plaintext, &route, &hop_shared_secrets[..route.hops.len()])?;
@@ -210,18 +219,24 @@ impl OnionRouter {
         let addr = self
             .peer_manager
             .get_peer_addr(first_hop_id)
-            .ok_or_else(|| P2PError::PeerNotFound { peer_id: first_hop_id.to_string() })?;
+            .ok_or_else(|| P2PError::PeerNotFound {
+                peer_id: first_hop_id.to_string(),
+            })?;
 
         let outer_bytes = bincode::serialize(&circuit.layers[0])
             .map_err(|e| P2PError::Serialization(e.to_string()))?;
 
         if !self.message_protocol.has_session(first_hop_id) {
-            return Err(P2PError::PeerNotFound { peer_id: first_hop_id.to_string() });
+            return Err(P2PError::PeerNotFound {
+                peer_id: first_hop_id.to_string(),
+            });
         }
 
-        let sealed = self
-            .message_protocol
-            .seal_message(first_hop_id, MessageType::OnionRelay, &outer_bytes)?;
+        let sealed = self.message_protocol.seal_message(
+            first_hop_id,
+            MessageType::OnionRelay,
+            &outer_bytes,
+        )?;
 
         self.message_protocol.send_message(addr, &sealed).await?;
 
@@ -280,7 +295,9 @@ mod tests {
 
         let relay1 = NodeId::random();
         let relay2 = NodeId::random();
-        let route = RoutePath { hops: vec![relay1.clone(), relay2.clone()] };
+        let route = RoutePath {
+            hops: vec![relay1.clone(), relay2.clone()],
+        };
         let secrets = vec![fake_secret(1), fake_secret(2)];
 
         let plaintext = b"super secret payload";
@@ -304,7 +321,9 @@ mod tests {
     #[test]
     fn test_wrap_mismatched_secrets_fails() {
         let (router, _) = make_router();
-        let route = RoutePath { hops: vec![NodeId::random(), NodeId::random()] };
+        let route = RoutePath {
+            hops: vec![NodeId::random(), NodeId::random()],
+        };
         let secrets = vec![fake_secret(1)]; // only 1 secret for 2 hops
         assert!(router.wrap(b"data", &route, &secrets).is_err());
     }

@@ -31,34 +31,34 @@ impl ShardId {
 
 #[derive(Debug, Clone)]
 pub struct CrossShardTx {
-    pub id:          u64,
-    pub from_shard:  ShardId,
-    pub to_shard:    ShardId,
-    pub from_addr:   String,
-    pub to_addr:     String,
-    pub amount:      u128,
-    pub nonce:       u64,
-    pub state:       CrossShardState,
+    pub id: u64,
+    pub from_shard: ShardId,
+    pub to_shard: ShardId,
+    pub from_addr: String,
+    pub to_addr: String,
+    pub amount: u128,
+    pub nonce: u64,
+    pub state: CrossShardState,
     pub initiated_at_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CrossShardState {
-    Initiated,           // Lock on source shard
-    ReceiptPending,      // Waiting for cross-shard receipt
-    Committed,           // Applied on destination shard
-    RolledBack,          // Timeout or failure — source unlocked
+    Initiated,      // Lock on source shard
+    ReceiptPending, // Waiting for cross-shard receipt
+    Committed,      // Applied on destination shard
+    RolledBack,     // Timeout or failure — source unlocked
 }
 
 // ── ShardState ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ShardState {
-    pub shard_id:        ShardId,
-    pub block_height:    u64,
-    pub txs_processed:   u64,
+    pub shard_id: ShardId,
+    pub block_height: u64,
+    pub txs_processed: u64,
     pub pending_receipts: VecDeque<CrossShardTx>,
-    pub validators:      Vec<String>,   // validator IDs assigned to this shard
+    pub validators: Vec<String>, // validator IDs assigned to this shard
 }
 
 impl ShardState {
@@ -66,7 +66,12 @@ impl ShardState {
         // Assign validators round-robin across shards (7 validators, 10 shards)
         let validator_count = 7usize;
         let validators: Vec<String> = (0..2usize)
-            .map(|i| format!("validator-{}", (shard_id.0 as usize * 2 + i) % validator_count))
+            .map(|i| {
+                format!(
+                    "validator-{}",
+                    (shard_id.0 as usize * 2 + i) % validator_count
+                )
+            })
             .collect();
         Self {
             shard_id,
@@ -81,14 +86,14 @@ impl ShardState {
 // ── ShardCoordinator ──────────────────────────────────────────────────────────
 
 pub struct ShardCoordinator {
-    pub shards:      HashMap<ShardId, ShardState>,
-    pub epoch:       u64,
-    pub pending_xs:  HashMap<u64, CrossShardTx>,  // tx_id → CrossShardTx
-    next_tx_id:      u64,
-    total_txs:       u64,
-    total_xs_txs:    u64,
-    committed_xs:    u64,
-    rolledback_xs:   u64,
+    pub shards: HashMap<ShardId, ShardState>,
+    pub epoch: u64,
+    pub pending_xs: HashMap<u64, CrossShardTx>, // tx_id → CrossShardTx
+    next_tx_id: u64,
+    total_txs: u64,
+    total_xs_txs: u64,
+    committed_xs: u64,
+    rolledback_xs: u64,
 }
 
 impl ShardCoordinator {
@@ -111,19 +116,17 @@ impl ShardCoordinator {
     }
 
     /// Submit a cross-shard transaction.
-    pub fn submit_cross_shard(
-        &mut self, from: &str, to: &str, amount: u128, nonce: u64,
-    ) -> u64 {
+    pub fn submit_cross_shard(&mut self, from: &str, to: &str, amount: u128, nonce: u64) -> u64 {
         let id = self.next_tx_id;
         self.next_tx_id += 1;
         let from_shard = ShardId::from_address(from);
-        let to_shard   = ShardId::from_address(to);
+        let to_shard = ShardId::from_address(to);
         let tx = CrossShardTx {
             id,
             from_shard,
             to_shard,
             from_addr: from.into(),
-            to_addr:   to.into(),
+            to_addr: to.into(),
             amount,
             nonce,
             state: CrossShardState::Initiated,
@@ -141,10 +144,10 @@ impl ShardCoordinator {
 
         // Each shard processes intra-shard txs up to MAX_TXS_PER_SHARD_BLOCK
         for shard in self.shards.values_mut() {
-            let intra = MAX_TXS_PER_SHARD_BLOCK as u64 / 2;  // half capacity for intra
+            let intra = MAX_TXS_PER_SHARD_BLOCK as u64 / 2; // half capacity for intra
             shard.txs_processed += intra;
-            shard.block_height  += 1;
-            block_txs           += intra;
+            shard.block_height += 1;
+            block_txs += intra;
         }
 
         // Process cross-shard receipts
@@ -188,7 +191,7 @@ impl ShardCoordinator {
         // 100 blocks × 3 s/block = 300 s per epoch
         let tps = epoch_txs / 300;
         EpochStats {
-            epoch:       self.epoch,
+            epoch: self.epoch,
             blocks_produced: blocks,
             txs_this_epoch: epoch_txs,
             effective_tps: tps,
@@ -203,7 +206,7 @@ impl ShardCoordinator {
         // Inject 1,000 concurrent cross-shard transactions
         for i in 0..CROSS_SHARD_CONCURRENT_TARGET {
             let from_shard_idx = i % NUM_SHARDS;
-            let to_shard_idx   = (i + 1) % NUM_SHARDS;
+            let to_shard_idx = (i + 1) % NUM_SHARDS;
             self.submit_cross_shard(
                 &format!("bleep:shard{}:addr{:05}", from_shard_idx, i),
                 &format!("bleep:shard{}:addr{:05}", to_shard_idx, i + 10_000),
@@ -218,8 +221,12 @@ impl ShardCoordinator {
 
         for _ in 0..STRESS_EPOCH_COUNT {
             let stats = self.tick_epoch();
-            if stats.effective_tps < min_tps { min_tps = stats.effective_tps; }
-            if stats.effective_tps > max_tps { max_tps = stats.effective_tps; }
+            if stats.effective_tps < min_tps {
+                min_tps = stats.effective_tps;
+            }
+            if stats.effective_tps > max_tps {
+                max_tps = stats.effective_tps;
+            }
             epoch_stats.push(stats);
         }
 
@@ -227,50 +234,58 @@ impl ShardCoordinator {
         let target_met = avg_tps >= TARGET_TPS || max_tps >= TARGET_TPS;
 
         StressTestResult {
-            total_epochs:    STRESS_EPOCH_COUNT,
-            total_txs:       self.total_txs,
-            total_xs_txs:    self.total_xs_txs,
-            committed_xs:    self.committed_xs,
-            rolledback_xs:   self.rolledback_xs,
+            total_epochs: STRESS_EPOCH_COUNT,
+            total_txs: self.total_txs,
+            total_xs_txs: self.total_xs_txs,
+            committed_xs: self.committed_xs,
+            rolledback_xs: self.rolledback_xs,
             avg_tps,
             min_tps,
             max_tps,
-            target_tps:      TARGET_TPS,
+            target_tps: TARGET_TPS,
             target_met,
             epoch_stats,
         }
     }
 
-    pub fn total_txs(&self) -> u64   { self.total_txs }
-    pub fn shard_count(&self) -> usize { self.shards.len() }
+    pub fn total_txs(&self) -> u64 {
+        self.total_txs
+    }
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
 }
 
-impl Default for ShardCoordinator { fn default() -> Self { Self::new() } }
+impl Default for ShardCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct EpochStats {
-    pub epoch:            u64,
-    pub blocks_produced:  u64,
-    pub txs_this_epoch:   u64,
-    pub effective_tps:    u64,
-    pub pending_xs:       u64,
-    pub committed_xs:     u64,
-    pub rolledback_xs:    u64,
+    pub epoch: u64,
+    pub blocks_produced: u64,
+    pub txs_this_epoch: u64,
+    pub effective_tps: u64,
+    pub pending_xs: u64,
+    pub committed_xs: u64,
+    pub rolledback_xs: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct StressTestResult {
-    pub total_epochs:  u64,
-    pub total_txs:     u64,
-    pub total_xs_txs:  u64,
-    pub committed_xs:  u64,
+    pub total_epochs: u64,
+    pub total_txs: u64,
+    pub total_xs_txs: u64,
+    pub committed_xs: u64,
     pub rolledback_xs: u64,
-    pub avg_tps:       u64,
-    pub min_tps:       u64,
-    pub max_tps:       u64,
-    pub target_tps:    u64,
-    pub target_met:    bool,
-    pub epoch_stats:   Vec<EpochStats>,
+    pub avg_tps: u64,
+    pub min_tps: u64,
+    pub max_tps: u64,
+    pub target_tps: u64,
+    pub target_met: bool,
+    pub epoch_stats: Vec<EpochStats>,
 }
 
 #[cfg(test)]
@@ -294,8 +309,8 @@ mod tests {
     #[test]
     fn cross_shard_tx_commits_within_two_epochs() {
         let mut coord = ShardCoordinator::new();
-        let tx_id = coord.submit_cross_shard(
-            "bleep:shard0:alice", "bleep:shard1:bob", 1_000_000, 1);
+        let tx_id =
+            coord.submit_cross_shard("bleep:shard0:alice", "bleep:shard1:bob", 1_000_000, 1);
         coord.tick_epoch();
         coord.tick_epoch();
         let tx = coord.pending_xs.get(&tx_id);
@@ -312,14 +327,20 @@ mod tests {
         assert_eq!(result.total_epochs, STRESS_EPOCH_COUNT);
         assert!(result.total_txs > 0);
         assert!(result.total_xs_txs >= CROSS_SHARD_CONCURRENT_TARGET as u64);
-        assert_eq!(result.committed_xs + result.rolledback_xs, result.total_xs_txs);
+        assert_eq!(
+            result.committed_xs + result.rolledback_xs,
+            result.total_xs_txs
+        );
     }
 
     #[test]
     fn each_shard_has_validators_assigned() {
         let coord = ShardCoordinator::new();
         for (_, shard) in &coord.shards {
-            assert!(!shard.validators.is_empty(), "every shard must have validators");
+            assert!(
+                !shard.validators.is_empty(),
+                "every shard must have validators"
+            );
         }
     }
 

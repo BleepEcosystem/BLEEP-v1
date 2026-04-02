@@ -3,7 +3,6 @@
 use bleep_interop::interoperability::BLEEPInteroperabilityModule;
 use log::info;
 
-
 fn main() {
     env_logger::init();
     info!("🌉 BLEEP Interop Engine Starting...");
@@ -12,7 +11,9 @@ fn main() {
     let mut module = BLEEPInteroperabilityModule::new();
     module.register_adapter(
         "ethereum".into(),
-        Box::new(bleep_interop::interoperability::EthereumAdapter::new(bleep_interop::ChainId::Ethereum)),
+        Box::new(bleep_interop::interoperability::EthereumAdapter::new(
+            bleep_interop::ChainId::Ethereum,
+        )),
     );
     module.register_adapter(
         "binance".into(),
@@ -34,4 +35,3 @@ fn main() {
     info!("✅ Interop module initialized with adapters.");
     // Further logic would go here, e.g., cross-chain sync, etc.
 }
- 

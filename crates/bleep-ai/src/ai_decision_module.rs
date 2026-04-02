@@ -10,16 +10,16 @@
 // 5. Classification is explicit (not fuzzy)
 // 6. Recommendations only (governance decides)
 
-use serde::{Serialize, Deserialize};
+use crate::feature_extractor::ExtractedFeatures;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use crate::feature_extractor::ExtractedFeatures;
 
 #[derive(Debug, Error)]
 pub enum AIError {
     #[error("Invalid features: {0}")]
     InvalidFeatures(String),
-    
+
     #[error("Classification failed: {0}")]
     ClassificationFailed(String),
 }
@@ -29,13 +29,13 @@ pub enum AIError {
 pub enum AnomalyClass {
     /// All metrics normal
     Healthy = 0,
-    
+
     /// Minor degradation
     Degraded = 1,
-    
+
     /// Significant anomalies
     Anomalous = 2,
-    
+
     /// Critical failures
     Critical = 3,
 }
@@ -45,7 +45,7 @@ impl AnomalyClass {
     pub fn code(self) -> u8 {
         self as u8
     }
-    
+
     /// From code
     pub fn from_code(code: u8) -> Option<Self> {
         match code {
@@ -63,13 +63,13 @@ impl AnomalyClass {
 pub struct AISignature {
     /// AI public key (identity)
     pub ai_key: Vec<u8>,
-    
+
     /// Assessment hash (commitment)
     pub assessment_hash: Vec<u8>,
-    
+
     /// Signature (Ed25519 or similar)
     pub signature: Vec<u8>,
-    
+
     /// Epoch signed
     pub epoch: u64,
 }
@@ -83,7 +83,7 @@ impl AISignature {
         hasher.update(assessment_hash);
         hasher.update(epoch.to_le_bytes());
         let signature = hasher.finalize().to_vec();
-        
+
         AISignature {
             ai_key: ai_key.to_vec(),
             assessment_hash: assessment_hash.to_vec(),
@@ -91,7 +91,7 @@ impl AISignature {
             epoch,
         }
     }
-    
+
     /// Verify signature (deterministic)
     pub fn verify(&self) -> bool {
         let mut hasher = Sha256::new();
@@ -99,7 +99,7 @@ impl AISignature {
         hasher.update(&self.assessment_hash);
         hasher.update(self.epoch.to_le_bytes());
         let computed = hasher.finalize().to_vec();
-        
+
         computed == self.signature
     }
 }
@@ -109,19 +109,19 @@ impl AISignature {
 pub struct AnomalyAssessment {
     /// Anomaly score (0-100)
     pub anomaly_score: f64,
-    
+
     /// Classification (Healthy, Degraded, Anomalous, Critical)
     pub classification: AnomalyClass,
-    
+
     /// Confidence level (0-100)
     pub confidence: f64,
-    
+
     /// Hash of input features (commitment)
     pub input_feature_hash: Vec<u8>,
-    
+
     /// Epoch assessed
     pub epoch: u64,
-    
+
     /// Assessment hash (for signing)
     pub assessment_hash: Vec<u8>,
 }
@@ -150,13 +150,13 @@ impl AnomalyAssessment {
 pub struct RecoveryRecommendation {
     /// Recommended action (string, for governance to interpret)
     pub recommendation: String,
-    
+
     /// Severity level (1-5)
     pub severity: u8,
-    
+
     /// Confidence in recommendation
     pub confidence: f64,
-    
+
     /// Rationale
     pub rationale: String,
 }
@@ -165,16 +165,15 @@ pub struct RecoveryRecommendation {
 pub struct AIDecisionModule {
     /// AI identity key
     ai_key: Vec<u8>,
-    
+
     /// Assessment history (immutable)
     assessments: Vec<(AnomalyAssessment, AISignature)>,
-    
+
     /// Thresholds for classification
-    healthy_threshold: f64,     // < this: healthy
-    degraded_threshold: f64,    // < this: degraded
-    anomalous_threshold: f64,   // < this: anomalous
-                                // >= this: critical
-    
+    healthy_threshold: f64, // < this: healthy
+    degraded_threshold: f64,  // < this: degraded
+    anomalous_threshold: f64, // < this: anomalous
+    // >= this: critical
     /// Minimum confidence for output
     #[allow(dead_code)]
     min_confidence: f64,
@@ -192,7 +191,7 @@ impl AIDecisionModule {
             min_confidence: 60.0,
         }
     }
-    
+
     /// Analyze features and produce assessment
     pub fn analyze(
         &mut self,
@@ -202,16 +201,16 @@ impl AIDecisionModule {
         if features.features.is_empty() {
             return Err(AIError::InvalidFeatures("No features provided".to_string()));
         }
-        
+
         // Compute anomaly score (deterministic)
         let anomaly_score = self.compute_anomaly_score(&features.features)?;
-        
+
         // Classify
         let classification = self.classify(anomaly_score);
-        
+
         // Compute confidence
         let confidence = self.compute_confidence(&features.features, anomaly_score)?;
-        
+
         // Create assessment
         let assessment_hash = AnomalyAssessment::compute_hash(
             anomaly_score,
@@ -220,7 +219,7 @@ impl AIDecisionModule {
             &features.feature_hash,
             features.epoch,
         );
-        
+
         let assessment = AnomalyAssessment {
             anomaly_score,
             classification,
@@ -229,51 +228,53 @@ impl AIDecisionModule {
             epoch: features.epoch,
             assessment_hash: assessment_hash.clone(),
         };
-        
+
         // Sign assessment
         let signature = AISignature::sign(&self.ai_key, &assessment_hash, features.epoch);
-        
+
         // Verify signature
         if !signature.verify() {
             return Err(AIError::ClassificationFailed(
                 "Signature verification failed".to_string(),
             ));
         }
-        
+
         // Store in history
-        self.assessments.push((assessment.clone(), signature.clone()));
-        
+        self.assessments
+            .push((assessment.clone(), signature.clone()));
+
         Ok((assessment, signature))
     }
-    
+
     /// Compute anomaly score from features (deterministic)
     fn compute_anomaly_score(&self, features: &[f64]) -> Result<f64, AIError> {
         if features.len() != 7 {
-            return Err(AIError::InvalidFeatures(
-                format!("Expected 7 features, got {}", features.len()),
-            ));
+            return Err(AIError::InvalidFeatures(format!(
+                "Expected 7 features, got {}",
+                features.len()
+            )));
         }
-        
+
         // Weighted combination (deterministic)
         let weights = vec![
-            0.20,  // network_health (high weight)
-            0.25,  // validator_downtime (high weight)
-            0.10,  // consensus_latency
-            0.15,  // finality_lag (medium weight)
-            0.10,  // proposal_success_rate
-            0.10,  // stake_concentration
-            0.10,  // block_production_rate
+            0.20, // network_health (high weight)
+            0.25, // validator_downtime (high weight)
+            0.10, // consensus_latency
+            0.15, // finality_lag (medium weight)
+            0.10, // proposal_success_rate
+            0.10, // stake_concentration
+            0.10, // block_production_rate
         ];
-        
+
         let mut score = 0.0;
         for (feature, weight) in features.iter().zip(&weights) {
             score += feature * weight;
         }
-        
+
         // Normalize to 0-100 (already normalized, but ensure bounds)
         Ok(score.clamp(0.0, 100.0))
     }
-    
+
     /// Classify anomaly severity
     fn classify(&self, anomaly_score: f64) -> AnomalyClass {
         match anomaly_score {
@@ -283,43 +284,45 @@ impl AIDecisionModule {
             _ => AnomalyClass::Critical,
         }
     }
-    
+
     /// Compute confidence (based on feature agreement)
     fn compute_confidence(&self, features: &[f64], anomaly_score: f64) -> Result<f64, AIError> {
         // Confidence is higher when:
         // 1. Features are aligned (low variance)
         // 2. Score is far from thresholds (high certainty)
-        
+
         // Compute variance
         let mean = anomaly_score;
-        let variance: f64 = features.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / features.len() as f64;
+        let variance: f64 =
+            features.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / features.len() as f64;
         let std_dev = variance.sqrt();
-        
+
         // Confidence decreases with std dev
         let alignment_confidence = 100.0 - (std_dev * 2.0).clamp(0.0, 100.0);
-        
+
         // Confidence based on distance from thresholds
         let thresholds = vec![
             self.healthy_threshold,
             self.degraded_threshold,
             self.anomalous_threshold,
         ];
-        
+
         let mut min_distance: f64 = 100.0;
         for threshold in thresholds {
             let distance = (anomaly_score - threshold).abs();
             min_distance = min_distance.min(distance);
         }
-        
+
         // Higher distance from threshold = higher confidence
         let threshold_confidence = (min_distance / 25.0 * 100.0).clamp(0.0, 100.0);
-        
+
         // Combined confidence
-        let confidence = (alignment_confidence * 0.4 + threshold_confidence * 0.6).clamp(0.0, 100.0);
-        
+        let confidence =
+            (alignment_confidence * 0.4 + threshold_confidence * 0.6).clamp(0.0, 100.0);
+
         Ok(confidence)
     }
-    
+
     /// Generate recovery recommendation (advisory only)
     pub fn recommend_recovery(
         &self,
@@ -327,7 +330,7 @@ impl AIDecisionModule {
     ) -> Result<RecoveryRecommendation, AIError> {
         // Recommendation based on classification
         // NOTE: AI cannot execute - only recommend to governance
-        
+
         match assessment.classification {
             AnomalyClass::Healthy => Ok(RecoveryRecommendation {
                 recommendation: "No action required".to_string(),
@@ -369,12 +372,12 @@ impl AIDecisionModule {
             }),
         }
     }
-    
+
     /// Get assessment history
     pub fn get_assessments(&self) -> &[(AnomalyAssessment, AISignature)] {
         &self.assessments
     }
-    
+
     /// Verify assessment signature
     pub fn verify_assessment(&self, signature: &AISignature) -> bool {
         signature.verify() && signature.ai_key == self.ai_key
@@ -388,13 +391,13 @@ mod tests {
     fn create_test_features(anomaly_score_base: f64) -> ExtractedFeatures {
         ExtractedFeatures {
             features: vec![
-                20.0,  // network_health
-                0.0,   // validator_downtime
-                anomaly_score_base,  // consensus_latency
-                anomaly_score_base * 0.5,  // finality_lag
-                100.0, // proposal_success_rate
-                10.0,  // stake_concentration
-                90.0,  // block_production_rate
+                20.0,                     // network_health
+                0.0,                      // validator_downtime
+                anomaly_score_base,       // consensus_latency
+                anomaly_score_base * 0.5, // finality_lag
+                100.0,                    // proposal_success_rate
+                10.0,                     // stake_concentration
+                90.0,                     // block_production_rate
             ],
             feature_names: vec![
                 "network_health".to_string(),
@@ -415,9 +418,9 @@ mod tests {
     fn test_healthy_classification() {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
         let features = create_test_features(10.0);
-        
+
         let (assessment, _sig) = module.analyze(&features).unwrap();
-        
+
         assert_eq!(assessment.classification, AnomalyClass::Healthy);
         assert!(assessment.anomaly_score < 20.0);
     }
@@ -426,9 +429,9 @@ mod tests {
     fn test_critical_classification() {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
         let features = create_test_features(80.0);
-        
+
         let (assessment, _sig) = module.analyze(&features).unwrap();
-        
+
         assert_eq!(assessment.classification, AnomalyClass::Critical);
         assert!(assessment.anomaly_score >= 75.0);
     }
@@ -437,9 +440,9 @@ mod tests {
     fn test_signature_verification() {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
         let features = create_test_features(30.0);
-        
+
         let (assessment, sig) = module.analyze(&features).unwrap();
-        
+
         // Verify signature
         assert!(sig.verify());
         assert!(module.verify_assessment(&sig));
@@ -449,12 +452,12 @@ mod tests {
     fn test_deterministic_assessment() {
         let mut module1 = AIDecisionModule::new(b"ai_key".to_vec());
         let mut module2 = AIDecisionModule::new(b"ai_key".to_vec());
-        
+
         let features = create_test_features(40.0);
-        
+
         let (assessment1, _) = module1.analyze(&features).unwrap();
         let (assessment2, _) = module2.analyze(&features).unwrap();
-        
+
         // Same module, same features → same assessment
         assert_eq!(assessment1.anomaly_score, assessment2.anomaly_score);
         assert_eq!(assessment1.classification, assessment2.classification);
@@ -465,9 +468,9 @@ mod tests {
     fn test_confidence_computation() {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
         let features = create_test_features(50.0);
-        
+
         let (assessment, _) = module.analyze(&features).unwrap();
-        
+
         // Confidence should be between 0-100
         assert!(assessment.confidence >= 0.0);
         assert!(assessment.confidence <= 100.0);
@@ -476,7 +479,7 @@ mod tests {
     #[test]
     fn test_recovery_recommendation() {
         let module = AIDecisionModule::new(b"ai_key".to_vec());
-        
+
         let mut assessment = AnomalyAssessment {
             anomaly_score: 10.0,
             classification: AnomalyClass::Healthy,
@@ -485,10 +488,10 @@ mod tests {
             epoch: 1,
             assessment_hash: vec![],
         };
-        
+
         let rec = module.recommend_recovery(&assessment).unwrap();
         assert!(rec.severity == 0);
-        
+
         // Test critical
         assessment.classification = AnomalyClass::Critical;
         assessment.anomaly_score = 90.0;
@@ -502,7 +505,7 @@ mod tests {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
         let mut features = create_test_features(30.0);
         features.features.clear(); // Remove all features
-        
+
         let result = module.analyze(&features);
         assert!(result.is_err());
     }
@@ -510,13 +513,13 @@ mod tests {
     #[test]
     fn test_assessment_history() {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
-        
+
         let features1 = create_test_features(20.0);
         let features2 = create_test_features(80.0);
-        
+
         module.analyze(&features1).unwrap();
         module.analyze(&features2).unwrap();
-        
+
         assert_eq!(module.get_assessments().len(), 2);
     }
 }

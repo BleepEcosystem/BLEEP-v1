@@ -2,7 +2,6 @@
 ///
 /// This module verifies that rational adversaries cannot profitably attack the system.
 /// If an attack is profitable, the design is wrong and must be fixed.
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -55,12 +54,12 @@ impl SafetyVerifier {
     ) -> SafetyAnalysis {
         // Profit = reward from double signing - (slashing penalty + lost future rewards)
         // Slashing should exceed double-signing gain
-        
+
         // Calculate actual slashing penalty as percentage of reward
         let slash_penalty = (reward_per_block as i128 * (slash_percentage as i128)) / 10000;
         // Lost future rewards from demotion
         let lost_future_rewards = (reward_per_block as i128 * 3200) / 10000; // Lost 32 epochs of rewards
-        
+
         let profit = double_signing_reward as i128 - slash_penalty - lost_future_rewards;
 
         SafetyAnalysis {
@@ -109,7 +108,7 @@ impl SafetyVerifier {
         // Loss = missed rewards + no slashing (but stake still at risk)
         // If validator participates:
         // Gain = rewards - costs
-        
+
         let _participate_profit = participation_reward as i128 - participation_cost as i128;
         let non_participate_loss = -(participation_reward as i128);
 
@@ -156,7 +155,7 @@ impl SafetyVerifier {
     ) -> SafetyAnalysis {
         // Cartel profit = gain - (slashing risk * detection probability)
         // With n members, slashing should make it unprofitable
-        
+
         let detection_probability = 0.1 / (cartel_members as f64); // Decreases with size
         let expected_slash = (slashing_risk_per_member as f64) * detection_probability;
         let profit = cartel_gain_per_member as i128 - (expected_slash as i128);
@@ -199,11 +198,7 @@ impl SafetyVerifier {
                 stake,
                 slash_percentage,
             ),
-            SafetyVerifier::verify_griefing_safety(
-                spam_fee,
-                spam_fee / 2,
-                spam_fee,
-            ),
+            SafetyVerifier::verify_griefing_safety(spam_fee, spam_fee / 2, spam_fee),
             SafetyVerifier::verify_cartel_safety(
                 10,
                 stake * 100,
@@ -230,9 +225,9 @@ mod tests {
     #[test]
     fn test_equivocation_safety() {
         let analysis = SafetyVerifier::verify_equivocation_safety(
-            5000, // 50% slash
+            5000,               // 50% slash
             32 * 10u128.pow(6), // 0.32 BLEEP reward
-            4 * 10u128.pow(6), // 0.04 BLEEP double signing gain
+            4 * 10u128.pow(6),  // 0.04 BLEEP double signing gain
         );
 
         // Profit = 4*10^6 - (32*10^6 * 0.5) - (32*10^6 * 0.32)
@@ -245,8 +240,8 @@ mod tests {
     fn test_censorship_safety() {
         let analysis = SafetyVerifier::verify_censorship_safety(
             32 * 10u128.pow(6) as i128 * 100, // Large penalty
-            32 * 10u128.pow(6) as i128 * 10,   // Smaller reward
-            0.8, // 80% detection
+            32 * 10u128.pow(6) as i128 * 10,  // Smaller reward
+            0.8,                              // 80% detection
         );
 
         // With high detection, censorship should be unprofitable
@@ -256,10 +251,10 @@ mod tests {
     #[test]
     fn test_non_participation_safety() {
         let analysis = SafetyVerifier::verify_non_participation_safety(
-            1 * 10u128.pow(6), // 0.01 BLEEP participation reward
-            100_000,            // Small cost
+            1 * 10u128.pow(6),    // 0.01 BLEEP participation reward
+            100_000,              // Small cost
             1000 * 10u128.pow(8), // 1000 BLEEP stake
-            3200,               // 32% slash
+            3200,                 // 32% slash
         );
 
         // Not participating should be a loss
@@ -269,12 +264,12 @@ mod tests {
     #[test]
     fn test_comprehensive_audit() {
         let results = SafetyVerifier::audit_all(
-            5000,                // 50% slash (high enough to deter attacks)
-            32 * 10u128.pow(6),  // 0.32 BLEEP reward per block
-            4 * 10u128.pow(6),   // 0.04 BLEEP participation reward
-            1 * 10u128.pow(6),   // 0.01 BLEEP participation cost
+            5000,                 // 50% slash (high enough to deter attacks)
+            32 * 10u128.pow(6),   // 0.32 BLEEP reward per block
+            4 * 10u128.pow(6),    // 0.04 BLEEP participation reward
+            1 * 10u128.pow(6),    // 0.01 BLEEP participation cost
             1000 * 10u128.pow(8), // 1000 BLEEP stake
-            1_000_000,           // spam fee
+            1_000_000,            // spam fee
         );
 
         // All attacks should be unprofitable

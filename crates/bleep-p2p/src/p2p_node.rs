@@ -33,9 +33,7 @@ use crate::gossip_protocol::GossipProtocol;
 use crate::message_protocol::MessageProtocol;
 use crate::onion_routing::OnionRouter;
 use crate::peer_manager::{PeerEvent, PeerManager, PeerManagerConfig};
-use crate::quantum_crypto::{
-    Ed25519Keypair, KyberKeypair, NodeIdentity,
-};
+use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, NodeIdentity};
 use crate::types::{MessageType, NodeId, PeerInfo, SecureMessage};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -62,7 +60,7 @@ pub struct BootstrapPeer {
 impl Default for P2PNodeConfig {
     fn default() -> Self {
         P2PNodeConfig {
-            listen_addr: SocketAddr::from(([0,0,0,0], 7700)),
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 7700)),
             bootstrap_peers: vec![],
             peer_manager_config: PeerManagerConfig::default(),
         }
@@ -95,10 +93,8 @@ impl P2PNode {
         info!(node_id = %node_id, listen = %config.listen_addr, "Starting BLEEP P2P node");
 
         // Peer manager
-        let (peer_manager, mut event_rx) = PeerManager::new(
-            node_id.clone(),
-            config.peer_manager_config.clone(),
-        );
+        let (peer_manager, mut event_rx) =
+            PeerManager::new(node_id.clone(), config.peer_manager_config.clone());
 
         // Message protocol
         let _ed_kp = Ed25519Keypair::from_bytes(
@@ -179,7 +175,12 @@ impl P2PNode {
         // Bootstrap
         for bp in &config.bootstrap_peers {
             let bp_id = NodeId::from_bytes(&bp.ed25519_pubkey);
-            let peer = PeerInfo::new(bp_id.clone(), bp.addr, bp.ed25519_pubkey.clone(), bp.sphincs_pubkey.clone());
+            let peer = PeerInfo::new(
+                bp_id.clone(),
+                bp.addr,
+                bp.ed25519_pubkey.clone(),
+                bp.sphincs_pubkey.clone(),
+            );
             peer_manager.dht().add_peer(peer).await;
             info!(addr = %bp.addr, "Bootstrap peer registered in DHT");
         }

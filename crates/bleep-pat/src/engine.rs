@@ -30,19 +30,21 @@ use std::collections::BTreeMap;
 /// The engine never takes a mutable reference to the registry.
 /// This ensures execution is always pure: same inputs → same diff.
 pub struct RegistryView<'a> {
-    pub tokens:     &'a BTreeMap<String, PATToken>,
-    pub ledgers:    &'a BTreeMap<String, TokenLedger>,
+    pub tokens: &'a BTreeMap<String, PATToken>,
+    pub ledgers: &'a BTreeMap<String, TokenLedger>,
     pub allowances: &'a BTreeMap<String, AllowanceTable>,
 }
 
 impl<'a> RegistryView<'a> {
     pub fn token(&self, symbol: &str) -> PATResult<&PATToken> {
-        self.tokens.get(symbol)
+        self.tokens
+            .get(symbol)
             .ok_or_else(|| PATError::TokenNotFound(symbol.to_string()))
     }
 
     pub fn ledger(&self, symbol: &str) -> PATResult<&TokenLedger> {
-        self.ledgers.get(symbol)
+        self.ledgers
+            .get(symbol)
             .ok_or_else(|| PATError::TokenNotFound(symbol.to_string()))
     }
 
@@ -64,7 +66,9 @@ pub struct PATEngine {
 
 impl PATEngine {
     pub fn new() -> Self {
-        PATEngine { gas: PATGasModel::default() }
+        PATEngine {
+            gas: PATGasModel::default(),
+        }
     }
 
     pub fn with_gas_model(gas: PATGasModel) -> Self {
@@ -82,15 +86,21 @@ impl PATEngine {
         let gas_used = self.gas.charge(&intent.kind, intent.gas_limit)?;
 
         let outcome = match &intent.kind {
-            PATIntentKind::CreateToken(i)       => self.exec_create_token(i, &intent.caller, gas_used),
-            PATIntentKind::Mint(i)              => self.exec_mint(i, &intent.caller, gas_used, view),
-            PATIntentKind::Burn(i)              => self.exec_burn(i, &intent.caller, gas_used, view),
-            PATIntentKind::Transfer(i)          => self.exec_transfer(i, &intent.caller, gas_used, view),
-            PATIntentKind::Approve(i)           => self.exec_approve(i, &intent.caller, gas_used, view),
-            PATIntentKind::TransferFrom(i)      => self.exec_transfer_from(i, &intent.caller, gas_used, view),
-            PATIntentKind::Freeze(i)            => self.exec_freeze(i, &intent.caller, gas_used, view),
-            PATIntentKind::UpdateBurnRate(i)    => self.exec_update_burn_rate(i, &intent.caller, gas_used, view),
-            PATIntentKind::TransferOwnership(i) => self.exec_transfer_ownership(i, &intent.caller, gas_used, view),
+            PATIntentKind::CreateToken(i) => self.exec_create_token(i, &intent.caller, gas_used),
+            PATIntentKind::Mint(i) => self.exec_mint(i, &intent.caller, gas_used, view),
+            PATIntentKind::Burn(i) => self.exec_burn(i, &intent.caller, gas_used, view),
+            PATIntentKind::Transfer(i) => self.exec_transfer(i, &intent.caller, gas_used, view),
+            PATIntentKind::Approve(i) => self.exec_approve(i, &intent.caller, gas_used, view),
+            PATIntentKind::TransferFrom(i) => {
+                self.exec_transfer_from(i, &intent.caller, gas_used, view)
+            }
+            PATIntentKind::Freeze(i) => self.exec_freeze(i, &intent.caller, gas_used, view),
+            PATIntentKind::UpdateBurnRate(i) => {
+                self.exec_update_burn_rate(i, &intent.caller, gas_used, view)
+            }
+            PATIntentKind::TransferOwnership(i) => {
+                self.exec_transfer_ownership(i, &intent.caller, gas_used, view)
+            }
         };
 
         outcome
@@ -105,19 +115,29 @@ impl PATEngine {
         gas_used: u64,
     ) -> PATResult<PATOutcome> {
         // Validate inputs (existence check happens in registry before calling engine)
-        if i.symbol.len() > 16 { return Err(PATError::SymbolTooLong(i.symbol.clone())); }
-        if i.name.len() > 64   { return Err(PATError::NameTooLong(i.name.clone())); }
-        if i.decimals > 18     { return Err(PATError::InvalidDecimals(i.decimals)); }
-        if i.burn_rate_bps > 1000 { return Err(PATError::InvalidBurnRate(i.burn_rate_bps)); }
+        if i.symbol.len() > 16 {
+            return Err(PATError::SymbolTooLong(i.symbol.clone()));
+        }
+        if i.name.len() > 64 {
+            return Err(PATError::NameTooLong(i.name.clone()));
+        }
+        if i.decimals > 18 {
+            return Err(PATError::InvalidDecimals(i.decimals));
+        }
+        if i.burn_rate_bps > 1000 {
+            return Err(PATError::InvalidBurnRate(i.burn_rate_bps));
+        }
 
         let ts = now();
         let mut diff = PATStateDiff::empty();
         diff.gas_used = gas_used;
-        diff.token_mutations.push(TokenMutation::CreateToken { symbol: i.symbol.clone() });
+        diff.token_mutations.push(TokenMutation::CreateToken {
+            symbol: i.symbol.clone(),
+        });
         diff.events.push(PATEvent::TokenCreated {
-            symbol:   i.symbol.clone(),
-            owner:    *caller,
-            cap:      i.total_supply_cap,
+            symbol: i.symbol.clone(),
+            owner: *caller,
+            cap: i.total_supply_cap,
             burn_bps: i.burn_rate_bps,
             ts,
         });
@@ -134,7 +154,9 @@ impl PATEngine {
         gas_used: u64,
         view: &RegistryView<'_>,
     ) -> PATResult<PATOutcome> {
-        if i.amount == 0 { return Err(PATError::ZeroAmount); }
+        if i.amount == 0 {
+            return Err(PATError::ZeroAmount);
+        }
 
         let token = view.token(&i.symbol)?;
 
@@ -144,7 +166,8 @@ impl PATEngine {
 
         // Supply cap check
         if token.total_supply_cap > 0 {
-            let new_supply = token.current_supply
+            let new_supply = token
+                .current_supply
                 .checked_add(i.amount)
                 .unwrap_or(u128::MAX);
             if new_supply > token.total_supply_cap {
@@ -159,18 +182,18 @@ impl PATEngine {
         let mut diff = PATStateDiff::empty();
         diff.gas_used = gas_used;
         diff.balance_deltas.push(BalanceDelta {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             address: i.to,
-            delta:   i.amount as i128,
+            delta: i.amount as i128,
         });
         diff.supply_deltas.push(SupplyDelta {
-            symbol:       i.symbol.clone(),
+            symbol: i.symbol.clone(),
             supply_delta: i.amount as i128,
-            burned_add:   0,
+            burned_add: 0,
         });
         diff.events.push(PATEvent::Mint {
             symbol: i.symbol.clone(),
-            to:     i.to,
+            to: i.to,
             amount: i.amount,
             ts,
         });
@@ -187,30 +210,35 @@ impl PATEngine {
         gas_used: u64,
         view: &RegistryView<'_>,
     ) -> PATResult<PATOutcome> {
-        if i.amount == 0 { return Err(PATError::ZeroAmount); }
+        if i.amount == 0 {
+            return Err(PATError::ZeroAmount);
+        }
 
         let ledger = view.ledger(&i.symbol)?;
         let bal = ledger.balance_of(caller);
         if bal < i.amount {
-            return Err(PATError::InsufficientBalance { have: bal, need: i.amount });
+            return Err(PATError::InsufficientBalance {
+                have: bal,
+                need: i.amount,
+            });
         }
 
         let ts = now();
         let mut diff = PATStateDiff::empty();
         diff.gas_used = gas_used;
         diff.balance_deltas.push(BalanceDelta {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             address: *caller,
-            delta:   -(i.amount as i128),
+            delta: -(i.amount as i128),
         });
         diff.supply_deltas.push(SupplyDelta {
-            symbol:       i.symbol.clone(),
+            symbol: i.symbol.clone(),
             supply_delta: -(i.amount as i128),
-            burned_add:   i.amount,
+            burned_add: i.amount,
         });
         diff.events.push(PATEvent::Burn {
             symbol: i.symbol.clone(),
-            from:   *caller,
+            from: *caller,
             amount: i.amount,
             ts,
         });
@@ -227,23 +255,34 @@ impl PATEngine {
         gas_used: u64,
         view: &RegistryView<'_>,
     ) -> PATResult<PATOutcome> {
-        if i.amount == 0 { return Err(PATError::ZeroAmount); }
-        if caller == &i.to { return Err(PATError::SelfTransfer); }
+        if i.amount == 0 {
+            return Err(PATError::ZeroAmount);
+        }
+        if caller == &i.to {
+            return Err(PATError::SelfTransfer);
+        }
         if let Some(memo) = &i.memo {
-            if memo.len() > 128 { return Err(PATError::MemoTooLong(memo.len())); }
+            if memo.len() > 128 {
+                return Err(PATError::MemoTooLong(memo.len()));
+            }
         }
 
         let token = view.token(&i.symbol)?;
-        if token.frozen { return Err(PATError::Frozen(i.symbol.clone())); }
+        if token.frozen {
+            return Err(PATError::Frozen(i.symbol.clone()));
+        }
 
         let ledger = view.ledger(&i.symbol)?;
         let bal = ledger.balance_of(caller);
         if bal < i.amount {
-            return Err(PATError::InsufficientBalance { have: bal, need: i.amount });
+            return Err(PATError::InsufficientBalance {
+                have: bal,
+                need: i.amount,
+            });
         }
 
         let burn_amount = token.transfer_burn_amount(i.amount);
-        let received    = i.amount - burn_amount;
+        let received = i.amount - burn_amount;
         let ts = now();
 
         let mut diff = PATStateDiff::empty();
@@ -251,30 +290,30 @@ impl PATEngine {
 
         // Debit sender
         diff.balance_deltas.push(BalanceDelta {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             address: *caller,
-            delta:   -(i.amount as i128),
+            delta: -(i.amount as i128),
         });
         // Credit receiver
         diff.balance_deltas.push(BalanceDelta {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             address: i.to,
-            delta:   received as i128,
+            delta: received as i128,
         });
         // Update supply if burn > 0
         if burn_amount > 0 {
             diff.supply_deltas.push(SupplyDelta {
-                symbol:       i.symbol.clone(),
+                symbol: i.symbol.clone(),
                 supply_delta: -(burn_amount as i128),
-                burned_add:   burn_amount,
+                burned_add: burn_amount,
             });
         }
         diff.events.push(PATEvent::Transfer {
-            symbol:        i.symbol.clone(),
-            from:          *caller,
-            to:            i.to,
-            amount_sent:   i.amount,
-            amount_rcvd:   received,
+            symbol: i.symbol.clone(),
+            from: *caller,
+            to: i.to,
+            amount_sent: i.amount,
+            amount_rcvd: received,
             burn_deducted: burn_amount,
             ts,
         });
@@ -298,16 +337,16 @@ impl PATEngine {
         let mut diff = PATStateDiff::empty();
         diff.gas_used = gas_used;
         diff.allowance_updates.push(AllowanceUpdate {
-            symbol:    i.symbol.clone(),
-            owner:     *caller,
-            spender:   i.spender,
+            symbol: i.symbol.clone(),
+            owner: *caller,
+            spender: i.spender,
             new_value: i.amount,
         });
         diff.events.push(PATEvent::Approve {
-            symbol:  i.symbol.clone(),
-            owner:   *caller,
+            symbol: i.symbol.clone(),
+            owner: *caller,
             spender: i.spender,
-            amount:  i.amount,
+            amount: i.amount,
             ts,
         });
         diff.finalise();
@@ -323,65 +362,78 @@ impl PATEngine {
         gas_used: u64,
         view: &RegistryView<'_>,
     ) -> PATResult<PATOutcome> {
-        if i.amount == 0 { return Err(PATError::ZeroAmount); }
-        if i.from == i.to { return Err(PATError::SelfTransfer); }
+        if i.amount == 0 {
+            return Err(PATError::ZeroAmount);
+        }
+        if i.from == i.to {
+            return Err(PATError::SelfTransfer);
+        }
 
         let token = view.token(&i.symbol)?;
-        if token.frozen { return Err(PATError::Frozen(i.symbol.clone())); }
+        if token.frozen {
+            return Err(PATError::Frozen(i.symbol.clone()));
+        }
 
         // Check allowance
-        let allowance = view.allowance_table(&i.symbol)
+        let allowance = view
+            .allowance_table(&i.symbol)
             .map(|t| t.get(&i.from, caller))
             .unwrap_or(0);
         if allowance < i.amount {
-            return Err(PATError::InsufficientAllowance { approved: allowance, need: i.amount });
+            return Err(PATError::InsufficientAllowance {
+                approved: allowance,
+                need: i.amount,
+            });
         }
 
         // Check balance
         let ledger = view.ledger(&i.symbol)?;
         let bal = ledger.balance_of(&i.from);
         if bal < i.amount {
-            return Err(PATError::InsufficientBalance { have: bal, need: i.amount });
+            return Err(PATError::InsufficientBalance {
+                have: bal,
+                need: i.amount,
+            });
         }
 
         let burn_amount = token.transfer_burn_amount(i.amount);
-        let received    = i.amount - burn_amount;
+        let received = i.amount - burn_amount;
         let ts = now();
 
         let mut diff = PATStateDiff::empty();
         diff.gas_used = gas_used;
 
         diff.balance_deltas.push(BalanceDelta {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             address: i.from,
-            delta:   -(i.amount as i128),
+            delta: -(i.amount as i128),
         });
         diff.balance_deltas.push(BalanceDelta {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             address: i.to,
-            delta:   received as i128,
+            delta: received as i128,
         });
         if burn_amount > 0 {
             diff.supply_deltas.push(SupplyDelta {
-                symbol:       i.symbol.clone(),
+                symbol: i.symbol.clone(),
                 supply_delta: -(burn_amount as i128),
-                burned_add:   burn_amount,
+                burned_add: burn_amount,
             });
         }
         // Reduce allowance
         diff.allowance_updates.push(AllowanceUpdate {
-            symbol:    i.symbol.clone(),
-            owner:     i.from,
-            spender:   *caller,
+            symbol: i.symbol.clone(),
+            owner: i.from,
+            spender: *caller,
             new_value: allowance - i.amount,
         });
         diff.events.push(PATEvent::TransferFrom {
-            symbol:        i.symbol.clone(),
-            from:          i.from,
-            to:            i.to,
-            spender:       *caller,
-            amount_sent:   i.amount,
-            amount_rcvd:   received,
+            symbol: i.symbol.clone(),
+            from: i.from,
+            to: i.to,
+            spender: *caller,
+            amount_sent: i.amount,
+            amount_rcvd: received,
             burn_deducted: burn_amount,
             ts,
         });
@@ -444,11 +496,11 @@ impl PATEngine {
         let mut diff = PATStateDiff::empty();
         diff.gas_used = gas_used;
         diff.token_mutations.push(TokenMutation::SetBurnRate {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             new_bps: i.new_rate_bps,
         });
         diff.events.push(PATEvent::BurnRateUpdated {
-            symbol:  i.symbol.clone(),
+            symbol: i.symbol.clone(),
             old_bps,
             new_bps: i.new_rate_bps,
             ts,
@@ -476,11 +528,11 @@ impl PATEngine {
         let mut diff = PATStateDiff::empty();
         diff.gas_used = gas_used;
         diff.token_mutations.push(TokenMutation::SetOwner {
-            symbol:    i.symbol.clone(),
+            symbol: i.symbol.clone(),
             new_owner: i.new_owner,
         });
         diff.events.push(PATEvent::OwnershipTransferred {
-            symbol:    i.symbol.clone(),
+            symbol: i.symbol.clone(),
             old_owner,
             new_owner: i.new_owner,
             ts,
@@ -495,4 +547,4 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-          } 
+}

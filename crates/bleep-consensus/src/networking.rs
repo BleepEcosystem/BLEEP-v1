@@ -1,5 +1,5 @@
-use bleep_core::networking::NetworkingModule as CoreNetworkingModule;
 use bleep_core::block::Block;
+use bleep_core::networking::NetworkingModule as CoreNetworkingModule;
 
 pub struct NetworkingModule {
     inner: CoreNetworkingModule,
@@ -8,7 +8,7 @@ pub struct NetworkingModule {
 impl NetworkingModule {
     pub fn new() -> Self {
         Self {
-            inner: CoreNetworkingModule::new()
+            inner: CoreNetworkingModule::new(),
         }
     }
 
@@ -24,9 +24,13 @@ impl NetworkingModule {
             block.index,
             block.index
         );
-        
+
         // Broadcast block to all connected peers
-        self.inner.broadcast_block(block)
-            .map_err(|e| format!("Failed to broadcast block from leader {}: {:?}", leader_id, e))
+        self.inner.broadcast_block(block).map_err(|e| {
+            format!(
+                "Failed to broadcast block from leader {}: {:?}",
+                leader_id, e
+            )
+        })
     }
 }

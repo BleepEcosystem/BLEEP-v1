@@ -1,7 +1,5 @@
-
 use crate::merkletree::MerkleTree;
 use std::time::{SystemTime, UNIX_EPOCH};
-
 
 #[derive(Debug, Clone)]
 pub struct AssetRecoveryRequest {
@@ -16,7 +14,10 @@ pub struct AssetRecoveryRequest {
 impl AssetRecoveryRequest {
     // Creates a new recovery request
     pub fn new(asset_id: String, owner_address: String, proof: String) -> Self {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let mut merkle_tree = MerkleTree::new();
         merkle_tree.add_leaf(proof.as_bytes().to_vec());
         Self {

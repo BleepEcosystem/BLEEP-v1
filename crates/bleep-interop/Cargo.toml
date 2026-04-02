@@ -20,6 +20,7 @@ bleep-connect-layer2-fullnode  = { path = "bleep-connect-layer2-fullnode" }
 bleep-connect-layer3-zkproof   = { path = "bleep-connect-layer3-zkproof" }
 bleep-connect-layer4-instant   = { path = "bleep-connect-layer4-instant" }
 bleep-connect-core             = { path = "bleep-connect-core" }
+bleep-crypto                   = { path = "../bleep-crypto" }
 
 tokio       = { version = "1.36", features = ["full"] }
 async-trait = "0.1.77"

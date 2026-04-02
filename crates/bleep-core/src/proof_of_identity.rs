@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 // use serde::{Deserialize, Serialize};
 use ark_ff::PrimeField;
 // use ark_ff::{PrimeField, Field};
@@ -23,7 +23,7 @@ impl MerklePath {
 
     pub fn verify(&self) -> bool {
         let mut current = self.leaf;
-        
+
         for (sibling, is_right) in &self.auth_path {
             let mut hasher = Sha256::new();
             let current_bytes = current.to_string().as_bytes().to_vec();

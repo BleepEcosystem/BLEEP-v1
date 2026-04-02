@@ -17,10 +17,7 @@
 //! ```
 
 use crate::error::{VmError, VmResult};
-use crate::execution::{
-    execution_context::ExecutionContext,
-    state_transition::StateDiff,
-};
+use crate::execution::{execution_context::ExecutionContext, state_transition::StateDiff};
 use crate::intent::{Intent, IntentKind, TargetVm};
 use crate::runtime::gas_model::GasModel;
 use crate::runtime::sandbox::{SandboxConfig, SandboxValidator};
@@ -30,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn, instrument};
+use tracing::{debug, info, instrument, warn};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ENGINE TRAIT  (internal — engines implement this)
@@ -39,29 +36,29 @@ use tracing::{debug, info, warn, instrument};
 /// Result returned by an engine after executing one intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineResult {
-    pub success:       bool,
-    pub output:        Vec<u8>,
-    pub gas_used:      u64,
-    pub state_diff:    StateDiff,
-    pub logs:          Vec<ExecutionLog>,
+    pub success: bool,
+    pub output: Vec<u8>,
+    pub gas_used: u64,
+    pub state_diff: StateDiff,
+    pub logs: Vec<ExecutionLog>,
     pub revert_reason: Option<String>,
-    pub exec_time:     Duration,
+    pub exec_time: Duration,
 }
 
 impl EngineResult {
     pub fn revert(reason: impl Into<String>, gas_used: u64) -> Self {
         EngineResult {
-            success:       false,
-            output:        Vec::new(),
+            success: false,
+            output: Vec::new(),
             gas_used,
-            state_diff:    StateDiff::empty(),
-            logs:          vec![ExecutionLog {
-                level:   LogLevel::Error,
+            state_diff: StateDiff::empty(),
+            logs: vec![ExecutionLog {
+                level: LogLevel::Error,
                 message: reason.into(),
-                data:    Vec::new(),
+                data: Vec::new(),
             }],
             revert_reason: None,
-            exec_time:     Duration::ZERO,
+            exec_time: Duration::ZERO,
         }
     }
 }
@@ -74,23 +71,25 @@ pub trait Engine: Send + Sync {
 
     async fn execute(
         &self,
-        ctx:       &ExecutionContext,
-        bytecode:  &[u8],
-        calldata:  &[u8],
+        ctx: &ExecutionContext,
+        bytecode: &[u8],
+        calldata: &[u8],
         gas_limit: u64,
     ) -> VmResult<EngineResult>;
 
     async fn deploy(
         &self,
-        ctx:       &ExecutionContext,
-        bytecode:  &[u8],
+        ctx: &ExecutionContext,
+        bytecode: &[u8],
         init_args: &[u8],
         gas_limit: u64,
-        salt:      Option<[u8; 32]>,
+        salt: Option<[u8; 32]>,
     ) -> VmResult<EngineResult>;
 
     /// Health probe — returns true if engine is operational.
-    fn is_healthy(&self) -> bool { true }
+    fn is_healthy(&self) -> bool {
+        true
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,28 +99,28 @@ pub trait Engine: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
     /// Maximum gas any single intent may request.
-    pub max_gas_per_intent:   u64,
+    pub max_gas_per_intent: u64,
     /// Maximum call-stack depth across nested calls.
-    pub max_call_depth:       usize,
+    pub max_call_depth: usize,
     /// Whether to verify Ed25519 signatures on intents.
-    pub verify_signatures:    bool,
+    pub verify_signatures: bool,
     /// Whether to validate bytecode in sandbox before execution.
-    pub sandbox_validation:   bool,
+    pub sandbox_validation: bool,
     /// Emit structured tracing events.
-    pub trace_execution:      bool,
+    pub trace_execution: bool,
     /// Per-VM engine overrides (e.g. force a specific engine for a ChainId).
-    pub chain_vm_overrides:   HashMap<String, TargetVm>,
+    pub chain_vm_overrides: HashMap<String, TargetVm>,
 }
 
 impl Default for RouterConfig {
     fn default() -> Self {
         RouterConfig {
-            max_gas_per_intent:  30_000_000,
-            max_call_depth:      1024,
-            verify_signatures:   true,
-            sandbox_validation:  true,
-            trace_execution:     true,
-            chain_vm_overrides:  HashMap::new(),
+            max_gas_per_intent: 30_000_000,
+            max_call_depth: 1024,
+            verify_signatures: true,
+            sandbox_validation: true,
+            trace_execution: true,
+            chain_vm_overrides: HashMap::new(),
         }
     }
 }
@@ -133,12 +132,12 @@ impl Default for RouterConfig {
 /// Full outcome of routing + executing one intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutedResult {
-    pub intent_id:   uuid::Uuid,
+    pub intent_id: uuid::Uuid,
     pub engine_name: String,
-    pub vm:          String,
-    pub result:      EngineResult,
+    pub vm: String,
+    pub result: EngineResult,
     /// Normalised BLEEP gas units actually consumed.
-    pub bleep_gas:   u64,
+    pub bleep_gas: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,15 +147,16 @@ pub struct RoutedResult {
 #[derive(Debug, Default)]
 struct CircuitBreaker {
     consecutive_failures: usize,
-    open_until:           Option<Instant>,
+    open_until: Option<Instant>,
 }
 
 impl CircuitBreaker {
     const THRESHOLD: usize = 5;
-    const OPEN_FOR:  Duration = Duration::from_secs(30);
+    const OPEN_FOR: Duration = Duration::from_secs(30);
 
     fn is_open(&self) -> bool {
-        self.open_until.map_or(false, |until| Instant::now() < until)
+        self.open_until
+            .map_or(false, |until| Instant::now() < until)
     }
 
     fn record_success(&mut self) {
@@ -168,7 +168,10 @@ impl CircuitBreaker {
         self.consecutive_failures += 1;
         if self.consecutive_failures >= Self::THRESHOLD {
             self.open_until = Some(Instant::now() + Self::OPEN_FOR);
-            warn!(failures = self.consecutive_failures, "Circuit breaker opened");
+            warn!(
+                failures = self.consecutive_failures,
+                "Circuit breaker opened"
+            );
         }
     }
 }
@@ -179,34 +182,34 @@ impl CircuitBreaker {
 
 /// The central VM router — Layer 2 of the BLEEP VM architecture.
 pub struct VmRouter {
-    engines:         Vec<Arc<dyn Engine>>,
-    gas_model:       GasModel,
-    sandbox:         SandboxValidator,
-    config:          RouterConfig,
+    engines: Vec<Arc<dyn Engine>>,
+    gas_model: GasModel,
+    sandbox: SandboxValidator,
+    config: RouterConfig,
     /// Per-engine circuit breakers, keyed by engine name.
-    breakers:        Arc<RwLock<HashMap<String, CircuitBreaker>>>,
+    breakers: Arc<RwLock<HashMap<String, CircuitBreaker>>>,
     /// Cumulative routing metrics.
-    metrics:         Arc<RwLock<RouterMetrics>>,
+    metrics: Arc<RwLock<RouterMetrics>>,
 }
 
 #[derive(Debug, Default)]
 pub struct RouterMetrics {
-    pub total_intents:   u64,
-    pub successes:       u64,
-    pub failures:        u64,
-    pub total_gas_used:  u64,
-    pub by_engine:       HashMap<String, u64>,
+    pub total_intents: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub total_gas_used: u64,
+    pub by_engine: HashMap<String, u64>,
 }
 
 impl VmRouter {
     pub fn new(config: RouterConfig) -> Self {
         VmRouter {
-            engines:  Vec::new(),
+            engines: Vec::new(),
             gas_model: GasModel::default(),
-            sandbox:  SandboxValidator::new(SandboxConfig::default()),
+            sandbox: SandboxValidator::new(SandboxConfig::default()),
             config,
             breakers: Arc::new(RwLock::new(HashMap::new())),
-            metrics:  Arc::new(RwLock::new(RouterMetrics::default())),
+            metrics: Arc::new(RwLock::new(RouterMetrics::default())),
         }
     }
 
@@ -235,7 +238,7 @@ impl VmRouter {
         if gas_limit > self.config.max_gas_per_intent {
             return Err(VmError::GasLimitExceeded {
                 requested: gas_limit,
-                limit:     self.config.max_gas_per_intent,
+                limit: self.config.max_gas_per_intent,
             });
         }
 
@@ -256,15 +259,15 @@ impl VmRouter {
                 // Transfers don't execute bytecode — produce a state diff directly
                 let mut diff = StateDiff::empty();
                 diff.add_balance_update(t.from, -(t.amount as i128));
-                diff.add_balance_update(t.to,   t.amount as i128);
+                diff.add_balance_update(t.to, t.amount as i128);
                 Ok(EngineResult {
-                    success:       true,
-                    output:        Vec::new(),
-                    gas_used:      21_000,
-                    state_diff:    diff,
-                    logs:          Vec::new(),
+                    success: true,
+                    output: Vec::new(),
+                    gas_used: 21_000,
+                    state_diff: diff,
+                    logs: Vec::new(),
                     revert_reason: None,
-                    exec_time:     start.elapsed(),
+                    exec_time: start.elapsed(),
                 })
             }
             IntentKind::ContractCall(c) => {
@@ -276,25 +279,29 @@ impl VmRouter {
                     &engine,
                     &engine_name,
                     &ctx,
-                    &[],           // no bytecode for call — engine fetches from storage
+                    &[], // no bytecode for call — engine fetches from storage
                     &c.calldata,
                     gas_limit,
-                ).await
+                )
+                .await
             }
             IntentKind::Deploy(d) => {
                 // Sandbox validates bytecode before deployment
                 if self.config.sandbox_validation {
-                    self.sandbox.validate(&d.bytecode)
+                    self.sandbox
+                        .validate(&d.bytecode)
                         .map_err(|e| VmError::ValidationError(e.to_string()))?;
                 }
-                let result = self.execute_with_breaker(
-                    &engine,
-                    &engine_name,
-                    &ctx,
-                    &d.bytecode,
-                    &d.init_args,
-                    gas_limit,
-                ).await;
+                let result = self
+                    .execute_with_breaker(
+                        &engine,
+                        &engine_name,
+                        &ctx,
+                        &d.bytecode,
+                        &d.init_args,
+                        gas_limit,
+                    )
+                    .await;
                 result.map(|mut r| {
                     // On deploy success, output contains deployed contract address
                     if r.success && r.output.is_empty() {
@@ -308,14 +315,8 @@ impl VmRouter {
             }
             IntentKind::CrossChain(x) => {
                 // Cross-chain calls are handled by the WASM engine + bridge
-                self.execute_with_breaker(
-                    &engine,
-                    &engine_name,
-                    &ctx,
-                    &[],
-                    &x.calldata,
-                    gas_limit,
-                ).await
+                self.execute_with_breaker(&engine, &engine_name, &ctx, &[], &x.calldata, gas_limit)
+                    .await
             }
             IntentKind::ZkVerify(z) => {
                 self.execute_with_breaker(
@@ -325,7 +326,8 @@ impl VmRouter {
                     &z.proof_bytes,
                     &z.public_inputs.concat(),
                     gas_limit,
-                ).await
+                )
+                .await
             }
         }?;
 
@@ -338,7 +340,11 @@ impl VmRouter {
             m.total_intents += 1;
             m.total_gas_used += bleep_gas;
             *m.by_engine.entry(engine_name.clone()).or_insert(0) += 1;
-            if raw_result.success { m.successes += 1; } else { m.failures += 1; }
+            if raw_result.success {
+                m.successes += 1;
+            } else {
+                m.failures += 1;
+            }
         }
 
         if self.config.trace_execution {
@@ -352,10 +358,10 @@ impl VmRouter {
         }
 
         Ok(RoutedResult {
-            intent_id:   intent.id,
+            intent_id: intent.id,
             engine_name,
-            vm:          format!("{vm:?}"),
-            result:      raw_result,
+            vm: format!("{vm:?}"),
+            result: raw_result,
             bleep_gas,
         })
     }
@@ -364,11 +370,11 @@ impl VmRouter {
     pub async fn metrics(&self) -> RouterMetrics {
         let m = self.metrics.read().await;
         RouterMetrics {
-            total_intents:  m.total_intents,
-            successes:      m.successes,
-            failures:       m.failures,
+            total_intents: m.total_intents,
+            successes: m.successes,
+            failures: m.failures,
             total_gas_used: m.total_gas_used,
-            by_engine:      m.by_engine.clone(),
+            by_engine: m.by_engine.clone(),
         }
     }
 
@@ -394,11 +400,13 @@ impl VmRouter {
     async fn select_engine(&self, vm: &TargetVm) -> VmResult<Arc<dyn Engine>> {
         let breakers = self.breakers.read().await;
         for engine in &self.engines {
-            if !engine.supports(vm) { continue; }
-            if !engine.is_healthy() { continue; }
-            let cb_open = breakers
-                .get(engine.name())
-                .map_or(false, |cb| cb.is_open());
+            if !engine.supports(vm) {
+                continue;
+            }
+            if !engine.is_healthy() {
+                continue;
+            }
+            let cb_open = breakers.get(engine.name()).map_or(false, |cb| cb.is_open());
             if cb_open {
                 warn!(engine = engine.name(), "Circuit breaker open, skipping");
                 continue;
@@ -410,19 +418,19 @@ impl VmRouter {
 
     async fn execute_with_breaker(
         &self,
-        engine:      &Arc<dyn Engine>,
-        name:        &str,
-        ctx:         &ExecutionContext,
-        bytecode:    &[u8],
-        calldata:    &[u8],
-        gas_limit:   u64,
+        engine: &Arc<dyn Engine>,
+        name: &str,
+        ctx: &ExecutionContext,
+        bytecode: &[u8],
+        calldata: &[u8],
+        gas_limit: u64,
     ) -> VmResult<EngineResult> {
         let result = engine.execute(ctx, bytecode, calldata, gas_limit).await;
         let mut breakers = self.breakers.write().await;
         let cb = breakers.entry(name.to_string()).or_default();
         match &result {
-            Ok(r) if r.success  => cb.record_success(),
-            Ok(_) | Err(_)      => cb.record_failure(),
+            Ok(r) if r.success => cb.record_success(),
+            Ok(_) | Err(_) => cb.record_failure(),
         }
         result
     }
@@ -435,20 +443,24 @@ impl VmRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent::{ContractCallIntent, DeployIntent, TransferIntent, IntentKind, Intent};
+    use crate::intent::{ContractCallIntent, DeployIntent, Intent, IntentKind, TransferIntent};
     use crate::types::ChainId;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // ── Mock Engine ───────────────────────────────────────────────────────────
     struct MockEngine {
         supported_vm: TargetVm,
-        calls:        Arc<AtomicU64>,
+        calls: Arc<AtomicU64>,
     }
 
     #[async_trait::async_trait]
     impl Engine for MockEngine {
-        fn name(&self) -> &'static str { "mock" }
-        fn supports(&self, vm: &TargetVm) -> bool { vm == &self.supported_vm }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn supports(&self, vm: &TargetVm) -> bool {
+            vm == &self.supported_vm
+        }
 
         async fn execute(
             &self,
@@ -459,13 +471,13 @@ mod tests {
         ) -> VmResult<EngineResult> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(EngineResult {
-                success:       true,
-                output:        calldata.to_vec(),
-                gas_used:      1000.min(gas_limit),
-                state_diff:    StateDiff::empty(),
-                logs:          Vec::new(),
+                success: true,
+                output: calldata.to_vec(),
+                gas_used: 1000.min(gas_limit),
+                state_diff: StateDiff::empty(),
+                logs: Vec::new(),
                 revert_reason: None,
-                exec_time:     Duration::from_micros(100),
+                exec_time: Duration::from_micros(100),
             })
         }
 
@@ -478,20 +490,20 @@ mod tests {
         ) -> VmResult<EngineResult> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(EngineResult {
-                success:    true,
-                output:     bytecode[..4.min(bytecode.len())].to_vec(),
-                gas_used:   50_000.min(gas_limit),
+                success: true,
+                output: bytecode[..4.min(bytecode.len())].to_vec(),
+                gas_used: 50_000.min(gas_limit),
                 state_diff: StateDiff::empty(),
-                logs:       Vec::new(),
+                logs: Vec::new(),
                 revert_reason: None,
-                exec_time:  Duration::from_micros(500),
+                exec_time: Duration::from_micros(500),
             })
         }
     }
 
     fn make_router() -> VmRouter {
         let mut cfg = RouterConfig::default();
-        cfg.verify_signatures  = false; // skip sig checks in unit tests
+        cfg.verify_signatures = false; // skip sig checks in unit tests
         cfg.sandbox_validation = false; // skip bytecode validation in unit tests
         let counter = Arc::new(AtomicU64::new(0));
         let engine: Arc<dyn Engine> = Arc::new(MockEngine {
@@ -508,10 +520,10 @@ mod tests {
         let router = make_router();
         let intent = Intent::new_unsigned(
             IntentKind::Transfer(TransferIntent {
-                from:   [1u8; 32],
-                to:     [2u8; 32],
+                from: [1u8; 32],
+                to: [2u8; 32],
                 amount: 500,
-                memo:   None,
+                memo: None,
             }),
             ChainId::Bleep,
         );
@@ -526,11 +538,11 @@ mod tests {
         let intent = Intent::new_unsigned(
             IntentKind::ContractCall(ContractCallIntent {
                 target_vm: TargetVm::Wasm,
-                contract:  [0xABu8; 32],
-                calldata:  vec![1, 2, 3, 4],
+                contract: [0xABu8; 32],
+                calldata: vec![1, 2, 3, 4],
                 gas_limit: 100_000,
-                value:     0,
-                hints:     Default::default(),
+                value: 0,
+                hints: Default::default(),
             }),
             ChainId::Bleep,
         );
@@ -545,11 +557,11 @@ mod tests {
         let intent = Intent::new_unsigned(
             IntentKind::ContractCall(ContractCallIntent {
                 target_vm: TargetVm::Wasm,
-                contract:  [0u8; 32],
-                calldata:  vec![],
+                contract: [0u8; 32],
+                calldata: vec![],
                 gas_limit: 999_999_999, // above max
-                value:     0,
-                hints:     Default::default(),
+                value: 0,
+                hints: Default::default(),
             }),
             ChainId::Bleep,
         );
@@ -563,11 +575,11 @@ mod tests {
         let intent = Intent::new_unsigned(
             IntentKind::ContractCall(ContractCallIntent {
                 target_vm: TargetVm::Evm, // no EVM engine registered
-                contract:  [0u8; 32],
-                calldata:  vec![],
+                contract: [0u8; 32],
+                calldata: vec![],
                 gas_limit: 100_000,
-                value:     0,
-                hints:     Default::default(),
+                value: 0,
+                hints: Default::default(),
             }),
             ChainId::Bleep,
         );
@@ -581,7 +593,10 @@ mod tests {
         for _ in 0..3 {
             let intent = Intent::new_unsigned(
                 IntentKind::Transfer(TransferIntent {
-                    from: [0u8; 32], to: [1u8; 32], amount: 1, memo: None,
+                    from: [0u8; 32],
+                    to: [1u8; 32],
+                    amount: 1,
+                    memo: None,
                 }),
                 ChainId::Bleep,
             );

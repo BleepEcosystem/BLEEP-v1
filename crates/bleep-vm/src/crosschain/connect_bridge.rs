@@ -22,7 +22,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
-
 use crate::error::{VmError, VmResult};
 use crate::types::ChainId;
 
@@ -35,17 +34,17 @@ use crate::types::ChainId;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallEnvelope {
     /// 4-byte function selector (chain-native — 0-padded for chains that don't use it).
-    pub selector:  [u8; 4],
+    pub selector: [u8; 4],
     /// ABI-encoded arguments in the chain's native format.
-    pub args:      Vec<u8>,
+    pub args: Vec<u8>,
     /// Caller address bytes (variable length; 20 for EVM, 32 for Solana/Cosmos, etc.)
-    pub caller:    Vec<u8>,
+    pub caller: Vec<u8>,
     /// Value transferred (in chain's base units).
-    pub value:     u128,
+    pub value: u128,
     /// Gas stipend passed to this call.
-    pub gas:       u64,
+    pub gas: u64,
     /// Chain that originated this call.
-    pub chain_id:  ChainId,
+    pub chain_id: ChainId,
 }
 
 impl CallEnvelope {
@@ -71,10 +70,14 @@ impl CallEnvelope {
     }
 
     pub fn encoded_len(&self) -> usize {
-        4 + 4 + self.chain_id.to_string().len()
-            + 4 + self.caller.len()
-            + 16 + 8
-            + 4 + self.args.len()
+        4 + 4
+            + self.chain_id.to_string().len()
+            + 4
+            + self.caller.len()
+            + 16
+            + 8
+            + 4
+            + self.args.len()
     }
 }
 
@@ -82,23 +85,33 @@ impl CallEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReturnEnvelope {
     /// 0 = success, non-zero = revert code.
-    pub status:  i32,
+    pub status: i32,
     /// ABI-encoded return data in the chain's native format.
-    pub data:    Vec<u8>,
+    pub data: Vec<u8>,
     /// Revert reason string (if status != 0).
-    pub reason:  Option<String>,
+    pub reason: Option<String>,
 }
 
 impl ReturnEnvelope {
     pub fn success(data: Vec<u8>) -> Self {
-        ReturnEnvelope { status: 0, data, reason: None }
+        ReturnEnvelope {
+            status: 0,
+            data,
+            reason: None,
+        }
     }
 
     pub fn revert(code: i32, reason: impl Into<String>) -> Self {
-        ReturnEnvelope { status: code, data: vec![], reason: Some(reason.into()) }
+        ReturnEnvelope {
+            status: code,
+            data: vec![],
+            reason: Some(reason.into()),
+        }
     }
 
-    pub fn is_success(&self) -> bool { self.status == 0 }
+    pub fn is_success(&self) -> bool {
+        self.status == 0
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -128,9 +141,15 @@ pub struct EvmAbi {
 }
 
 impl EvmAbi {
-    pub fn ethereum() -> Self { EvmAbi { chain: ChainId::Ethereum } }
+    pub fn ethereum() -> Self {
+        EvmAbi {
+            chain: ChainId::Ethereum,
+        }
+    }
     pub fn l2(name: impl Into<String>) -> Self {
-        EvmAbi { chain: ChainId::EthereumL2(name.into()) }
+        EvmAbi {
+            chain: ChainId::EthereumL2(name.into()),
+        }
     }
 
     /// Compute a 4-byte EVM function selector from a human-readable signature,
@@ -162,10 +181,12 @@ impl EvmAbi {
             });
         }
         // Address is right-aligned: bytes[12..32]
-        slot[12..32].try_into().map_err(|_| VmError::AbiDecodeFailed {
-            chain: "ethereum".into(),
-            reason: "address slice error".into(),
-        })
+        slot[12..32]
+            .try_into()
+            .map_err(|_| VmError::AbiDecodeFailed {
+                chain: "ethereum".into(),
+                reason: "address slice error".into(),
+            })
     }
 
     /// Encode a `bool` as a 32-byte ABI slot.
@@ -197,7 +218,9 @@ impl EvmAbi {
 }
 
 impl ChainAbi for EvmAbi {
-    fn chain_id(&self) -> ChainId { self.chain.clone() }
+    fn chain_id(&self) -> ChainId {
+        self.chain.clone()
+    }
 
     fn decode_call(&self, raw: &[u8]) -> VmResult<CallEnvelope> {
         if raw.len() < 4 {
@@ -212,8 +235,8 @@ impl ChainAbi for EvmAbi {
             selector,
             args,
             caller: vec![0u8; 20], // filled by VM from tx context
-            value:  0,
-            gas:    0,
+            value: 0,
+            gas: 0,
             chain_id: self.chain.clone(),
         })
     }
@@ -248,7 +271,9 @@ impl SolanaAbi {
         use sha2::{Digest, Sha256};
         let preimage = format!("global:{name}");
         let hash = Sha256::digest(preimage.as_bytes());
-        [hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]]
+        [
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+        ]
     }
 
     /// Read a little-endian u64 from `data[offset..]`.
@@ -256,15 +281,22 @@ impl SolanaAbi {
         if data.len() < offset + 8 {
             return Err(VmError::AbiDecodeFailed {
                 chain: "solana".into(),
-                reason: format!("need 8 bytes at offset {offset}, got {}", data.len().saturating_sub(offset)),
+                reason: format!(
+                    "need 8 bytes at offset {offset}, got {}",
+                    data.len().saturating_sub(offset)
+                ),
             });
         }
-        Ok(u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()))
+        Ok(u64::from_le_bytes(
+            data[offset..offset + 8].try_into().unwrap(),
+        ))
     }
 }
 
 impl ChainAbi for SolanaAbi {
-    fn chain_id(&self) -> ChainId { ChainId::Solana }
+    fn chain_id(&self) -> ChainId {
+        ChainId::Solana
+    }
 
     fn decode_call(&self, raw: &[u8]) -> VmResult<CallEnvelope> {
         if raw.len() < 8 {
@@ -281,8 +313,8 @@ impl ChainAbi for SolanaAbi {
             selector,
             args,
             caller: vec![0u8; 32],
-            value:  0,
-            gas:    0,
+            value: 0,
+            gas: 0,
             chain_id: ChainId::Solana,
         })
     }
@@ -313,13 +345,17 @@ impl ChainAbi for SolanaAbi {
 pub struct CosmosAbi;
 
 impl ChainAbi for CosmosAbi {
-    fn chain_id(&self) -> ChainId { ChainId::CosmosHub }
+    fn chain_id(&self) -> ChainId {
+        ChainId::CosmosHub
+    }
 
     fn decode_call(&self, raw: &[u8]) -> VmResult<CallEnvelope> {
         // CosmWasm: JSON `{"method_name": {...args}}`
-        let json: serde_json::Value = serde_json::from_slice(raw).map_err(|e| {
-            VmError::AbiDecodeFailed { chain: "cosmos".into(), reason: e.to_string() }
-        })?;
+        let json: serde_json::Value =
+            serde_json::from_slice(raw).map_err(|e| VmError::AbiDecodeFailed {
+                chain: "cosmos".into(),
+                reason: e.to_string(),
+            })?;
         let obj = json.as_object().ok_or_else(|| VmError::AbiDecodeFailed {
             chain: "cosmos".into(),
             reason: "expected JSON object".into(),
@@ -335,8 +371,8 @@ impl ChainAbi for CosmosAbi {
             selector,
             args,
             caller: vec![],
-            value:  0,
-            gas:    0,
+            value: 0,
+            gas: 0,
             chain_id: ChainId::CosmosHub,
         })
     }
@@ -396,7 +432,10 @@ impl SubstrateAbi {
                     });
                 }
                 let v = u32::from_le_bytes([
-                    first, data[offset+1], data[offset+2], data[offset+3],
+                    first,
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
                 ]) >> 2;
                 Ok((v as u64, 4))
             }
@@ -409,7 +448,9 @@ impl SubstrateAbi {
 }
 
 impl ChainAbi for SubstrateAbi {
-    fn chain_id(&self) -> ChainId { ChainId::Polkadot }
+    fn chain_id(&self) -> ChainId {
+        ChainId::Polkadot
+    }
 
     fn decode_call(&self, raw: &[u8]) -> VmResult<CallEnvelope> {
         if raw.len() < 4 {
@@ -424,8 +465,8 @@ impl ChainAbi for SubstrateAbi {
             selector,
             args,
             caller: vec![0u8; 32],
-            value:  0,
-            gas:    0,
+            value: 0,
+            gas: 0,
             chain_id: ChainId::Polkadot,
         })
     }
@@ -459,26 +500,30 @@ impl ChainAbi for SubstrateAbi {
 pub struct NearAbi;
 
 impl ChainAbi for NearAbi {
-    fn chain_id(&self) -> ChainId { ChainId::Near }
+    fn chain_id(&self) -> ChainId {
+        ChainId::Near
+    }
 
     fn decode_call(&self, raw: &[u8]) -> VmResult<CallEnvelope> {
         // Near: `{"function": "name", "args": <JSON>}`
-        let json: serde_json::Value = serde_json::from_slice(raw).map_err(|e| {
-            VmError::AbiDecodeFailed { chain: "near".into(), reason: e.to_string() }
-        })?;
+        let json: serde_json::Value =
+            serde_json::from_slice(raw).map_err(|e| VmError::AbiDecodeFailed {
+                chain: "near".into(),
+                reason: e.to_string(),
+            })?;
         let fn_name = json["function"].as_str().unwrap_or("").to_string();
         let selector = {
             let h = Keccak256::digest(fn_name.as_bytes());
             [h[0], h[1], h[2], h[3]]
         };
-        let args = serde_json::to_vec(&json["args"])
-            .map_err(|e| VmError::Serialization(e.to_string()))?;
+        let args =
+            serde_json::to_vec(&json["args"]).map_err(|e| VmError::Serialization(e.to_string()))?;
         Ok(CallEnvelope {
             selector,
             args,
             caller: vec![],
-            value:  0,
-            gas:    0,
+            value: 0,
+            gas: 0,
             chain_id: ChainId::Near,
         })
     }
@@ -503,12 +548,22 @@ pub struct MoveAbi {
 }
 
 impl MoveAbi {
-    pub fn sui() -> Self   { MoveAbi { chain: ChainId::Sui } }
-    pub fn aptos() -> Self { MoveAbi { chain: ChainId::Aptos } }
+    pub fn sui() -> Self {
+        MoveAbi {
+            chain: ChainId::Sui,
+        }
+    }
+    pub fn aptos() -> Self {
+        MoveAbi {
+            chain: ChainId::Aptos,
+        }
+    }
 }
 
 impl ChainAbi for MoveAbi {
-    fn chain_id(&self) -> ChainId { self.chain.clone() }
+    fn chain_id(&self) -> ChainId {
+        self.chain.clone()
+    }
 
     fn decode_call(&self, raw: &[u8]) -> VmResult<CallEnvelope> {
         if raw.is_empty() {
@@ -520,15 +575,20 @@ impl ChainAbi for MoveAbi {
         let mut cursor = 0usize;
 
         // module name
-        let mod_len = raw[cursor] as usize; cursor += 1;
+        let mod_len = raw[cursor] as usize;
+        cursor += 1;
         if cursor + mod_len > raw.len() {
             return Err(VmError::AbiDecodeFailed {
                 chain: self.chain.to_string(),
                 reason: "module name overflows calldata".into(),
             });
         }
-        let module = std::str::from_utf8(&raw[cursor..cursor + mod_len])
-            .map_err(|e| VmError::AbiDecodeFailed { chain: self.chain.to_string(), reason: e.to_string() })?;
+        let module = std::str::from_utf8(&raw[cursor..cursor + mod_len]).map_err(|e| {
+            VmError::AbiDecodeFailed {
+                chain: self.chain.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
         cursor += mod_len;
 
         // function name
@@ -538,15 +598,20 @@ impl ChainAbi for MoveAbi {
                 reason: "missing function name length".into(),
             });
         }
-        let fn_len = raw[cursor] as usize; cursor += 1;
+        let fn_len = raw[cursor] as usize;
+        cursor += 1;
         if cursor + fn_len > raw.len() {
             return Err(VmError::AbiDecodeFailed {
                 chain: self.chain.to_string(),
                 reason: "function name overflows calldata".into(),
             });
         }
-        let function = std::str::from_utf8(&raw[cursor..cursor + fn_len])
-            .map_err(|e| VmError::AbiDecodeFailed { chain: self.chain.to_string(), reason: e.to_string() })?;
+        let function = std::str::from_utf8(&raw[cursor..cursor + fn_len]).map_err(|e| {
+            VmError::AbiDecodeFailed {
+                chain: self.chain.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
         cursor += fn_len;
 
         // selector = keccak4("module::function")
@@ -561,8 +626,8 @@ impl ChainAbi for MoveAbi {
             selector,
             args,
             caller: vec![0u8; 32],
-            value:  0,
-            gas:    0,
+            value: 0,
+            gas: 0,
             chain_id: self.chain.clone(),
         })
     }
@@ -630,7 +695,9 @@ impl AbiRouter {
 }
 
 impl Default for AbiRouter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -800,10 +867,10 @@ mod tests {
     fn test_call_envelope_to_memory_bytes_roundtrip_len() {
         let env = CallEnvelope {
             selector: [0xAA, 0xBB, 0xCC, 0xDD],
-            args:     vec![1, 2, 3],
-            caller:   vec![0u8; 20],
-            value:    1_000_000,
-            gas:      21_000,
+            args: vec![1, 2, 3],
+            caller: vec![0u8; 20],
+            value: 1_000_000,
+            gas: 21_000,
             chain_id: ChainId::Ethereum,
         };
         let bytes = env.to_memory_bytes();

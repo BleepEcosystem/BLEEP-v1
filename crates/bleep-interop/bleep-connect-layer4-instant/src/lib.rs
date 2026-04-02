@@ -11,17 +11,16 @@ use dashmap::DashMap;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use bleep_connect_types::{
-    InstantIntent, ExecutorProfile, ExecutorTier,
-    TransferStatus, FailureReason, BleepConnectError, BleepConnectResult,
-    StateCommitment, CommitmentType, UniversalAddress,
-    constants::{
-        EXECUTOR_AUCTION_DURATION, EXECUTION_TIMEOUT, INTENT_DEFAULT_EXPIRY,
-        SLASH_PENALTY_BPS, PROTOCOL_FEE_BPS,
-    },
-};
-use bleep_connect_crypto::{sha256, ClassicalKeyPair};
 use bleep_connect_commitment_chain::CommitmentChain;
+use bleep_connect_crypto::{sha256, ClassicalKeyPair};
+use bleep_connect_types::{
+    constants::{
+        EXECUTION_TIMEOUT, EXECUTOR_AUCTION_DURATION, INTENT_DEFAULT_EXPIRY, PROTOCOL_FEE_BPS,
+        SLASH_PENALTY_BPS,
+    },
+    BleepConnectError, BleepConnectResult, CommitmentType, ExecutorProfile, ExecutorTier,
+    FailureReason, InstantIntent, StateCommitment, TransferStatus, UniversalAddress,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTENT POOL
@@ -48,7 +47,8 @@ impl IntentPool {
             return Err(BleepConnectError::IntentExpired(intent.expires_at));
         }
         self.intents.insert(id, intent);
-        self.statuses.insert(id, TransferStatus::Created { created_at: ts });
+        self.statuses
+            .insert(id, TransferStatus::Created { created_at: ts });
         Ok(id)
     }
 
@@ -91,7 +91,9 @@ impl IntentPool {
 }
 
 impl Default for IntentPool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,7 +105,7 @@ pub struct ExecutorBid {
     pub intent_id: [u8; 32],
     pub executor_address: UniversalAddress,
     pub executor_tier: ExecutorTier,
-    pub bid_reward_bps: u16,   // Lower = more competitive
+    pub bid_reward_bps: u16, // Lower = more competitive
     pub estimated_time_ms: u64,
     pub placed_at: u64,
     pub signature: Vec<u8>,
@@ -132,7 +134,9 @@ impl ExecutorRegistry {
     }
 
     pub fn get_profile(&self, address: &UniversalAddress) -> Option<ExecutorProfile> {
-        self.profiles.get(&address.to_string()).map(|e| e.value().clone())
+        self.profiles
+            .get(&address.to_string())
+            .map(|e| e.value().clone())
     }
 
     pub fn lock_bond(&self, executor: &str, amount: u128) -> BleepConnectResult<()> {
@@ -159,8 +163,7 @@ impl ExecutorRegistry {
             p.successful_executions += 1;
             p.total_volume += volume;
             // Exponential moving average of execution time
-            p.average_execution_time_ms =
-                (p.average_execution_time_ms * 9 + time_ms) / 10;
+            p.average_execution_time_ms = (p.average_execution_time_ms * 9 + time_ms) / 10;
             p.last_execution_at = now();
         }
     }
@@ -187,7 +190,9 @@ impl ExecutorRegistry {
 }
 
 impl Default for ExecutorRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -200,11 +205,16 @@ pub struct AuctionEngine {
 
 impl AuctionEngine {
     pub fn new() -> Self {
-        Self { bids: DashMap::new() }
+        Self {
+            bids: DashMap::new(),
+        }
     }
 
     pub fn place_bid(&self, bid: ExecutorBid) -> BleepConnectResult<()> {
-        self.bids.entry(bid.intent_id).or_insert_with(Vec::new).push(bid);
+        self.bids
+            .entry(bid.intent_id)
+            .or_insert_with(Vec::new)
+            .push(bid);
         Ok(())
     }
 
@@ -213,7 +223,8 @@ impl AuctionEngine {
         let bids = self.bids.get(intent_id)?;
         bids.iter()
             .min_by(|a, b| {
-                a.bid_reward_bps.cmp(&b.bid_reward_bps)
+                a.bid_reward_bps
+                    .cmp(&b.bid_reward_bps)
                     .then(a.estimated_time_ms.cmp(&b.estimated_time_ms))
             })
             .cloned()
@@ -225,7 +236,9 @@ impl AuctionEngine {
 }
 
 impl Default for AuctionEngine {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -288,24 +301,35 @@ impl Layer4Instant {
         // Escrow lock: in production this would verify the on-chain escrow transaction.
         // Here we confirm the escrow proof is non-empty.
         if intent.escrow_proof.is_empty() {
-            self.intent_pool.update_status(id, TransferStatus::Failed {
-                reason: FailureReason::EscrowFailed,
-                failed_at: now(),
-            });
-            return Err(BleepConnectError::InternalError("Missing escrow proof".into()));
+            self.intent_pool.update_status(
+                id,
+                TransferStatus::Failed {
+                    reason: FailureReason::EscrowFailed,
+                    failed_at: now(),
+                },
+            );
+            return Err(BleepConnectError::InternalError(
+                "Missing escrow proof".into(),
+            ));
         }
 
         // Transition to EscrowLocked
-        self.intent_pool.update_status(id, TransferStatus::EscrowLocked {
-            escrow_tx: intent.escrow_tx_hash.clone(),
-            locked_at: now(),
-        });
+        self.intent_pool.update_status(
+            id,
+            TransferStatus::EscrowLocked {
+                escrow_tx: intent.escrow_tx_hash.clone(),
+                locked_at: now(),
+            },
+        );
 
         // Open auction
-        self.intent_pool.update_status(id, TransferStatus::AuctionOpen {
-            opened_at: now(),
-            bids_received: 0,
-        });
+        self.intent_pool.update_status(
+            id,
+            TransferStatus::AuctionOpen {
+                opened_at: now(),
+                bids_received: 0,
+            },
+        );
 
         info!("Intent {} submitted, auction open", hex::encode(id));
 
@@ -325,115 +349,161 @@ impl Layer4Instant {
     /// An executor places a bid on an open intent.
     pub fn place_bid(&self, bid: ExecutorBid) -> BleepConnectResult<()> {
         // Validate bid reward does not exceed user's maximum
-        let intent = self.intent_pool.get(&bid.intent_id)
+        let intent = self
+            .intent_pool
+            .get(&bid.intent_id)
             .ok_or_else(|| BleepConnectError::InternalError("Intent not found".into()))?;
 
         if bid.bid_reward_bps > intent.max_solver_reward_bps {
-            return Err(BleepConnectError::InternalError("Bid reward exceeds user maximum".into()));
+            return Err(BleepConnectError::InternalError(
+                "Bid reward exceeds user maximum".into(),
+            ));
         }
 
-        if !self.executor_registry.can_execute(&bid.executor_address, intent.source_amount) {
+        if !self
+            .executor_registry
+            .can_execute(&bid.executor_address, intent.source_amount)
+        {
             return Err(BleepConnectError::ExecutorNotQualified(
-                "Insufficient liquidity or tier for this transfer".into()
+                "Insufficient liquidity or tier for this transfer".into(),
             ));
         }
 
         self.auction_engine.place_bid(bid)?;
         // Update bid count in status
-        if let Some(TransferStatus::AuctionOpen { opened_at, bids_received }) =
-            self.intent_pool.get_status(&intent.calculate_id())
+        if let Some(TransferStatus::AuctionOpen {
+            opened_at,
+            bids_received,
+        }) = self.intent_pool.get_status(&intent.calculate_id())
         {
-            self.intent_pool.update_status(intent.calculate_id(), TransferStatus::AuctionOpen {
-                opened_at,
-                bids_received: bids_received + 1,
-            });
+            self.intent_pool.update_status(
+                intent.calculate_id(),
+                TransferStatus::AuctionOpen {
+                    opened_at,
+                    bids_received: bids_received + 1,
+                },
+            );
         }
         Ok(())
     }
 
     /// Close the auction for an intent and commit to the winning executor.
     pub async fn close_auction(&self, intent_id: [u8; 32]) -> BleepConnectResult<()> {
-        let intent = self.intent_pool.get(&intent_id)
+        let intent = self
+            .intent_pool
+            .get(&intent_id)
             .ok_or_else(|| BleepConnectError::InternalError("Intent not found".into()))?;
 
-        let winner = self.auction_engine.select_winner(&intent_id)
+        let winner = self
+            .auction_engine
+            .select_winner(&intent_id)
             .ok_or_else(|| {
-                warn!("No bids for intent {}, marking failed", hex::encode(intent_id));
+                warn!(
+                    "No bids for intent {}, marking failed",
+                    hex::encode(intent_id)
+                );
                 BleepConnectError::InternalError("No bids received in auction window".into())
             })?;
 
         // Lock executor bond
         let bond = intent.calculate_min_executor_bond(winner.executor_tier);
-        self.executor_registry.lock_bond(&winner.executor_address.to_string(), bond)?;
+        self.executor_registry
+            .lock_bond(&winner.executor_address.to_string(), bond)?;
 
-        self.intent_pool.update_status(intent_id, TransferStatus::BidAccepted {
-            executor: winner.executor_address.clone(),
-            bond_tx: format!("bond-{}", hex::encode(intent_id)),
-            accepted_at: now(),
-        });
+        self.intent_pool.update_status(
+            intent_id,
+            TransferStatus::BidAccepted {
+                executor: winner.executor_address.clone(),
+                bond_tx: format!("bond-{}", hex::encode(intent_id)),
+                accepted_at: now(),
+            },
+        );
 
-        self.intent_pool.update_status(intent_id, TransferStatus::ExecutionStarted {
-            executor: winner.executor_address.clone(),
-            started_at: now(),
-        });
+        self.intent_pool.update_status(
+            intent_id,
+            TransferStatus::ExecutionStarted {
+                executor: winner.executor_address.clone(),
+                started_at: now(),
+            },
+        );
         self.execution_starts.insert(intent_id, now());
         self.auction_engine.clear(&intent_id);
-        info!("Auction closed for {}; winner: {}", hex::encode(intent_id), winner.executor_address);
+        info!(
+            "Auction closed for {}; winner: {}",
+            hex::encode(intent_id),
+            winner.executor_address
+        );
         Ok(())
     }
 
     /// An executor submits proof of completed execution.
     pub async fn submit_execution_proof(&self, proof: ExecutionProof) -> BleepConnectResult<()> {
         let intent_id = proof.intent_id;
-        let intent = self.intent_pool.get(&intent_id)
+        let intent = self
+            .intent_pool
+            .get(&intent_id)
             .ok_or_else(|| BleepConnectError::InternalError("Intent not found".into()))?;
 
         // Verify delivered amount meets minimum
         if proof.dest_amount_delivered < intent.min_dest_amount {
             return Err(BleepConnectError::InternalError(format!(
-                "Delivered {} < minimum {}", proof.dest_amount_delivered, intent.min_dest_amount
+                "Delivered {} < minimum {}",
+                proof.dest_amount_delivered, intent.min_dest_amount
             )));
         }
 
         // Check timeout
-        let start = self.execution_starts.get(&intent_id).map(|e| *e.value()).unwrap_or(0);
+        let start = self
+            .execution_starts
+            .get(&intent_id)
+            .map(|e| *e.value())
+            .unwrap_or(0);
         if now() > start + EXECUTION_TIMEOUT.as_secs() {
             // Slash the executor
-            self.executor_registry.slash_bond(
-                &proof.executor.to_string(),
-                intent.source_amount
-            );
+            self.executor_registry
+                .slash_bond(&proof.executor.to_string(), intent.source_amount);
             self.executor_registry.record_failure(&proof.executor);
-            self.intent_pool.update_status(intent_id, TransferStatus::Failed {
-                reason: FailureReason::ExecutorTimeout,
-                failed_at: now(),
-            });
-            return Err(BleepConnectError::InternalError("Execution timeout — executor slashed".into()));
+            self.intent_pool.update_status(
+                intent_id,
+                TransferStatus::Failed {
+                    reason: FailureReason::ExecutorTimeout,
+                    failed_at: now(),
+                },
+            );
+            return Err(BleepConnectError::InternalError(
+                "Execution timeout — executor slashed".into(),
+            ));
         }
 
         // Compute protocol fee and executor reward (reward is taken from source escrow by protocol)
         let _protocol_fee = (intent.source_amount * PROTOCOL_FEE_BPS as u128) / 10_000;
         // Executor reward: half of user's max solver reward (competitive bids drive this lower)
-        let _executor_reward = (intent.source_amount * (intent.max_solver_reward_bps as u128 / 2)) / 10_000;
+        let _executor_reward =
+            (intent.source_amount * (intent.max_solver_reward_bps as u128 / 2)) / 10_000;
 
         // Release bond and record success
         let bond = intent.calculate_min_executor_bond(
-            self.executor_registry.get_profile(&proof.executor)
+            self.executor_registry
+                .get_profile(&proof.executor)
                 .map(|p| p.tier)
-                .unwrap_or(ExecutorTier::Standard)
+                .unwrap_or(ExecutorTier::Standard),
         );
-        self.executor_registry.release_bond(&proof.executor.to_string(), bond);
+        self.executor_registry
+            .release_bond(&proof.executor.to_string(), bond);
         self.executor_registry.record_success(
             &proof.executor,
             intent.source_amount,
             proof.execution_time_ms,
         );
 
-        self.intent_pool.update_status(intent_id, TransferStatus::ExecutionCompleted {
-            executor: proof.executor.clone(),
-            dest_tx: proof.dest_tx_hash.clone(),
-            completed_at: proof.completed_at,
-        });
+        self.intent_pool.update_status(
+            intent_id,
+            TransferStatus::ExecutionCompleted {
+                executor: proof.executor.clone(),
+                dest_tx: proof.dest_tx_hash.clone(),
+                completed_at: proof.completed_at,
+            },
+        );
 
         // Anchor execution proof to commitment chain
         let data = [&intent_id[..], proof.dest_tx_hash.as_bytes()].concat();
@@ -489,27 +559,35 @@ impl Layer4Instant {
                 warn!("Auction expired for {}, attempting close", hex::encode(id));
                 if let Err(e) = self.close_auction(id).await {
                     warn!("Could not close auction {}: {}", hex::encode(id), e);
-                    self.intent_pool.update_status(id, TransferStatus::Failed {
-                        reason: FailureReason::Other("No executors available".into()),
-                        failed_at: now(),
-                    });
+                    self.intent_pool.update_status(
+                        id,
+                        TransferStatus::Failed {
+                            reason: FailureReason::Other("No executors available".into()),
+                            failed_at: now(),
+                        },
+                    );
                 }
             }
 
             // Check execution timeouts
             let ts = now();
             let timeout_secs = EXECUTION_TIMEOUT.as_secs();
-            let timed_out: Vec<[u8; 32]> = self.execution_starts.iter()
+            let timed_out: Vec<[u8; 32]> = self
+                .execution_starts
+                .iter()
                 .filter(|e| ts > *e.value() + timeout_secs)
                 .map(|e| *e.key())
                 .collect();
             for id in timed_out {
                 if let Some(_intent) = self.intent_pool.get(&id) {
                     warn!("Execution timeout for {}", hex::encode(id));
-                    self.intent_pool.update_status(id, TransferStatus::Failed {
-                        reason: FailureReason::ExecutorTimeout,
-                        failed_at: ts,
-                    });
+                    self.intent_pool.update_status(
+                        id,
+                        TransferStatus::Failed {
+                            reason: FailureReason::ExecutorTimeout,
+                            failed_at: ts,
+                        },
+                    );
                     self.execution_starts.remove(&id);
                 }
             }
@@ -518,18 +596,18 @@ impl Layer4Instant {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_connect_types::{ChainId, AssetId, AssetType};
-    use bleep_connect_crypto::ClassicalKeyPair;
     use bleep_connect_commitment_chain::{CommitmentChain, Validator};
+    use bleep_connect_crypto::ClassicalKeyPair;
+    use bleep_connect_types::{AssetId, AssetType, ChainId};
     use tempfile::tempdir;
 
     async fn make_chain() -> Arc<CommitmentChain> {
@@ -582,4 +660,4 @@ mod tests {
         let result = layer4.submit_intent(intent).await;
         assert!(result.is_err());
     }
-  }
+}

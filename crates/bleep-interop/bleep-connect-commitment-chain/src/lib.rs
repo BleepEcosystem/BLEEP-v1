@@ -8,13 +8,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rocksdb::{DB, Options, ColumnFamilyDescriptor};
+use rocksdb::{ColumnFamilyDescriptor, Options, DB};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
-use bleep_connect_types::{CommitmentBlock, StateCommitment, ValidatorSignature, BleepConnectError, BleepConnectResult};
-use bleep_connect_crypto::{ClassicalKeyPair, sha256};
+use bleep_connect_crypto::{sha256, ClassicalKeyPair};
+use bleep_connect_types::{
+    BleepConnectError, BleepConnectResult, CommitmentBlock, StateCommitment, ValidatorSignature,
+};
 
 pub use bleep_connect_types::CommitmentType;
 
@@ -48,26 +50,37 @@ impl ChainStorage {
     }
 
     pub fn store_block(&self, block: &CommitmentBlock) -> BleepConnectResult<()> {
-        let cf = self.db.cf_handle(CF_BLOCKS)
+        let cf = self
+            .db
+            .cf_handle(CF_BLOCKS)
             .ok_or_else(|| BleepConnectError::DatabaseError("blocks CF missing".into()))?;
         let key = block.block_number.to_be_bytes();
         let value = bincode::serialize(block)
             .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
-        self.db.put_cf(&cf, key, value)
+        self.db
+            .put_cf(&cf, key, value)
             .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?;
         // Update chain tip
-        let meta_cf = self.db.cf_handle(CF_META)
+        let meta_cf = self
+            .db
+            .cf_handle(CF_META)
             .ok_or_else(|| BleepConnectError::DatabaseError("meta CF missing".into()))?;
-        self.db.put_cf(&meta_cf, b"tip", block.block_number.to_be_bytes())
+        self.db
+            .put_cf(&meta_cf, b"tip", block.block_number.to_be_bytes())
             .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?;
         Ok(())
     }
 
     pub fn get_block(&self, number: u64) -> BleepConnectResult<Option<CommitmentBlock>> {
-        let cf = self.db.cf_handle(CF_BLOCKS)
+        let cf = self
+            .db
+            .cf_handle(CF_BLOCKS)
             .ok_or_else(|| BleepConnectError::DatabaseError("blocks CF missing".into()))?;
-        match self.db.get_cf(&cf, number.to_be_bytes())
-            .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))? {
+        match self
+            .db
+            .get_cf(&cf, number.to_be_bytes())
+            .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?
+        {
             Some(bytes) => {
                 let block = bincode::deserialize(&bytes)
                     .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
@@ -78,12 +91,19 @@ impl ChainStorage {
     }
 
     pub fn get_tip(&self) -> BleepConnectResult<u64> {
-        let cf = self.db.cf_handle(CF_META)
+        let cf = self
+            .db
+            .cf_handle(CF_META)
             .ok_or_else(|| BleepConnectError::DatabaseError("meta CF missing".into()))?;
-        match self.db.get_cf(&cf, b"tip")
-            .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))? {
+        match self
+            .db
+            .get_cf(&cf, b"tip")
+            .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?
+        {
             Some(bytes) if bytes.len() == 8 => {
-                let arr: [u8; 8] = bytes.try_into().map_err(|_| BleepConnectError::DatabaseError("invalid tip bytes".into()))?;
+                let arr: [u8; 8] = bytes
+                    .try_into()
+                    .map_err(|_| BleepConnectError::DatabaseError("invalid tip bytes".into()))?;
                 Ok(u64::from_be_bytes(arr))
             }
             _ => Ok(0),
@@ -91,21 +111,32 @@ impl ChainStorage {
     }
 
     pub fn store_commitment(&self, c: &StateCommitment) -> BleepConnectResult<()> {
-        let cf = self.db.cf_handle(CF_COMMITMENTS)
+        let cf = self
+            .db
+            .cf_handle(CF_COMMITMENTS)
             .ok_or_else(|| BleepConnectError::DatabaseError("commitments CF missing".into()))?;
         let value = bincode::serialize(c)
             .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
-        self.db.put_cf(&cf, c.commitment_id, value)
+        self.db
+            .put_cf(&cf, c.commitment_id, value)
             .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))
     }
 
     pub fn get_commitment(&self, id: &[u8; 32]) -> BleepConnectResult<Option<StateCommitment>> {
-        let cf = self.db.cf_handle(CF_COMMITMENTS)
+        let cf = self
+            .db
+            .cf_handle(CF_COMMITMENTS)
             .ok_or_else(|| BleepConnectError::DatabaseError("commitments CF missing".into()))?;
-        match self.db.get_cf(&cf, id)
-            .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))? {
-            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)
-                .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?)),
+        match self
+            .db
+            .get_cf(&cf, id)
+            .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?
+        {
+            Some(bytes) => {
+                Ok(Some(bincode::deserialize(&bytes).map_err(|e| {
+                    BleepConnectError::SerializationError(e.to_string())
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -147,7 +178,10 @@ impl BlockProducer {
     pub fn new(keypair: ClassicalKeyPair) -> Self {
         let pk = keypair.public_key_bytes();
         let id = sha256(&pk);
-        Self { validator_keypair: keypair, validator_id: id }
+        Self {
+            validator_keypair: keypair,
+            validator_id: id,
+        }
     }
 
     pub fn produce_block(
@@ -204,14 +238,18 @@ impl ConsensusEngine {
         let required = (total as f64 * (1.0 - self.byzantine_threshold)).ceil() as usize;
         let block_hash = block.calculate_hash();
 
-        let valid_count = block.validator_signatures.iter().filter(|vsig| {
-            // Find matching validator
-            validators.iter().any(|v| {
-                v.id == vsig.validator_id
-                    && ClassicalKeyPair::verify(&v.public_key, &block_hash, &vsig.signature)
-                        .unwrap_or(false)
+        let valid_count = block
+            .validator_signatures
+            .iter()
+            .filter(|vsig| {
+                // Find matching validator
+                validators.iter().any(|v| {
+                    v.id == vsig.validator_id
+                        && ClassicalKeyPair::verify(&v.public_key, &block_hash, &vsig.signature)
+                            .unwrap_or(false)
+                })
             })
-        }).count();
+            .count();
 
         info!(
             "Block {} consensus: {}/{} valid signatures (need {})",
@@ -272,7 +310,8 @@ impl CommitmentChain {
         let previous_hash = if tip == 0 {
             [0u8; 32]
         } else {
-            self.storage.get_block(tip)?
+            self.storage
+                .get_block(tip)?
                 .map(|b| b.calculate_hash())
                 .unwrap_or([0u8; 32])
         };
@@ -283,10 +322,14 @@ impl CommitmentChain {
         };
 
         if commitments.is_empty() {
-            return Err(BleepConnectError::InternalError("No commitments to include in block".into()));
+            return Err(BleepConnectError::InternalError(
+                "No commitments to include in block".into(),
+            ));
         }
 
-        let (block, _sig) = self.producer.produce_block(tip + 1, previous_hash, commitments);
+        let (block, _sig) = self
+            .producer
+            .produce_block(tip + 1, previous_hash, commitments);
 
         // In a single-validator setup (dev), accept immediately
         // In production, wait for additional validator signatures via P2P
@@ -319,14 +362,15 @@ impl CommitmentChain {
             Some(stored) => {
                 if stored.data_hash != commitment.data_hash {
                     return Err(BleepConnectError::InternalError(
-                        "Commitment data hash mismatch".into()
+                        "Commitment data hash mismatch".into(),
                     ));
                 }
                 Ok(())
             }
-            None => Err(BleepConnectError::InternalError(
-                format!("Unknown commitment: {}", hex::encode(commitment.commitment_id))
-            )),
+            None => Err(BleepConnectError::InternalError(format!(
+                "Unknown commitment: {}",
+                hex::encode(commitment.commitment_id)
+            ))),
         }
     }
 
@@ -388,4 +432,4 @@ mod tests {
         let loaded = storage.get_commitment(&c.commitment_id).unwrap().unwrap();
         assert_eq!(loaded.commitment_id, c.commitment_id);
     }
-  }
+}

@@ -17,10 +17,10 @@
 //! - Root recompute:   O(k log k) where k = leaf count (sort + fold)
 //! - prove(address):   O(k + 256) — O(k) bucket-build + 256 O(1) lookups (was O(k×256))
 
-use std::collections::HashMap;
 use blake3;
 use hex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ── Primitive types ───────────────────────────────────────────────────────────
 
@@ -88,14 +88,16 @@ pub struct SparseMerkleTrie {
 pub type MerkleTree = SparseMerkleTrie;
 
 impl SparseMerkleTrie {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     // ── Mutation ──────────────────────────────────────────────────────────────
 
     /// Insert or update an account leaf.
     pub fn insert(&mut self, address: &str, balance: u128, nonce: u64) {
         let path = key_to_path(address);
-        let lh   = leaf_hash(address, balance, nonce);
+        let lh = leaf_hash(address, balance, nonce);
         self.leaves.insert(path, lh);
         self.invalidate_caches();
     }
@@ -139,10 +141,8 @@ impl SparseMerkleTrie {
         }
 
         // Sort leaves by path so left-to-right order is guaranteed.
-        let mut sorted: Vec<([u8; 32], NodeHash)> = self.leaves
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
+        let mut sorted: Vec<([u8; 32], NodeHash)> =
+            self.leaves.iter().map(|(k, v)| (*k, *v)).collect();
         sorted.sort_by_key(|(k, _)| *k);
 
         // Stack entries: (depth, rep_path, hash).
@@ -157,10 +157,14 @@ impl SparseMerkleTrie {
             // Bubble up: merge siblings while the top two share the same depth.
             loop {
                 let n = stack.len();
-                if n < 2 { break; }
+                if n < 2 {
+                    break;
+                }
                 let (d1, p1, h1) = stack[n - 2];
                 let (d2, p2, h2) = stack[n - 1];
-                if d1 != d2 { break; }
+                if d1 != d2 {
+                    break;
+                }
 
                 stack.pop();
                 stack.pop();
@@ -182,10 +186,11 @@ impl SparseMerkleTrie {
         // Collapse any remaining unpaired nodes to the root.
         while stack.len() > 1 {
             let (_, _p2, h2) = stack.pop().unwrap();
-            let (d,  p1, h1) = stack.pop().unwrap();
+            let (d, p1, h1) = stack.pop().unwrap();
             let merged = interior_hash(&h1, &h2);
             let rep = p1; // leftmost path wins
-            self.interior_cache.insert((d.saturating_sub(1), rep), merged);
+            self.interior_cache
+                .insert((d.saturating_sub(1), rep), merged);
             stack.push((d.saturating_sub(1), rep, merged));
         }
 
@@ -212,10 +217,14 @@ impl SparseMerkleTrie {
     /// most O(k) entries at one depth level — but the total work is O(k + 256).
     pub fn prove(&mut self, address: &str) -> MerkleProof {
         // Ensure root and interior_cache are fresh.
-        let root     = self.root();
+        let root = self.root();
         let key_path = key_to_path(address);
-        let exists   = self.leaves.contains_key(&key_path);
-        let leaf     = if exists { self.leaves[&key_path] } else { EMPTY };
+        let exists = self.leaves.contains_key(&key_path);
+        let leaf = if exists {
+            self.leaves[&key_path]
+        } else {
+            EMPTY
+        };
 
         // Build depth-bucketed index from interior_cache in one O(k) pass.
         // by_depth[d] = list of (rep_path, hash) for all subtrees at depth d.
@@ -229,18 +238,24 @@ impl SparseMerkleTrie {
         let mut path: Vec<ProofNode> = Vec::with_capacity(TRIE_DEPTH);
 
         for depth in (0..TRIE_DEPTH).rev() {
-            let my_bit   = bit_at(&key_path, depth);
+            let my_bit = bit_at(&key_path, depth);
             // Sibling rep path: same prefix as key_path for bits 0..depth,
             // opposite at bit `depth`, zero for all bits > depth.
-            let mut sib_rep  = key_path;
-            let byte_idx     = depth / 8;
-            let bit_in_byte  = 7 - (depth % 8); // MSB-first layout
-            // Zero out all bytes after the sibling bit's byte.
-            for b in sib_rep.iter_mut().skip(byte_idx + 1) { *b = 0; }
+            let mut sib_rep = key_path;
+            let byte_idx = depth / 8;
+            let bit_in_byte = 7 - (depth % 8); // MSB-first layout
+                                               // Zero out all bytes after the sibling bit's byte.
+            for b in sib_rep.iter_mut().skip(byte_idx + 1) {
+                *b = 0;
+            }
             // Within byte_idx: keep the high bits (prefix), zero the low bits,
             // then set the sibling's bit (opposite of my_bit).
-            let keep_mask = if bit_in_byte == 7 { 0u8 } else { 0xFFu8 << (bit_in_byte + 1) };
-            let sib_bit   = if my_bit == 0 { 1u8 << bit_in_byte } else { 0u8 };
+            let keep_mask = if bit_in_byte == 7 {
+                0u8
+            } else {
+                0xFFu8 << (bit_in_byte + 1)
+            };
+            let sib_bit = if my_bit == 0 { 1u8 << bit_in_byte } else { 0u8 };
             sib_rep[byte_idx] = (sib_rep[byte_idx] & keep_mask) | sib_bit;
 
             // Direct O(1) lookup in the depth+1 bucket.
@@ -250,10 +265,19 @@ impl SparseMerkleTrie {
                 .map(|(_, h)| *h)
                 .unwrap_or(EMPTY);
 
-            path.push(ProofNode { sibling, is_right: my_bit == 1 });
+            path.push(ProofNode {
+                sibling,
+                is_right: my_bit == 1,
+            });
         }
 
-        MerkleProof { address: address.to_string(), exists, leaf, path, root }
+        MerkleProof {
+            address: address.to_string(),
+            exists,
+            leaf,
+            path,
+            root,
+        }
     }
 
     /// Verify that `proof` is valid against this trie's current root.
@@ -273,8 +297,12 @@ impl SparseMerkleTrie {
         }
     }
 
-    pub fn len(&self)      -> usize { self.leaves.len() }
-    pub fn is_empty(&self) -> bool  { self.leaves.is_empty() }
+    pub fn len(&self) -> usize {
+        self.leaves.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
+    }
 }
 
 // ── Proof types ───────────────────────────────────────────────────────────────
@@ -322,7 +350,7 @@ impl MerkleProof {
 
         for (depth_rev, node) in self.path.iter().enumerate() {
             let depth = TRIE_DEPTH - 1 - depth_rev;
-            let bit   = bit_at(&key_path, depth);
+            let bit = bit_at(&key_path, depth);
             current = if bit == 0 {
                 interior_hash(&current, &node.sibling) // node on left
             } else {
@@ -348,7 +376,7 @@ pub fn calculate_merkle_root<T: AsRef<[u8]>>(data: &[T]) -> String {
     while hashes.len() > 1 {
         let mut next = Vec::new();
         for chunk in hashes.chunks(2) {
-            let left  = chunk[0];
+            let left = chunk[0];
             let right = if chunk.len() > 1 { chunk[1] } else { chunk[0] };
             next.push(interior_hash(&left, &right));
         }
@@ -394,7 +422,7 @@ mod tests {
         t1.insert("alice", 100, 0);
         let mut t2 = SparseMerkleTrie::new();
         t2.insert("alice", 100, 0);
-        t2.insert("bob",   200, 0);
+        t2.insert("bob", 200, 0);
         assert_ne!(t1.root(), t2.root());
     }
 
@@ -412,13 +440,13 @@ mod tests {
     fn insertion_order_independent() {
         let mut t1 = SparseMerkleTrie::new();
         t1.insert("alice", 100, 0);
-        t1.insert("bob",   200, 1);
+        t1.insert("bob", 200, 1);
         t1.insert("carol", 300, 2);
 
         let mut t2 = SparseMerkleTrie::new();
         t2.insert("carol", 300, 2);
         t2.insert("alice", 100, 0);
-        t2.insert("bob",   200, 1);
+        t2.insert("bob", 200, 1);
 
         assert_eq!(t1.root(), t2.root());
     }
@@ -427,7 +455,7 @@ mod tests {
     fn prove_inclusion_verifies() {
         let mut t = SparseMerkleTrie::new();
         t.insert("alice", 1000, 5);
-        t.insert("bob",   500,  2);
+        t.insert("bob", 500, 2);
         let proof = t.prove("alice");
         assert!(proof.exists);
         assert!(t.verify_proof(&proof));

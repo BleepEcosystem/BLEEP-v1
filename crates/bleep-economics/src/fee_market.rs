@@ -4,7 +4,6 @@
 /// resource usage. Fees are load-responsive, shard-aware, and deterministic.
 ///
 /// Design: Fees must accurately reflect congestion without being gameable.
-
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -46,8 +45,9 @@ pub struct ResourceUsage {
 impl ResourceUsage {
     /// Total normalized units (for fee calculation)
     pub fn total_units(&self) -> u64 {
-        (self.compute_units as u64) + (self.storage_units as u64) 
-            + (self.bandwidth_bytes as u64 / 1024) 
+        (self.compute_units as u64)
+            + (self.storage_units as u64)
+            + (self.bandwidth_bytes as u64 / 1024)
             + (self.memory_bytes as u64 / 1024)
     }
 }
@@ -109,10 +109,10 @@ impl BaseFeeParams {
     pub fn new() -> Self {
         BaseFeeParams {
             current_base_fee: MIN_BASE_FEE,
-            max_increase_bps: 1250, // 12.5% per block
-            max_decrease_bps: 1000, // 10% per block
+            max_increase_bps: 1250,       // 12.5% per block
+            max_decrease_bps: 1000,       // 10% per block
             target_utilization_bps: 5000, // 50%
-            elasticity_multiplier: 2, // Aggressive scaling
+            elasticity_multiplier: 2,     // Aggressive scaling
         }
     }
 
@@ -171,7 +171,8 @@ impl FeeMarket {
         resource_usage: ResourceUsage,
         shard_id: u32,
     ) -> Result<u128, FeeMarketError> {
-        let congestion = self.shard_congestion
+        let congestion = self
+            .shard_congestion
             .get(&shard_id)
             .ok_or(FeeMarketError::ShardNotFound(shard_id))?;
 
@@ -181,7 +182,8 @@ impl FeeMarket {
         let base_fee = self.base_fee_params.current_base_fee;
 
         // Type multiplier
-        let type_cost = self.resource_costs
+        let type_cost = self
+            .resource_costs
             .get(&tx_type)
             .ok_or(FeeMarketError::UnknownTransactionType)?;
 
@@ -232,10 +234,7 @@ impl FeeMarket {
         };
 
         // Apply bounds
-        let bounded_fee = std::cmp::max(
-            MIN_BASE_FEE,
-            std::cmp::min(new_fee, MAX_BASE_FEE),
-        );
+        let bounded_fee = std::cmp::max(MIN_BASE_FEE, std::cmp::min(new_fee, MAX_BASE_FEE));
 
         self.base_fee_params.current_base_fee = bounded_fee;
         self.fee_history.insert(epoch, bounded_fee);
@@ -249,28 +248,26 @@ impl FeeMarket {
         congestion: ShardCongestion,
     ) -> Result<(), FeeMarketError> {
         congestion.validate()?;
-        self.shard_congestion.insert(congestion.shard_id, congestion);
+        self.shard_congestion
+            .insert(congestion.shard_id, congestion);
         Ok(())
     }
 
     /// Record transaction count for a shard in an epoch
-    pub fn record_tx_count(
-        &mut self,
-        epoch: u64,
-        shard_id: u32,
-        count: u32,
-    ) {
+    pub fn record_tx_count(&mut self, epoch: u64, shard_id: u32, count: u32) {
         self.tx_counts.insert((epoch, shard_id), count);
     }
 
     /// Get fee statistics for an epoch
     pub fn get_epoch_stats(&self, epoch: u64) -> Result<FeeStats, FeeMarketError> {
-        let base_fee = self.fee_history
+        let base_fee = self
+            .fee_history
             .get(&epoch)
             .copied()
             .ok_or(FeeMarketError::EpochNotFound(epoch))?;
 
-        let total_txns: u32 = self.tx_counts
+        let total_txns: u32 = self
+            .tx_counts
             .iter()
             .filter(|&((e, _), _)| *e == epoch)
             .map(|(_, &count)| count)
@@ -363,13 +360,16 @@ mod tests {
 
         // ...existing code...
 
-        assert!(market.base_fee_params.current_base_fee < *match market.fee_history.get(&0) {
-            Some(fee) => fee,
-            None => {
-                error!("Fee history for epoch 0 not found.");
-                return;
-            }
-        });
+        assert!(
+            market.base_fee_params.current_base_fee
+                < *match market.fee_history.get(&0) {
+                    Some(fee) => fee,
+                    None => {
+                        error!("Fee history for epoch 0 not found.");
+                        return;
+                    }
+                }
+        );
     }
 
     #[test]
@@ -383,12 +383,15 @@ mod tests {
 
         // Low utilization should decrease base fee
         market.update_base_fee(1, 2000).ok();
-        assert!(market.base_fee_params.current_base_fee < *match market.fee_history.get(&0) {
-            Some(fee) => fee,
-            None => {
-                error!("Fee history for epoch 0 not found.");
-                return;
-            }
-        });
+        assert!(
+            market.base_fee_params.current_base_fee
+                < *match market.fee_history.get(&0) {
+                    Some(fee) => fee,
+                    None => {
+                        error!("Fee history for epoch 0 not found.");
+                        return;
+                    }
+                }
+        );
     }
 }

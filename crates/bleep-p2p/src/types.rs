@@ -78,11 +78,11 @@ pub enum PeerStatus {
 impl fmt::Display for PeerStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PeerStatus::Candidate  => write!(f, "candidate"),
-            PeerStatus::Healthy    => write!(f, "healthy"),
+            PeerStatus::Candidate => write!(f, "candidate"),
+            PeerStatus::Healthy => write!(f, "healthy"),
             PeerStatus::Suspicious => write!(f, "suspicious"),
-            PeerStatus::Malicious  => write!(f, "malicious"),
-            PeerStatus::Banned     => write!(f, "banned"),
+            PeerStatus::Malicious => write!(f, "malicious"),
+            PeerStatus::Banned => write!(f, "banned"),
         }
     }
 }
@@ -107,7 +107,12 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    pub fn new(id: NodeId, addr: SocketAddr, public_key: Vec<u8>, sphincs_public_key: Vec<u8>) -> Self {
+    pub fn new(
+        id: NodeId,
+        addr: SocketAddr,
+        public_key: Vec<u8>,
+        sphincs_public_key: Vec<u8>,
+    ) -> Self {
         let now = unix_now();
         PeerInfo {
             id,
@@ -203,16 +208,16 @@ impl SecureMessage {
 
 fn message_type_tag(mt: &MessageType) -> u8 {
     match mt {
-        MessageType::Transaction    => 0,
-        MessageType::Block          => 1,
-        MessageType::PeerDiscovery  => 2,
-        MessageType::Governance     => 3,
-        MessageType::Gossip         => 4,
-        MessageType::OnionRelay     => 5,
-        MessageType::Ping           => 6,
-        MessageType::Pong           => 7,
-        MessageType::ZkHandshake    => 8,
-        MessageType::Custom(_)      => 255,
+        MessageType::Transaction => 0,
+        MessageType::Block => 1,
+        MessageType::PeerDiscovery => 2,
+        MessageType::Governance => 3,
+        MessageType::Gossip => 4,
+        MessageType::OnionRelay => 5,
+        MessageType::Ping => 6,
+        MessageType::Pong => 7,
+        MessageType::ZkHandshake => 8,
+        MessageType::Custom(_) => 255,
     }
 }
 

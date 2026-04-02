@@ -141,7 +141,10 @@ fn validator_reward_distribution() -> RegisteredTask {
         1000,
         60,
         |ctx: TaskContext| async move {
-            info!("[Economics] Distributing validator rewards for epoch={}", ctx.epoch);
+            info!(
+                "[Economics] Distributing validator rewards for epoch={}",
+                ctx.epoch
+            );
             // Production: RewardEngine::distribute_epoch_rewards(epoch)
             //   -> Compute reward per validator proportional to stake × blocks_produced
             //   -> Call CanonicalTokenomicsEngine::record_emission(epoch, amount, EmissionType::BlockProposal)
@@ -252,7 +255,10 @@ fn governance_proposal_advance() -> RegisteredTask {
         120,
         30,
         |ctx: TaskContext| async move {
-            info!("[Governance] Advancing proposal state machine at height={}", ctx.block_height);
+            info!(
+                "[Governance] Advancing proposal state machine at height={}",
+                ctx.block_height
+            );
             // Production: ProposalLifecycleManager::advance_epoch(ctx.block_height)
             //   -> For each proposal where block_height >= transition_height:
             //      -> transition_state(new_state)
@@ -271,7 +277,10 @@ fn governance_voting_window_close() -> RegisteredTask {
         1000,
         30,
         |ctx: TaskContext| async move {
-            info!("[Governance] Closing voting windows at block={}", ctx.block_height);
+            info!(
+                "[Governance] Closing voting windows at block={}",
+                ctx.block_height
+            );
             // Production: ZKVotingEngine::close_expired_windows(ctx.block_height)
             //   -> Compute final tally for each closed proposal
             //   -> Call ProposalLifecycleManager::record_tally(id, tally)
@@ -297,7 +306,10 @@ fn fee_market_update() -> RegisteredTask {
         30,
         10,
         |ctx: TaskContext| async move {
-            info!("[Economics] Updating fee market at block={}", ctx.block_height);
+            info!(
+                "[Economics] Updating fee market at block={}",
+                ctx.block_height
+            );
             // Production: FeeMarket::update_base_fee(epoch_stats, resource_usage)
             //   -> Reads ShardCongestion from all active shards
             //   -> Calls FeeMarket::record_shard_congestion(metrics)
@@ -412,7 +424,10 @@ fn cross_shard_timeout_sweep() -> RegisteredTask {
         60,
         20,
         |ctx: TaskContext| async move {
-            info!("[CrossShard] Checking 2PC timeouts at height={}", ctx.block_height);
+            info!(
+                "[CrossShard] Checking 2PC timeouts at height={}",
+                ctx.block_height
+            );
             // Production: CoordinatorManager::check_all_timeouts(ctx.block_height)
             //   -> For each coordinator where current_height > timeout_height:
             //      -> coordinator.execute_abort("timeout")
@@ -497,7 +512,10 @@ fn indexer_checkpoint() -> RegisteredTask {
         100,
         30,
         |ctx: TaskContext| async move {
-            info!("[Indexer] Creating checkpoint at height={}", ctx.block_height);
+            info!(
+                "[Indexer] Creating checkpoint at height={}",
+                ctx.block_height
+            );
             // Production: IndexerService::force_checkpoint()
             //   -> CheckpointEngine::record(ctx.block_height, head_hash)
             //   -> In production: flush checkpoint to RocksDB / SQLite

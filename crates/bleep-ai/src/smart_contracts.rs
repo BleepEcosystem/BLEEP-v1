@@ -1,18 +1,15 @@
-use actix_web::{web, App, HttpServer, Responder, HttpResponse};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use env_logger::Env;
-use tokio::sync::RwLock;
-use sha2::{Sha256, Digest};
-use hex;
 use crate::{
-    ai_decision::BLEEPAIDecisionModule,
-    governance::SelfAmendingGovernance,
-    zkp_verification::BLEEPZKPModule,
-    interoperability::BLEEPInteroperabilityModule,
-    bleep_connect::BLEEPConnect,
-    consensus::BLEEPAdaptiveConsensus,
+    ai_decision::BLEEPAIDecisionModule, bleep_connect::BLEEPConnect,
+    consensus::BLEEPAdaptiveConsensus, governance::SelfAmendingGovernance,
+    interoperability::BLEEPInteroperabilityModule, zkp_verification::BLEEPZKPModule,
 };
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use env_logger::Env;
+use hex;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // **Smart Contract Optimizer Module**
 pub struct SmartContractOptimizer;
@@ -75,7 +72,8 @@ impl SmartContractAutomation {
     // ✅ **Governance-Based Smart Contract Execution**
     pub async fn submit_proposal(&self, input: ContractProposal) -> Result<ApiResponse, String> {
         let governance = self.governance.write().await;
-        let proposal_id = governance.submit_proposal(input.contract_name.clone(), input.creator.clone())?;
+        let proposal_id =
+            governance.submit_proposal(input.contract_name.clone(), input.creator.clone())?;
         Ok(ApiResponse {
             status: "Proposal Submitted".to_string(),
             message: format!("Proposal ID: {}", proposal_id),
@@ -83,7 +81,11 @@ impl SmartContractAutomation {
         })
     }
 
-    pub async fn vote_on_proposal(&self, proposal_id: u64, support: bool) -> Result<ApiResponse, String> {
+    pub async fn vote_on_proposal(
+        &self,
+        proposal_id: u64,
+        support: bool,
+    ) -> Result<ApiResponse, String> {
         let governance = self.governance.write().await;
         governance.vote_on_proposal(proposal_id, support)?;
         Ok(ApiResponse {
@@ -95,7 +97,7 @@ impl SmartContractAutomation {
 
     pub async fn execute_proposal(&self, proposal_id: u64) -> Result<ApiResponse, String> {
         let governance = self.governance.write().await;
-        
+
         // Ensure proposal is approved
         if !governance.is_approved(proposal_id)? {
             return Err("Proposal not approved. Execution denied.".to_string());
@@ -130,7 +132,10 @@ impl SmartContractAutomation {
     }
 
     // 🔒 **Zero-Knowledge Proof (ZKP) Verification for Contract Validity**
-    pub async fn verify_contract_with_zkp(&self, contract_data: &[u8]) -> Result<ApiResponse, String> {
+    pub async fn verify_contract_with_zkp(
+        &self,
+        contract_data: &[u8],
+    ) -> Result<ApiResponse, String> {
         let proof = self.zkp_module.generate_proof(contract_data)?;
         let is_valid = self.zkp_module.verify_proof(&proof, contract_data)?;
 
@@ -159,7 +164,10 @@ impl SmartContractAutomation {
     }
 
     // 🌐 **Cross-Chain Contract Deployment**
-    pub async fn deploy_cross_chain_contract(&self, input: ContractProposal) -> Result<ApiResponse, String> {
+    pub async fn deploy_cross_chain_contract(
+        &self,
+        input: ContractProposal,
+    ) -> Result<ApiResponse, String> {
         // Validate inputs
         if input.contract_name.is_empty() || input.creator.is_empty() || input.network.is_empty() {
             return Err("Invalid contract proposal: missing required fields".to_string());
@@ -185,7 +193,10 @@ impl SmartContractAutomation {
 
         Ok(ApiResponse {
             status: "Deployed".to_string(),
-            message: format!("Cross-chain contract '{}' deployed on network '{}'", input.contract_name, input.network),
+            message: format!(
+                "Cross-chain contract '{}' deployed on network '{}'",
+                input.contract_name, input.network
+            ),
             transaction_hash: Some(transaction_hash),
         })
     }
@@ -193,7 +204,10 @@ impl SmartContractAutomation {
 
 // 🌐 **REST API Routes**
 #[allow(dead_code)]
-async fn deploy_contract(input: web::Json<ContractProposal>, engine: web::Data<SmartContractAutomation>) -> impl Responder {
+async fn deploy_contract(
+    input: web::Json<ContractProposal>,
+    engine: web::Data<SmartContractAutomation>,
+) -> impl Responder {
     match engine.deploy_cross_chain_contract(input.0).await {
         Ok(res) => HttpResponse::Ok().json(res),
         Err(err) => HttpResponse::InternalServerError().body(err),
@@ -201,7 +215,10 @@ async fn deploy_contract(input: web::Json<ContractProposal>, engine: web::Data<S
 }
 
 #[allow(dead_code)]
-async fn vote(input: web::Json<(u64, bool)>, engine: web::Data<SmartContractAutomation>) -> impl Responder {
+async fn vote(
+    input: web::Json<(u64, bool)>,
+    engine: web::Data<SmartContractAutomation>,
+) -> impl Responder {
     match engine.vote_on_proposal(input.0 .0, input.0 .1).await {
         Ok(res) => HttpResponse::Ok().json(res),
         Err(err) => HttpResponse::InternalServerError().body(err),
@@ -209,7 +226,10 @@ async fn vote(input: web::Json<(u64, bool)>, engine: web::Data<SmartContractAuto
 }
 
 #[allow(dead_code)]
-async fn audit_contract(input: web::Json<String>, engine: web::Data<SmartContractAutomation>) -> impl Responder {
+async fn audit_contract(
+    input: web::Json<String>,
+    engine: web::Data<SmartContractAutomation>,
+) -> impl Responder {
     match engine.audit_smart_contract(input.0).await {
         Ok(res) => HttpResponse::Ok().json(res),
         Err(err) => HttpResponse::InternalServerError().body(err),

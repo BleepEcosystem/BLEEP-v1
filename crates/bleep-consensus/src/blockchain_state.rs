@@ -8,7 +8,7 @@ pub struct BlockchainState {
 impl BlockchainState {
     pub fn new() -> Self {
         Self {
-            inner: CoreBlockchainState::new()
+            inner: CoreBlockchainState::new(),
         }
     }
 

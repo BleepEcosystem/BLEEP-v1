@@ -16,17 +16,14 @@ use std::time::Instant;
 
 use ark_bn254::{Bn254, Fr};
 use ark_ff::PrimeField;
-use ark_groth16::{Groth16, ProvingKey, VerifyingKey, PreparedVerifyingKey};
-use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystemRef, SynthesisError,
-};
-use ark_r1cs_std::prelude::*;
+use ark_groth16::{Groth16, PreparedVerifyingKey, ProvingKey, VerifyingKey};
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_snark::SNARK;
+use ark_r1cs_std::prelude::*;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 use ark_std::Zero;
-
 
 use tracing::{debug, info, warn};
 
@@ -45,25 +42,25 @@ use crate::types::ZkExecutionProof;
 #[derive(Clone)]
 pub struct ExecutionCircuit {
     pub state_root_before: Fr,
-    pub state_root_after:  Fr,
-    pub gas_used:          Fr,
-    pub tx_hash:           Fr,
-    pub trace_hash:        Option<Fr>,
-    pub witness_valid:     Option<bool>,
+    pub state_root_after: Fr,
+    pub gas_used: Fr,
+    pub tx_hash: Fr,
+    pub trace_hash: Option<Fr>,
+    pub witness_valid: Option<bool>,
 }
 
 impl ExecutionCircuit {
     pub fn new(
         state_before: &[u8; 32],
-        state_after:  &[u8; 32],
-        gas_used:     u64,
-        tx_hash:      &[u8; 32],
-        trace:        &[u8],
+        state_after: &[u8; 32],
+        gas_used: u64,
+        tx_hash: &[u8; 32],
+        trace: &[u8],
     ) -> Self {
         let root_before = fr_from_bytes(state_before);
-        let root_after  = fr_from_bytes(state_after);
-        let gas_fr      = Fr::from(gas_used);
-        let tx_fr       = fr_from_bytes(tx_hash);
+        let root_after = fr_from_bytes(state_after);
+        let gas_fr = Fr::from(gas_used);
+        let tx_fr = fr_from_bytes(tx_hash);
 
         use sha2::{Digest, Sha256};
         let trace_hash_bytes: [u8; 32] = Sha256::digest(trace).into();
@@ -71,22 +68,22 @@ impl ExecutionCircuit {
 
         ExecutionCircuit {
             state_root_before: root_before,
-            state_root_after:  root_after,
-            gas_used:          gas_fr,
-            tx_hash:           tx_fr,
-            trace_hash:        Some(trace_hash),
-            witness_valid:     Some(true),
+            state_root_after: root_after,
+            gas_used: gas_fr,
+            tx_hash: tx_fr,
+            trace_hash: Some(trace_hash),
+            witness_valid: Some(true),
         }
     }
 
     pub fn blank() -> Self {
         ExecutionCircuit {
             state_root_before: Fr::zero(),
-            state_root_after:  Fr::zero(),
-            gas_used:          Fr::zero(),
-            tx_hash:           Fr::zero(),
-            trace_hash:        None,
-            witness_valid:     None,
+            state_root_after: Fr::zero(),
+            gas_used: Fr::zero(),
+            tx_hash: Fr::zero(),
+            trace_hash: None,
+            witness_valid: None,
         }
     }
 }
@@ -94,9 +91,9 @@ impl ExecutionCircuit {
 impl ConstraintSynthesizer<Fr> for ExecutionCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         let root_before = FpVar::new_input(cs.clone(), || Ok(self.state_root_before))?;
-        let root_after  = FpVar::new_input(cs.clone(), || Ok(self.state_root_after))?;
-        let gas         = FpVar::new_input(cs.clone(), || Ok(self.gas_used))?;
-        let tx          = FpVar::new_input(cs.clone(), || Ok(self.tx_hash))?;
+        let root_after = FpVar::new_input(cs.clone(), || Ok(self.state_root_after))?;
+        let gas = FpVar::new_input(cs.clone(), || Ok(self.gas_used))?;
+        let tx = FpVar::new_input(cs.clone(), || Ok(self.tx_hash))?;
 
         let trace_hash = FpVar::new_witness(cs.clone(), || {
             self.trace_hash.ok_or(SynthesisError::AssignmentMissing)
@@ -122,24 +119,27 @@ impl ConstraintSynthesizer<Fr> for ExecutionCircuit {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct TrustedSetup {
-    pub pk:  ProvingKey<Bn254>,
-    pub vk:  VerifyingKey<Bn254>,
+    pub pk: ProvingKey<Bn254>,
+    pub vk: VerifyingKey<Bn254>,
     pub pvk: PreparedVerifyingKey<Bn254>,
 }
 
 impl TrustedSetup {
     pub fn generate(seed: u64) -> VmResult<Self> {
-        let start   = Instant::now();
+        let start = Instant::now();
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
         let circuit = ExecutionCircuit::blank();
 
         let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
             .map_err(|e| VmError::TrustedSetup(e.to_string()))?;
 
-        let pvk = Groth16::<Bn254>::process_vk(&vk)
-            .map_err(|e| VmError::TrustedSetup(e.to_string()))?;
+        let pvk =
+            Groth16::<Bn254>::process_vk(&vk).map_err(|e| VmError::TrustedSetup(e.to_string()))?;
 
-        info!(elapsed_ms = start.elapsed().as_millis(), "Trusted setup complete");
+        info!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "Trusted setup complete"
+        );
         Ok(TrustedSetup { pk, vk, pvk })
     }
 
@@ -174,17 +174,15 @@ impl ZkProver {
     pub fn prove(
         &self,
         state_before: &[u8; 32],
-        state_after:  &[u8; 32],
-        gas_used:     u64,
-        tx_hash:      &[u8; 32],
-        trace:        &[u8],
+        state_after: &[u8; 32],
+        gas_used: u64,
+        tx_hash: &[u8; 32],
+        trace: &[u8],
     ) -> VmResult<ZkExecutionProof> {
-        let start   = Instant::now();
+        let start = Instant::now();
         let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
 
-        let circuit = ExecutionCircuit::new(
-            state_before, state_after, gas_used, tx_hash, trace,
-        );
+        let circuit = ExecutionCircuit::new(state_before, state_after, gas_used, tx_hash, trace);
 
         let public_inputs = vec![
             circuit.state_root_before,
@@ -197,7 +195,8 @@ impl ZkProver {
             .map_err(|e| VmError::ZkProofGeneration(e.to_string()))?;
 
         let mut proof_bytes = Vec::new();
-        proof.serialize_compressed(&mut proof_bytes)
+        proof
+            .serialize_compressed(&mut proof_bytes)
             .map_err(|e| VmError::ZkProofGeneration(e.to_string()))?;
 
         let public_input_bytes: Vec<Vec<u8>> = public_inputs
@@ -212,12 +211,16 @@ impl ZkProver {
         let vk_hash = self.setup.vk_hash()?;
 
         debug!(
-            elapsed_ms  = start.elapsed().as_millis(),
+            elapsed_ms = start.elapsed().as_millis(),
             proof_bytes = proof_bytes.len(),
             "ZK proof generated"
         );
 
-        Ok(ZkExecutionProof { proof_bytes, public_inputs: public_input_bytes, vk_hash })
+        Ok(ZkExecutionProof {
+            proof_bytes,
+            public_inputs: public_input_bytes,
+            vk_hash,
+        })
     }
 }
 
@@ -245,20 +248,16 @@ impl ZkVerifier {
         let ark_proof = Proof::<Bn254>::deserialize_compressed(&*proof.proof_bytes)
             .map_err(|_| VmError::ZkProofVerification)?;
 
-        let public_inputs: VmResult<Vec<Fr>> = proof.public_inputs
+        let public_inputs: VmResult<Vec<Fr>> = proof
+            .public_inputs
             .iter()
-            .map(|b| {
-                Fr::deserialize_compressed(&**b).map_err(|_| VmError::ZkProofVerification)
-            })
+            .map(|b| Fr::deserialize_compressed(&**b).map_err(|_| VmError::ZkProofVerification))
             .collect();
         let public_inputs = public_inputs?;
 
-        let ok = Groth16::<Bn254>::verify_with_processed_vk(
-            &self.setup.pvk,
-            &public_inputs,
-            &ark_proof,
-        )
-        .map_err(|_| VmError::ZkProofVerification)?;
+        let ok =
+            Groth16::<Bn254>::verify_with_processed_vk(&self.setup.pvk, &public_inputs, &ark_proof)
+                .map_err(|_| VmError::ZkProofVerification)?;
 
         if !ok {
             warn!("ZK proof verification returned false");
@@ -302,16 +301,16 @@ mod tests {
     #[test]
     fn test_vk_hash_is_32_bytes() {
         let setup = test_setup();
-        let hash  = setup.vk_hash().unwrap();
+        let hash = setup.vk_hash().unwrap();
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
     fn test_vk_bytes_roundtrip() {
-        let setup  = test_setup();
-        let bytes  = setup.vk_bytes().unwrap();
+        let setup = test_setup();
+        let bytes = setup.vk_bytes().unwrap();
         assert!(!bytes.is_empty());
-        let vk2   = VerifyingKey::<Bn254>::deserialize_compressed(&*bytes).unwrap();
+        let vk2 = VerifyingKey::<Bn254>::deserialize_compressed(&*bytes).unwrap();
         let mut bytes2 = Vec::new();
         vk2.serialize_compressed(&mut bytes2).unwrap();
         assert_eq!(bytes, bytes2, "VK bytes must round-trip");
@@ -319,12 +318,12 @@ mod tests {
 
     #[test]
     fn test_prove_and_verify() {
-        let setup    = test_setup();
-        let prover   = ZkProver::new(setup.clone());
+        let setup = test_setup();
+        let prover = ZkProver::new(setup.clone());
         let verifier = ZkVerifier::new(setup);
 
         let state_before = [1u8; 32];
-        let trace        = b"execution trace data";
+        let trace = b"execution trace data";
 
         use sha2::{Digest, Sha256};
         let trace_hash_bytes: [u8; 32] = Sha256::digest(trace).into();
@@ -339,10 +338,12 @@ mod tests {
             b.try_into().unwrap()
         };
 
-        let tx_hash  = [3u8; 32];
+        let tx_hash = [3u8; 32];
         let gas_used = 100_000u64;
 
-        let proof = prover.prove(&state_before, &state_after, gas_used, &tx_hash, trace).unwrap();
+        let proof = prover
+            .prove(&state_before, &state_after, gas_used, &tx_hash, trace)
+            .unwrap();
         assert!(!proof.proof_bytes.is_empty());
         assert_eq!(proof.public_inputs.len(), 4);
 
@@ -352,12 +353,12 @@ mod tests {
 
     #[test]
     fn test_wrong_vk_hash_rejected() {
-        let setup    = test_setup();
-        let prover   = ZkProver::new(setup.clone());
+        let setup = test_setup();
+        let prover = ZkProver::new(setup.clone());
         let verifier = ZkVerifier::new(setup);
 
         let state_before = [1u8; 32];
-        let trace        = b"trace";
+        let trace = b"trace";
         use sha2::{Digest, Sha256};
         let th: [u8; 32] = Sha256::digest(trace).into();
         let fa = fr_from_bytes(&state_before) + fr_from_bytes(&th);
@@ -368,9 +369,9 @@ mod tests {
             b.try_into().unwrap()
         };
 
-        let mut proof = prover.prove(
-            &state_before, &state_after, 21_000, &[2u8; 32], trace,
-        ).unwrap();
+        let mut proof = prover
+            .prove(&state_before, &state_after, 21_000, &[2u8; 32], trace)
+            .unwrap();
         proof.vk_hash = [0u8; 32]; // corrupt VK hash
 
         let result = verifier.verify(&proof);
@@ -395,14 +396,14 @@ mod tests {
 
     #[test]
     fn test_batch_verify() {
-        let setup    = test_setup();
-        let prover   = ZkProver::new(setup.clone());
+        let setup = test_setup();
+        let prover = ZkProver::new(setup.clone());
         let verifier = ZkVerifier::new(setup);
 
         let mut proofs = Vec::new();
         for i in 0..3u64 {
             let state_before = [i as u8; 32];
-            let trace        = format!("trace_{i}");
+            let trace = format!("trace_{i}");
             use sha2::{Digest, Sha256};
             let th: [u8; 32] = Sha256::digest(trace.as_bytes()).into();
             let fa = fr_from_bytes(&state_before) + fr_from_bytes(&th);
@@ -413,11 +414,15 @@ mod tests {
                 b.try_into().unwrap()
             };
             proofs.push(
-                prover.prove(
-                    &state_before, &state_after,
-                    21_000 + i * 1_000, &[i as u8 + 10; 32],
-                    trace.as_bytes(),
-                ).unwrap()
+                prover
+                    .prove(
+                        &state_before,
+                        &state_after,
+                        21_000 + i * 1_000,
+                        &[i as u8 + 10; 32],
+                        trace.as_bytes(),
+                    )
+                    .unwrap(),
             );
         }
 

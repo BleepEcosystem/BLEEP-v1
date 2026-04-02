@@ -1,13 +1,16 @@
 // src/bin/bleep_admin.rs
 use clap::{Parser, Subcommand};
-use log::{info, error};
+use log::{error, info};
 use std::error::Error;
 
 use bleep_wallet_core::wallet::WalletManager;
 
 #[derive(Parser)]
-#[command(name = "bleep-admin", version = "1.0.0",
-          about = "BLEEP Blockchain Administration CLI")]
+#[command(
+    name = "bleep-admin",
+    version = "1.0.0",
+    about = "BLEEP Blockchain Administration CLI"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -55,18 +58,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             println!("🧠 State Module Status");
             println!("State initialized and ready for operations");
         }
-        Commands::Wallets { .. } => {
-            match WalletManager::load_or_create() {
-                Ok(manager) => {
-                    let all = manager.list_wallets();
-                    println!("💼 Wallet Manager: {} wallets", all.len());
-                    for w in all {
-                        println!("  - Address: {}", w.address());
-                    }
+        Commands::Wallets { .. } => match WalletManager::load_or_create() {
+            Ok(manager) => {
+                let all = manager.list_wallets();
+                println!("💼 Wallet Manager: {} wallets", all.len());
+                for w in all {
+                    println!("  - Address: {}", w.address());
                 }
-                Err(e) => eprintln!("Failed to load wallet manager: {}", e),
             }
-        }
+            Err(e) => eprintln!("Failed to load wallet manager: {}", e),
+        },
     }
     Ok(())
 }

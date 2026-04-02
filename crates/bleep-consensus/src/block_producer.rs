@@ -30,7 +30,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
-use bleep_core::block::{Block, Transaction, ConsensusMode};
+use bleep_core::block::{Block, ConsensusMode, Transaction};
 use bleep_core::blockchain::Blockchain;
 use bleep_core::transaction_pool::TransactionPool;
 use bleep_state::state_manager::StateManager;
@@ -47,7 +47,9 @@ use bleep_vm::intent::{Intent, IntentKind, TransferIntent};
 use bleep_vm::types::ChainId;
 
 // Live benchmark instrumentation
-use crate::performance_bench::{PerformanceBenchmark, NUM_SHARDS, BENCHMARK_DURATION_SECS, TARGET_TPS};
+use crate::performance_bench::{
+    PerformanceBenchmark, BENCHMARK_DURATION_SECS, NUM_SHARDS, TARGET_TPS,
+};
 
 // ── FinalizedBlock ─────────────────────────────────────────────────────────────
 
@@ -55,49 +57,49 @@ use crate::performance_bench::{PerformanceBenchmark, NUM_SHARDS, BENCHMARK_DURAT
 /// Feed into `Scheduler::on_new_block` and telemetry counters.
 #[derive(Debug, Clone)]
 pub struct FinalizedBlock {
-    pub height:      u64,
-    pub epoch:       u64,
-    pub hash:        String,
-    pub tx_count:    usize,
-    pub state_root:  [u8; 32],
-    pub gas_used:    u64,
+    pub height: u64,
+    pub epoch: u64,
+    pub hash: String,
+    pub tx_count: usize,
+    pub state_root: [u8; 32],
+    pub gas_used: u64,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 pub const MAX_TXS_PER_BLOCK: usize = 4_096;
-pub const BLOCK_INTERVAL_MS: u64   = 3_000;
-const BLOCKS_PER_EPOCH:      u64   = 1_000;
-const PROTOCOL_VERSION:      u32   = 1;
+pub const BLOCK_INTERVAL_MS: u64 = 3_000;
+const BLOCKS_PER_EPOCH: u64 = 1_000;
+const PROTOCOL_VERSION: u32 = 1;
 /// BLEEP native chain ID for intent routing
-const BLEEP_CHAIN_ID: ChainId      = ChainId::Bleep;
+const BLEEP_CHAIN_ID: ChainId = ChainId::Bleep;
 
 // ── ProducerConfig ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct ProducerConfig {
     pub block_interval_secs: u64,
-    pub max_txs_per_block:   usize,
-    pub validator_id:        String,
+    pub max_txs_per_block: usize,
+    pub validator_id: String,
     /// Full SPHINCS+-SHAKE-256f-simple secret key bytes (64 bytes).
     /// Stored as Vec<u8> because SPHINCS+ SK is 64 bytes, not 32.
     /// Passed directly to `block.sign_block()`.
-    pub validator_sk:        Vec<u8>,
+    pub validator_sk: Vec<u8>,
     /// Full SPHINCS+-SHAKE-256f-simple public key bytes (32 bytes).
     /// Stored as Vec<u8> for uniformity; passed to `blockchain.add_block()`.
-    pub validator_pk:        Vec<u8>,
-    pub protocol_version:    u32,
+    pub validator_pk: Vec<u8>,
+    pub protocol_version: u32,
 }
 
 impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
             block_interval_secs: 3,
-            max_txs_per_block:   MAX_TXS_PER_BLOCK,
-            validator_id:        "genesis-validator".to_string(),
-            validator_sk:        vec![0u8; 64],
-            validator_pk:        vec![0u8; 32],
-            protocol_version:    PROTOCOL_VERSION,
+            max_txs_per_block: MAX_TXS_PER_BLOCK,
+            validator_id: "genesis-validator".to_string(),
+            validator_sk: vec![0u8; 64],
+            validator_pk: vec![0u8; 32],
+            protocol_version: PROTOCOL_VERSION,
         }
     }
 }
@@ -108,14 +110,14 @@ impl Default for ProducerConfig {
 /// P2P gossip is handled externally via GossipBridge subscribing to block_tx.
 pub struct BlockProducer {
     blockchain: Arc<RwLock<Blockchain>>,
-    tx_pool:    Arc<TransactionPool>,
-    state:      Arc<PLMutex<StateManager>>,
-    executor:   Executor,
-    p2p:        Option<Arc<P2PNode>>,
-    config:     ProducerConfig,
-    block_tx:   tokio::sync::broadcast::Sender<FinalizedBlock>,
+    tx_pool: Arc<TransactionPool>,
+    state: Arc<PLMutex<StateManager>>,
+    executor: Executor,
+    p2p: Option<Arc<P2PNode>>,
+    config: ProducerConfig,
+    block_tx: tokio::sync::broadcast::Sender<FinalizedBlock>,
     /// Live TPS benchmark — records wall-clock throughput from real block production.
-    bench:      PLMutex<PerformanceBenchmark>,
+    bench: PLMutex<PerformanceBenchmark>,
 }
 
 impl BlockProducer {
@@ -127,14 +129,14 @@ impl BlockProducer {
     /// Returns `(producer, receiver)`. Subscribe the receiver in `main.rs` for
     /// both the scheduler relay and the `GossipBridge`.
     pub fn new(
-        validator_id:     String,
-        _my_stake:        u64,
-        tx_pool:          Arc<TransactionPool>,
-        blockchain:       Arc<RwLock<Blockchain>>,
-        state:            Arc<PLMutex<StateManager>>,
+        validator_id: String,
+        _my_stake: u64,
+        tx_pool: Arc<TransactionPool>,
+        blockchain: Arc<RwLock<Blockchain>>,
+        state: Arc<PLMutex<StateManager>>,
         sphincs_sk_bytes: Vec<u8>,
         sphincs_pk_bytes: Vec<u8>,
-        p2p:              Option<Arc<P2PNode>>,
+        p2p: Option<Arc<P2PNode>>,
     ) -> (Self, tokio::sync::broadcast::Receiver<FinalizedBlock>) {
         let config = ProducerConfig {
             validator_id,
@@ -145,10 +147,23 @@ impl BlockProducer {
 
         let executor = Executor::production(ExecutorConfig::default());
         let (block_tx, block_rx) = tokio::sync::broadcast::channel(256);
-        let bench = PLMutex::new(PerformanceBenchmark::new(NUM_SHARDS, BENCHMARK_DURATION_SECS, TARGET_TPS));
+        let bench = PLMutex::new(PerformanceBenchmark::new(
+            NUM_SHARDS,
+            BENCHMARK_DURATION_SECS,
+            TARGET_TPS,
+        ));
 
         (
-            Self { blockchain, tx_pool, state, executor, p2p, config, block_tx, bench },
+            Self {
+                blockchain,
+                tx_pool,
+                state,
+                executor,
+                p2p,
+                config,
+                block_tx,
+                bench,
+            },
             block_rx,
         )
     }
@@ -181,7 +196,10 @@ impl BlockProducer {
                 Ok(Some(fb)) => {
                     info!(
                         "⛏ Block {} | epoch={} | txs={} | gas={} | root={}",
-                        fb.height, fb.epoch, fb.tx_count, fb.gas_used,
+                        fb.height,
+                        fb.epoch,
+                        fb.tx_count,
+                        fb.gas_used,
                         hex::encode(&fb.state_root[..4])
                     );
                     let _ = self.block_tx.send(fb);
@@ -193,12 +211,14 @@ impl BlockProducer {
     }
 
     async fn produce_one(&self) -> Result<Option<FinalizedBlock>, String> {
-
         // Wall-clock start — used for live benchmark instrumentation
         let block_start = Instant::now();
 
         // ── 1: Drain transaction pool ─────────────────────────────────────────
-        let pending = self.tx_pool.peek_for_block(self.config.max_txs_per_block).await;
+        let pending = self
+            .tx_pool
+            .peek_for_block(self.config.max_txs_per_block)
+            .await;
         if pending.is_empty() {
             return Ok(None);
         }
@@ -206,7 +226,9 @@ impl BlockProducer {
 
         // ── 2: Read chain tip ─────────────────────────────────────────────────
         let (next_height, prev_hash) = {
-            let chain = self.blockchain.read()
+            let chain = self
+                .blockchain
+                .read()
                 .map_err(|e| format!("blockchain read lock: {}", e))?;
             match chain.latest_block() {
                 Some(tip) => (tip.index + 1, tip.compute_hash()),
@@ -229,18 +251,18 @@ impl BlockProducer {
 
         for (idx, zt) in pending.iter().enumerate() {
             let mut from_bytes = [0u8; 32];
-            let mut to_bytes   = [0u8; 32];
+            let mut to_bytes = [0u8; 32];
             let from_b = zt.sender.as_bytes();
-            let to_b   = zt.receiver.as_bytes();
+            let to_b = zt.receiver.as_bytes();
             from_bytes[..from_b.len().min(32)].copy_from_slice(&from_b[..from_b.len().min(32)]);
             to_bytes[..to_b.len().min(32)].copy_from_slice(&to_b[..to_b.len().min(32)]);
 
             let intent = Intent::new_unsigned(
                 IntentKind::Transfer(TransferIntent {
-                    from:   from_bytes,
-                    to:     to_bytes,
+                    from: from_bytes,
+                    to: to_bytes,
                     amount: zt.amount as u128,
-                    memo:   None,
+                    memo: None,
                 }),
                 BLEEP_CHAIN_ID,
             );
@@ -248,14 +270,16 @@ impl BlockProducer {
             // Single VM call — collect gas, accepted, and StateDiff together
             let (gas, accepted, diff) = match self.executor.execute(&intent).await {
                 Ok(o) => {
-                    let gas      = o.bleep_gas;
+                    let gas = o.bleep_gas;
                     let accepted = o.success();
-                    let diff     = o.state_diff().clone();
+                    let diff = o.state_diff().clone();
                     (gas, accepted, diff)
                 }
                 Err(e) => {
-                    warn!("[BlockProducer] VM error tx {}→{}: {:?}",
-                          zt.sender, zt.receiver, e);
+                    warn!(
+                        "[BlockProducer] VM error tx {}→{}: {:?}",
+                        zt.sender, zt.receiver, e
+                    );
                     (0, false, StateDiff::empty())
                 }
             };
@@ -274,8 +298,10 @@ impl BlockProducer {
             let mut state = self.state.lock();
             for (idx, gas, vm_ok, diff) in &vm_results {
                 if !vm_ok {
-                    warn!("[BlockProducer] VM reverted tx {}→{}",
-                          pending[*idx].sender, pending[*idx].receiver);
+                    warn!(
+                        "[BlockProducer] VM reverted tx {}→{}",
+                        pending[*idx].sender, pending[*idx].receiver
+                    );
                     continue;
                 }
                 let zt = &pending[*idx];
@@ -283,8 +309,10 @@ impl BlockProducer {
                 // Path 1: native transfer (sender → receiver, exact amount)
                 let ok = state.apply_transfer(&zt.sender, &zt.receiver, zt.amount as u128);
                 if !ok {
-                    warn!("[BlockProducer] insufficient funds: {}→{} amt={}",
-                          zt.sender, zt.receiver, zt.amount);
+                    warn!(
+                        "[BlockProducer] insufficient funds: {}→{} amt={}",
+                        zt.sender, zt.receiver, zt.amount
+                    );
                     continue;
                 }
 
@@ -326,9 +354,9 @@ impl BlockProducer {
 
                 total_gas += gas;
                 block_txs.push(Transaction {
-                    sender:    zt.sender.clone(),
-                    receiver:  zt.receiver.clone(),
-                    amount:    zt.amount,
+                    sender: zt.sender.clone(),
+                    receiver: zt.receiver.clone(),
+                    amount: zt.amount,
                     timestamp: zt.timestamp,
                     signature: zt.signature.clone(),
                 });
@@ -339,8 +367,10 @@ impl BlockProducer {
         if block_txs.is_empty() {
             // All txs failed VM validation — drain pool and skip block
             for zt in &pending {
-                let tx_id = format!("{}:{}:{}:{}",
-                    zt.sender, zt.receiver, zt.amount, zt.timestamp);
+                let tx_id = format!(
+                    "{}:{}:{}:{}",
+                    zt.sender, zt.receiver, zt.amount, zt.timestamp
+                );
                 self.tx_pool.remove_confirmed(&tx_id).await;
             }
             return Ok(None);
@@ -358,20 +388,25 @@ impl BlockProducer {
             ConsensusMode::PosNormal,
             self.config.protocol_version,
             hex::encode(&state_root[..16]), // shard_registry_root = first 16 bytes of state root
-            0,                             // shard_id: main chain
-            hex::encode(&state_root),      // shard_state_root = full state root
+            0,                              // shard_id: main chain
+            hex::encode(&state_root),       // shard_state_root = full state root
         );
 
         // ── 7: Sign block with real SPHINCS+-SHAKE-256f-simple secret key ──────
         if let Err(e) = block.sign_block(&self.config.validator_sk) {
-            warn!("[BlockProducer] sign_block failed: {} — stamping validator_id", e);
+            warn!(
+                "[BlockProducer] sign_block failed: {} — stamping validator_id",
+                e
+            );
             block.validator_signature = self.config.validator_id.as_bytes().to_vec();
         }
 
         // ── 8: Commit to chain ────────────────────────────────────────────────
         // add_block calls verify_signature(pk_bytes) internally.
         let accepted = {
-            let mut chain = self.blockchain.write()
+            let mut chain = self
+                .blockchain
+                .write()
                 .map_err(|e| format!("blockchain write lock: {}", e))?;
             chain.add_block(block.clone(), &self.config.validator_pk)
         };
@@ -381,11 +416,12 @@ impl BlockProducer {
                 "[BlockProducer] Block {} rejected — fallback force-insert (check key derivation)",
                 next_height
             );
-            let mut chain = self.blockchain.write()
+            let mut chain = self
+                .blockchain
+                .write()
                 .map_err(|e| format!("blockchain write lock (fallback): {}", e))?;
             chain.chain.push_back(block.clone());
         }
-
 
         // ── 9: Gossip to peers ────────────────────────────────────────────────
         // Direct broadcast for low latency; GossipBridge also subscribes to block_tx.
@@ -394,10 +430,12 @@ impl BlockProducer {
             node.broadcast(MessageType::Block, payload);
         }
 
-
         // ── 10: Drain committed txs from pool ─────────────────────────────────
         for tx in &block_txs {
-            let tx_id = format!("{}:{}:{}:{}", tx.sender, tx.receiver, tx.amount, tx.timestamp);
+            let tx_id = format!(
+                "{}:{}:{}:{}",
+                tx.sender, tx.receiver, tx.amount, tx.timestamp
+            );
             self.tx_pool.remove_confirmed(&tx_id).await;
         }
 
@@ -411,15 +449,17 @@ impl BlockProducer {
         // Here we use 847ms as the average measured on testnet (whitepaper §17.3),
         // adjusted by actual block_time deviation.
         let prove_time_ms = block_time_ms.saturating_sub(50).max(100);
-        self.bench.lock().record_block(block_txs.len(), prove_time_ms, block_time_ms);
+        self.bench
+            .lock()
+            .record_block(block_txs.len(), prove_time_ms, block_time_ms);
 
         Ok(Some(FinalizedBlock {
-            height:     next_height,
-            epoch:      epoch_id,
-            hash:       block.compute_hash(),
-            tx_count:   block_txs.len(),
+            height: next_height,
+            epoch: epoch_id,
+            hash: block.compute_hash(),
+            tx_count: block_txs.len(),
             state_root,
-            gas_used:   total_gas,
+            gas_used: total_gas,
         }))
     }
 }
@@ -427,23 +467,29 @@ impl BlockProducer {
 // ── Legacy shim ───────────────────────────────────────────────────────────────
 
 pub fn start_block_producer(
-    blockchain:      Arc<RwLock<Blockchain>>,
-    tx_pool:         Arc<TransactionPool>,
-    config:          ProducerConfig,
+    blockchain: Arc<RwLock<Blockchain>>,
+    tx_pool: Arc<TransactionPool>,
+    config: ProducerConfig,
     blocks_produced: Arc<std::sync::atomic::AtomicU64>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(
-            Duration::from_secs(config.block_interval_secs)
-        );
+        let mut interval = tokio::time::interval(Duration::from_secs(config.block_interval_secs));
         loop {
             interval.tick().await;
             let pending = tx_pool.peek_for_block(config.max_txs_per_block).await;
-            let txs: Vec<Transaction> = pending.iter().map(|zt| Transaction {
-                sender: zt.sender.clone(), receiver: zt.receiver.clone(),
-                amount: zt.amount, timestamp: zt.timestamp, signature: zt.signature.clone(),
-            }).collect();
-            if txs.is_empty() { continue; }
+            let txs: Vec<Transaction> = pending
+                .iter()
+                .map(|zt| Transaction {
+                    sender: zt.sender.clone(),
+                    receiver: zt.receiver.clone(),
+                    amount: zt.amount,
+                    timestamp: zt.timestamp,
+                    signature: zt.signature.clone(),
+                })
+                .collect();
+            if txs.is_empty() {
+                continue;
+            }
             let (next_height, prev_hash, epoch_id) = {
                 let chain = blockchain.read().unwrap();
                 match chain.latest_block() {
@@ -452,26 +498,42 @@ pub fn start_block_producer(
                 }
             };
             let mut block = Block::with_consensus_and_sharding(
-                next_height, txs.clone(), prev_hash, epoch_id,
-                ConsensusMode::PosNormal, config.protocol_version,
-                format!("{:064x}", epoch_id), 0, String::new(),
+                next_height,
+                txs.clone(),
+                prev_hash,
+                epoch_id,
+                ConsensusMode::PosNormal,
+                config.protocol_version,
+                format!("{:064x}", epoch_id),
+                0,
+                String::new(),
             );
             if let Err(e) = block.sign_block(&config.validator_sk) {
                 block.validator_signature = config.validator_id.as_bytes().to_vec();
                 warn!("Legacy sign_block: {}", e);
             }
-            let accepted = blockchain.write().unwrap()
+            let accepted = blockchain
+                .write()
+                .unwrap()
                 .add_block(block.clone(), &config.validator_pk);
             if accepted {
                 let n = blocks_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                info!("⛏ [legacy] Block {} txs={} total={}", block.index, block.transactions.len(), n);
+                info!(
+                    "⛏ [legacy] Block {} txs={} total={}",
+                    block.index,
+                    block.transactions.len(),
+                    n
+                );
             } else {
                 blockchain.write().unwrap().chain.push_back(block.clone());
             }
             for tx in &txs {
-                tx_pool.remove_confirmed(
-                    &format!("{}:{}:{}:{}", tx.sender, tx.receiver, tx.amount, tx.timestamp)
-                ).await;
+                tx_pool
+                    .remove_confirmed(&format!(
+                        "{}:{}:{}:{}",
+                        tx.sender, tx.receiver, tx.amount, tx.timestamp
+                    ))
+                    .await;
             }
         }
     })

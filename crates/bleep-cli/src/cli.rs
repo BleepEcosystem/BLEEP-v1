@@ -21,31 +21,30 @@ use std::sync::Arc;
 use tracing::warn;
 
 use bleep_cli::{
-    Cli, Commands, WalletCommand, TxCommand, AiCommand,
-    GovernanceCommand, StateCommand, PatCommand, BlockCommand,
-    ValidatorCommand, OracleCommand, EconomicsCommand,
+    AiCommand, BlockCommand, Cli, Commands, EconomicsCommand, GovernanceCommand, OracleCommand,
+    PatCommand, StateCommand, TxCommand, ValidatorCommand, WalletCommand,
 };
 
 // Real crate imports
-use bleep_wallet_core::wallet::WalletManager;
 use bleep_ai::{
-    ai_assistant::{BLEEPAIAssistant, AIRequest},
-    wallet::BLEEPWallet,
-    governance::BLEEPGovernance,
-    security::QuantumSecure,
-    smart_contracts::SmartContractOptimizer,
-    interoperability::InteroperabilityModule,
+    ai_assistant::{AIRequest, BLEEPAIAssistant},
     analytics::BLEEPAnalytics,
     compliance::ComplianceModule,
-    sharding::AdaptiveSharding,
     energy_monitor::EnergyMonitor,
+    governance::BLEEPGovernance,
+    interoperability::InteroperabilityModule,
+    security::QuantumSecure,
+    sharding::AdaptiveSharding,
+    smart_contracts::SmartContractOptimizer,
+    wallet::BLEEPWallet,
 };
+use bleep_core::transaction::ZKTransaction;
+use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
+use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
 use bleep_governance::governance_core::{GovernanceEngine, Proposal, ProposalType, Vote};
 use bleep_state::state_manager::StateManager;
+use bleep_wallet_core::wallet::WalletManager;
 use bleep_zkp::Verifier as ZkVerifier;
-use bleep_core::transaction::ZKTransaction;
-use bleep_crypto::tx_signer::{sign_tx_payload, tx_payload, generate_tx_keypair};
-use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
 
 /// Default RPC endpoint (override via BLEEP_RPC env var).
 const DEFAULT_RPC: &str = "http://127.0.0.1:8545";
@@ -88,10 +87,13 @@ async fn run(cmd: Commands) -> Result<()> {
                     let (pk, sk) = generate_tx_keypair();
                     let kyber_pk = pk.clone();
                     // Use empty password by default; users can re-lock with `wallet lock`
-                    let wallet = bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
-                        pk, &sk, kyber_pk, "",
-                    ).map_err(|e| anyhow!("Key encryption failed: {}", e))?;
-                    manager.save_wallet(wallet.clone())
+                    let wallet =
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
+                            pk, &sk, kyber_pk, "",
+                        )
+                        .map_err(|e| anyhow!("Key encryption failed: {}", e))?;
+                    manager
+                        .save_wallet(wallet.clone())
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
                     println!("✅ Wallet created");
                     println!("   Address: {}", wallet.address());
@@ -134,20 +136,25 @@ async fn run(cmd: Commands) -> Result<()> {
                 }
                 WalletCommand::Import { phrase } => {
                     // Sprint 5: Real BIP-39 derivation + AES-256-GCM SK encryption
-                    validate_mnemonic(&phrase)
-                        .map_err(|e| anyhow!("Invalid mnemonic: {}", e))?;
+                    validate_mnemonic(&phrase).map_err(|e| anyhow!("Invalid mnemonic: {}", e))?;
                     let seed_32 = mnemonic_to_bleep_seed(&phrase, "")
                         .map_err(|e| anyhow!("BIP-39 derivation failed: {}", e))?;
                     use sha3::{Digest, Sha3_256};
                     let pk: Vec<u8> = Sha3_256::digest(&seed_32).to_vec();
                     let sk: Vec<u8> = seed_32.to_vec();
                     let kyber_pk = pk.clone();
-                    let wallet = bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
-                        pk, &sk, kyber_pk, "",
-                    ).map_err(|e| anyhow!("Key encryption failed: {}", e))?;
-                    manager.save_wallet(wallet.clone())
+                    let wallet =
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
+                            pk, &sk, kyber_pk, "",
+                        )
+                        .map_err(|e| anyhow!("Key encryption failed: {}", e))?;
+                    manager
+                        .save_wallet(wallet.clone())
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
-                    println!("✅ Wallet imported (BIP-39 PBKDF2-HMAC-SHA512): {}", wallet.address());
+                    println!(
+                        "✅ Wallet imported (BIP-39 PBKDF2-HMAC-SHA512): {}",
+                        wallet.address()
+                    );
                     println!("   Mnemonic words: {}", phrase.split_whitespace().count());
                     println!("   SK encrypted with AES-256-GCM at rest.");
                 }
@@ -166,7 +173,8 @@ async fn run(cmd: Commands) -> Result<()> {
                 let sender = {
                     let manager = WalletManager::load_or_create()
                         .map_err(|e| anyhow!("Wallet needed to sign tx: {}", e))?;
-                    manager.list_wallets()
+                    manager
+                        .list_wallets()
                         .first()
                         .map(|w| w.address().to_string())
                         .unwrap_or_else(|| "unknown".to_string())
@@ -181,25 +189,25 @@ async fn run(cmd: Commands) -> Result<()> {
                 let sig = {
                     let manager_for_sign = WalletManager::load_or_create()
                         .map_err(|e| anyhow!("Wallet load failed: {}", e))?;
-                    let wallet_opt = manager_for_sign
-                        .list_wallets()
-                        .first()
-                        .cloned();
+                    let wallet_opt = manager_for_sign.list_wallets().first().cloned();
 
                     match wallet_opt {
                         Some(w) if w.can_sign() => {
                             let payload = tx_payload(&sender, &to, amount, ts);
                             // Decrypt SK (empty password = default; users who locked
                             // with a custom password set BLEEP_WALLET_PASSWORD env var)
-                            let password = std::env::var("BLEEP_WALLET_PASSWORD")
-                                .unwrap_or_default();
+                            let password =
+                                std::env::var("BLEEP_WALLET_PASSWORD").unwrap_or_default();
                             match w.unlock(&password) {
                                 Ok(sk_plain) => {
-                                    sign_tx_payload(&payload, &sk_plain)
+                                    let detached_sig = sign_tx_payload(&payload, &sk_plain)
                                         .unwrap_or_else(|e| {
                                             warn!("[CLI] SPHINCS+ sign failed: {} — using placeholder", e);
                                             vec![1, 2, 3, 4]
-                                        })
+                                        });
+                                    let mut full_sig = w.public_key.clone();
+                                    full_sig.extend_from_slice(&detached_sig);
+                                    full_sig
                                 }
                                 Err(e) => {
                                     warn!("[CLI] Wallet unlock failed: {} — using placeholder", e);
@@ -212,8 +220,8 @@ async fn run(cmd: Commands) -> Result<()> {
                 };
 
                 let tx = ZKTransaction {
-                    sender:    sender.clone(),
-                    receiver:  to.clone(),
+                    sender: sender.clone(),
+                    receiver: to.clone(),
                     amount,
                     timestamp: ts,
                     signature: sig, // Sprint 4: real SPHINCS+ signature
@@ -234,22 +242,20 @@ async fn run(cmd: Commands) -> Result<()> {
                     }
                 }
             }
-            TxCommand::History => {
-                match get_tx_history(&rpc).await {
-                    Ok(history) => {
-                        if history.is_empty() {
-                            println!("No transactions found.");
-                        } else {
-                            for (i, tx) in history.iter().enumerate() {
-                                println!("  [{}] {}", i + 1, tx);
-                            }
+            TxCommand::History => match get_tx_history(&rpc).await {
+                Ok(history) => {
+                    if history.is_empty() {
+                        println!("No transactions found.");
+                    } else {
+                        for (i, tx) in history.iter().enumerate() {
+                            println!("  [{}] {}", i + 1, tx);
                         }
                     }
-                    Err(_) => {
-                        println!("Node not reachable at {}. Start node with `./bleep`.", rpc);
-                    }
                 }
-            }
+                Err(_) => {
+                    println!("Node not reachable at {}. Start node with `./bleep`.", rpc);
+                }
+            },
         },
 
         // ── AI ────────────────────────────────────────────────────────────
@@ -268,7 +274,7 @@ async fn run(cmd: Commands) -> Result<()> {
                 );
                 let req = AIRequest {
                     user_id: "cli-user".to_string(),
-                    query:   prompt.clone(),
+                    query: prompt.clone(),
                 };
                 let resp = ai.process_request(req).await;
                 println!("🧠 AI Response:\n{}", resp.response);
@@ -287,27 +293,34 @@ async fn run(cmd: Commands) -> Result<()> {
             let mut engine = GovernanceEngine::new(1_000_000_000u128);
             match task {
                 GovernanceCommand::Propose { proposal } => {
-                    use bleep_governance::governance_core::{ProposalState, VotingWindow, GovernancePayload};
+                    use bleep_governance::governance_core::{
+                        GovernancePayload, ProposalState, VotingWindow,
+                    };
                     use std::collections::HashMap as GovMap;
                     let p = Proposal {
-                        id:                 uuid_now(),
-                        proposal_type:      ProposalType::ProtocolParameter,
-                        title:              proposal.chars().take(60).collect::<String>(),
-                        description:        proposal.clone(),
-                        state:              ProposalState::Draft,
-                        voting_window:      VotingWindow { start_epoch: 0, end_epoch: 10, min_duration: 10 },
-                        execution_epoch:    11,
+                        id: uuid_now(),
+                        proposal_type: ProposalType::ProtocolParameter,
+                        title: proposal.chars().take(60).collect::<String>(),
+                        description: proposal.clone(),
+                        state: ProposalState::Draft,
+                        voting_window: VotingWindow {
+                            start_epoch: 0,
+                            end_epoch: 10,
+                            min_duration: 10,
+                        },
+                        execution_epoch: 11,
                         approval_threshold: 67,
-                        votes:              GovMap::new(),
-                        tally:              None,
-                        payload:            GovernancePayload::ProtocolParameterChange {
+                        votes: GovMap::new(),
+                        tally: None,
+                        payload: GovernancePayload::ProtocolParameterChange {
                             rule_name: "cli_proposal".to_string(),
                             new_value: 0u128, // value encoded in title/description
                         },
-                        previous_state:     None,
-                        created_epoch:      0,
+                        previous_state: None,
+                        created_epoch: 0,
                     };
-                    let id = engine.submit_proposal(p)
+                    let id = engine
+                        .submit_proposal(p)
                         .map_err(|e| anyhow!("Proposal failed: {}", e))?;
                     println!("✅ Proposal {} submitted: \"{}\"", id, proposal);
                     engine.persist().ok();
@@ -315,13 +328,14 @@ async fn run(cmd: Commands) -> Result<()> {
                 GovernanceCommand::Vote { proposal_id, yes } => {
                     let vote = Vote {
                         validator_id: "cli-voter".to_string(),
-                        approval:     yes,
-                        stake:        1_000_000u128,
-                        vote_epoch:   0,
-                        signature:    vec![],
+                        approval: yes,
+                        stake: 1_000_000u128,
+                        vote_epoch: 0,
+                        signature: vec![],
                     };
                     let proposal_id_str = proposal_id.to_string();
-                    engine.cast_vote(&proposal_id_str, vote, 0)
+                    engine
+                        .cast_vote(&proposal_id_str, vote, 0)
                         .map_err(|e| anyhow!("Vote failed: {}", e))?;
                     println!(
                         "✅ Voted {} on proposal {}",
@@ -353,8 +367,8 @@ async fn run(cmd: Commands) -> Result<()> {
 
         // ── ZKP ───────────────────────────────────────────────────────────
         Commands::Zkp { proof } => {
-            let proof_bytes = hex::decode(&proof)
-                .map_err(|e| anyhow!("Invalid hex proof: {}", e))?;
+            let proof_bytes =
+                hex::decode(&proof).map_err(|e| anyhow!("Invalid hex proof: {}", e))?;
             let verifier = ZkVerifier::new();
             let valid = verifier.verify(&proof_bytes, &[]);
             if valid {
@@ -372,7 +386,8 @@ async fn run(cmd: Commands) -> Result<()> {
                     .unwrap_or_else(|_| "/tmp/bleep-state".to_string());
                 let mut state = StateManager::open(&state_dir)
                     .map_err(|e| anyhow!("State open failed: {}", e))?;
-                state.create_snapshot()
+                state
+                    .create_snapshot()
                     .map_err(|e| anyhow!("Snapshot failed: {}", e))?;
                 let root = state.state_root();
                 println!("✅ Snapshot written to {}", state_dir);
@@ -387,12 +402,10 @@ async fn run(cmd: Commands) -> Result<()> {
         },
 
         // ── Telemetry ─────────────────────────────────────────────────────
-        Commands::Telemetry => {
-            match get_health(&rpc).await {
-                Ok(status) => println!("Node health: {}", status),
-                Err(_)     => println!("Node not reachable at {}. Start with `./bleep`.", rpc),
-            }
-        }
+        Commands::Telemetry => match get_health(&rpc).await {
+            Ok(status) => println!("Node health: {}", status),
+            Err(_) => println!("Node not reachable at {}. Start with `./bleep`.", rpc),
+        },
 
         // ── PAT ───────────────────────────────────────────────────────────
         Commands::Pat { task } => match task {
@@ -406,13 +419,24 @@ async fn run(cmd: Commands) -> Result<()> {
                 match http_client.get(&url).send().await {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
-                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
                     }
                     Ok(_) => println!("PAT list unavailable."),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
             }
-            PatCommand::Create { symbol, name, decimals, owner, supply_cap, burn_rate_bps, freezable } => {
+            PatCommand::Create {
+                symbol,
+                name,
+                decimals,
+                owner,
+                supply_cap,
+                burn_rate_bps,
+                freezable,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/create", rpc))
                     .json(&serde_json::json!({
@@ -420,12 +444,16 @@ async fn run(cmd: Commands) -> Result<()> {
                         "owner": owner, "supply_cap": supply_cap.to_string(),
                         "burn_rate_bps": burn_rate_bps, "freezable": freezable,
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         println!("✅ PAT token {} created.", symbol);
-                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
                     }
                     Ok(r) => {
                         let text = r.text().await.unwrap_or_default();
@@ -434,19 +462,28 @@ async fn run(cmd: Commands) -> Result<()> {
                     Err(e) => println!("❌ RPC unreachable ({}). Is the node running?", e),
                 }
             }
-            PatCommand::Mint { symbol, from, to, amount } => {
+            PatCommand::Mint {
+                symbol,
+                from,
+                to,
+                amount,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/mint", rpc))
                     .json(&serde_json::json!({
                         "symbol": symbol, "caller": from, "to": to,
                         "amount": amount.to_string(),
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         println!("✅ Minted {} {} → {}", amount, symbol, to);
-                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
                     }
                     Ok(r) => {
                         let text = r.text().await.unwrap_or_default();
@@ -455,19 +492,27 @@ async fn run(cmd: Commands) -> Result<()> {
                     Err(e) => println!("❌ RPC unreachable ({}). Is the node running?", e),
                 }
             }
-            PatCommand::Burn { symbol, from, amount } => {
+            PatCommand::Burn {
+                symbol,
+                from,
+                amount,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/burn", rpc))
                     .json(&serde_json::json!({
                         "symbol": symbol, "from": from,
                         "amount": amount.to_string(),
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         println!("🔥 Burned {} {}", amount, symbol);
-                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
                     }
                     Ok(r) => {
                         let text = r.text().await.unwrap_or_default();
@@ -476,21 +521,32 @@ async fn run(cmd: Commands) -> Result<()> {
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
             }
-            PatCommand::Transfer { symbol, from, to, amount } => {
+            PatCommand::Transfer {
+                symbol,
+                from,
+                to,
+                amount,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/transfer", rpc))
                     .json(&serde_json::json!({
                         "symbol": symbol, "from": from, "to": to,
                         "amount": amount.to_string(),
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         let received = body.get("received").and_then(|v| v.as_str()).unwrap_or("?");
-                        let burned = body.get("burn_deducted").and_then(|v| v.as_str()).unwrap_or("0");
-                        println!("✅ Transferred {} {} → {} (received: {}, burned: {})",
-                                 amount, symbol, to, received, burned);
+                        let burned = body
+                            .get("burn_deducted")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0");
+                        println!(
+                            "✅ Transferred {} {} → {} (received: {}, burned: {})",
+                            amount, symbol, to, received, burned
+                        );
                     }
                     Ok(r) => {
                         let text = r.text().await.unwrap_or_default();
@@ -502,7 +558,8 @@ async fn run(cmd: Commands) -> Result<()> {
             PatCommand::Balance { symbol, address } => {
                 let resp = http_client
                     .get(format!("{}/rpc/pat/balance/{}/{}", rpc, symbol, address))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
@@ -516,81 +573,126 @@ async fn run(cmd: Commands) -> Result<()> {
             PatCommand::Info { symbol } => {
                 let resp = http_client
                     .get(format!("{}/rpc/pat/info/{}", rpc, symbol))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         println!("🪙 PAT Token: {}", symbol);
-                        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&body).unwrap_or_default()
+                        );
                     }
                     Ok(r) => println!("❌ Token {} not found (HTTP {})", symbol, r.status()),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
             }
-            PatCommand::Approve { symbol, owner, spender, amount } => {
+            PatCommand::Approve {
+                symbol,
+                owner,
+                spender,
+                amount,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/approve", rpc))
                     .json(&serde_json::json!({
                         "symbol": symbol, "owner": owner,
                         "spender": spender, "amount": amount.to_string(),
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         println!("✅ Approved {} {} for spender {}", amount, symbol, spender);
                     }
-                    Ok(r) => println!("❌ Approve failed (HTTP {}): {}", r.status(),
-                        r.text().await.unwrap_or_default()),
+                    Ok(r) => println!(
+                        "❌ Approve failed (HTTP {}): {}",
+                        r.status(),
+                        r.text().await.unwrap_or_default()
+                    ),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
             }
-            PatCommand::Freeze { symbol, owner, frozen } => {
+            PatCommand::Freeze {
+                symbol,
+                owner,
+                frozen,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/freeze", rpc))
                     .json(&serde_json::json!({
                         "symbol": symbol, "owner": owner, "frozen": frozen,
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
-                        let state = if frozen { "FROZEN ❄️" } else { "UNFROZEN ✅" };
+                        let state = if frozen {
+                            "FROZEN ❄️"
+                        } else {
+                            "UNFROZEN ✅"
+                        };
                         println!("Token {} is now {}", symbol, state);
                     }
-                    Ok(r) => println!("❌ Freeze failed (HTTP {}): {}", r.status(),
-                        r.text().await.unwrap_or_default()),
+                    Ok(r) => println!(
+                        "❌ Freeze failed (HTTP {}): {}",
+                        r.status(),
+                        r.text().await.unwrap_or_default()
+                    ),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
             }
-            PatCommand::SetBurnRate { symbol, owner, rate_bps } => {
+            PatCommand::SetBurnRate {
+                symbol,
+                owner,
+                rate_bps,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/set-burn-rate", rpc))
                     .json(&serde_json::json!({
                         "symbol": symbol, "owner": owner, "new_rate_bps": rate_bps,
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
-                        println!("✅ {} burn rate updated to {} bps ({:.2}%)",
-                            symbol, rate_bps, rate_bps as f64 / 100.0);
+                        println!(
+                            "✅ {} burn rate updated to {} bps ({:.2}%)",
+                            symbol,
+                            rate_bps,
+                            rate_bps as f64 / 100.0
+                        );
                     }
-                    Ok(r) => println!("❌ SetBurnRate failed (HTTP {}): {}", r.status(),
-                        r.text().await.unwrap_or_default()),
+                    Ok(r) => println!(
+                        "❌ SetBurnRate failed (HTTP {}): {}",
+                        r.status(),
+                        r.text().await.unwrap_or_default()
+                    ),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
             }
-            PatCommand::SetOwner { symbol, owner, new_owner } => {
+            PatCommand::SetOwner {
+                symbol,
+                owner,
+                new_owner,
+            } => {
                 let resp = http_client
                     .post(format!("{}/rpc/pat/set-owner", rpc))
                     .json(&serde_json::json!({
                         "symbol": symbol, "owner": owner, "new_owner": new_owner,
                     }))
-                    .send().await;
+                    .send()
+                    .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         println!("✅ {} ownership transferred to {}", symbol, new_owner);
                     }
-                    Ok(r) => println!("❌ SetOwner failed (HTTP {}): {}", r.status(),
-                        r.text().await.unwrap_or_default()),
+                    Ok(r) => println!(
+                        "❌ SetOwner failed (HTTP {}): {}",
+                        r.status(),
+                        r.text().await.unwrap_or_default()
+                    ),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
             }
@@ -604,8 +706,14 @@ async fn run(cmd: Commands) -> Result<()> {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         println!("🔮 Oracle price for {}:", asset);
-                        let median = body.get("median_price").and_then(|v| v.as_str()).unwrap_or("n/a");
-                        let sources = body.get("source_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let median = body
+                            .get("median_price")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("n/a");
+                        let sources = body
+                            .get("source_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         let ts = body.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
                         println!("  Median price : {} µUSD", median);
                         println!("  Sources      : {}", sources);
@@ -615,7 +723,12 @@ async fn run(cmd: Commands) -> Result<()> {
                     Err(e) => println!("❌ RPC unreachable ({}). Is the node running?", e),
                 }
             }
-            OracleCommand::Submit { asset, price, confidence_bps, operator_id } => {
+            OracleCommand::Submit {
+                asset,
+                price,
+                confidence_bps,
+                operator_id,
+            } => {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -627,9 +740,17 @@ async fn run(cmd: Commands) -> Result<()> {
                     "confidence_bps": confidence_bps,
                     "operator_id": operator_id,
                 });
-                match http_client.post(format!("{}/rpc/oracle/update", rpc)).json(&body).send().await {
+                match http_client
+                    .post(format!("{}/rpc/oracle/update", rpc))
+                    .json(&body)
+                    .send()
+                    .await
+                {
                     Ok(r) if r.status().is_success() => {
-                        println!("✅ Oracle price update submitted: {} = {} µUSD", asset, price);
+                        println!(
+                            "✅ Oracle price update submitted: {} = {} µUSD",
+                            asset, price
+                        );
                     }
                     Ok(r) => println!("❌ Oracle update rejected: HTTP {}", r.status()),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
@@ -640,17 +761,27 @@ async fn run(cmd: Commands) -> Result<()> {
         // ── Economics (Sprint 7) ──────────────────────────────────────────
         Commands::Economics { task } => match task {
             EconomicsCommand::Supply => {
-                match http_client.get(format!("{}/rpc/economics/supply", rpc)).send().await {
+                match http_client
+                    .get(format!("{}/rpc/economics/supply", rpc))
+                    .send()
+                    .await
+                {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         println!("📊 BLEEP Token Supply:");
-                        let fmt = |key: &str| body.get(key).and_then(|v| v.as_str())
-                            .map(|s| format_micro_bleep(s))
-                            .unwrap_or_else(|| "n/a".to_string());
+                        let fmt = |key: &str| {
+                            body.get(key)
+                                .and_then(|v| v.as_str())
+                                .map(|s| format_micro_bleep(s))
+                                .unwrap_or_else(|| "n/a".to_string())
+                        };
                         println!("  Circulating : {} BLEEP", fmt("circulating_supply"));
                         println!("  Minted      : {} BLEEP", fmt("total_minted"));
                         println!("  Burned      : {} BLEEP", fmt("total_burned"));
-                        let fee = body.get("current_base_fee").and_then(|v| v.as_str()).unwrap_or("n/a");
+                        let fee = body
+                            .get("current_base_fee")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("n/a");
                         println!("  Base fee    : {} µBLEEP/gas", fee);
                         let epoch = body.get("last_epoch").and_then(|v| v.as_u64()).unwrap_or(0);
                         println!("  Last epoch  : {}", epoch);
@@ -660,10 +791,17 @@ async fn run(cmd: Commands) -> Result<()> {
                 }
             }
             EconomicsCommand::Fee => {
-                match http_client.get(format!("{}/rpc/economics/fee", rpc)).send().await {
+                match http_client
+                    .get(format!("{}/rpc/economics/fee", rpc))
+                    .send()
+                    .await
+                {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
-                        let fee = body.get("current_base_fee").and_then(|v| v.as_str()).unwrap_or("n/a");
+                        let fee = body
+                            .get("current_base_fee")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("n/a");
                         let epoch = body.get("last_epoch").and_then(|v| v.as_u64()).unwrap_or(0);
                         println!("💹 Current base fee: {} µBLEEP/gas (epoch {})", fee, epoch);
                     }
@@ -672,22 +810,41 @@ async fn run(cmd: Commands) -> Result<()> {
                 }
             }
             EconomicsCommand::Epoch { epoch } => {
-                match http_client.get(format!("{}/rpc/economics/epoch/{}", rpc, epoch)).send().await {
+                match http_client
+                    .get(format!("{}/rpc/economics/epoch/{}", rpc, epoch))
+                    .send()
+                    .await
+                {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         println!("📈 Epoch {} Economics:", epoch);
-                        let get_str = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("n/a").to_string();
+                        let get_str = |k: &str| {
+                            body.get(k)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("n/a")
+                                .to_string()
+                        };
                         println!("  Emitted         : {} µBLEEP", get_str("total_emitted"));
                         println!("  Burned          : {} µBLEEP", get_str("total_burned"));
-                        println!("  Circulating     : {} µBLEEP", get_str("circulating_supply"));
+                        println!(
+                            "  Circulating     : {} µBLEEP",
+                            get_str("circulating_supply")
+                        );
                         println!("  Base fee        : {} µBLEEP", get_str("new_base_fee"));
-                        println!("  Validator rwds  : {} records", body.get("reward_count").and_then(|v| v.as_u64()).unwrap_or(0));
+                        println!(
+                            "  Validator rwds  : {} records",
+                            body.get("reward_count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                        );
                         if let Some(price) = body.get("bleep_usd_price").and_then(|v| v.as_str()) {
                             println!("  BLEEP/USD price : {} µUSD", price);
                         }
                         println!("  Supply hash     : {}", get_str("supply_state_hash"));
                     }
-                    Ok(r) if r.status() == 404 => println!("Epoch {} not found (node hasn't processed it yet)", epoch),
+                    Ok(r) if r.status() == 404 => {
+                        println!("Epoch {} not found (node hasn't processed it yet)", epoch)
+                    }
                     Ok(r) => println!("❌ Epoch query failed: HTTP {}", r.status()),
                     Err(e) => println!("❌ RPC unreachable: {}", e),
                 }
@@ -700,29 +857,25 @@ async fn run(cmd: Commands) -> Result<()> {
             println!("Built with: Rust, Tokio, Warp, RocksDB, revm, arkworks");
             println!("RPC endpoint: {}", rpc);
             match get_health(&rpc).await {
-                Ok(s)  => println!("Node status: {} ✅", s),
+                Ok(s) => println!("Node status: {} ✅", s),
                 Err(_) => println!("Node status: offline (start with `./bleep`)"),
             }
         }
 
         // ── Block ─────────────────────────────────────────────────────────
         Commands::Block { task } => match task {
-            BlockCommand::Latest => {
-                match get_latest_block(&rpc).await {
-                    Ok(info) => println!("Latest block:\n{}", info),
-                    Err(_)   => println!("Node not reachable at {}. Start with `./bleep`.", rpc),
-                }
-            }
-            BlockCommand::Get { identifier } => {
-                match get_block_by_id(&rpc, &identifier).await {
-                    Ok(info) => println!("{}", info),
-                    Err(_)   => println!("Block '{}' not found or node offline.", identifier),
-                }
-            }
+            BlockCommand::Latest => match get_latest_block(&rpc).await {
+                Ok(info) => println!("Latest block:\n{}", info),
+                Err(_) => println!("Node not reachable at {}. Start with `./bleep`.", rpc),
+            },
+            BlockCommand::Get { identifier } => match get_block_by_id(&rpc, &identifier).await {
+                Ok(info) => println!("{}", info),
+                Err(_) => println!("Block '{}' not found or node offline.", identifier),
+            },
             BlockCommand::Validate { hash } => {
                 println!("Validating block {}…", hash);
                 match get_block_by_id(&rpc, &hash).await {
-                    Ok(_)  => println!("✅ Block {} found and accessible.", hash),
+                    Ok(_) => println!("✅ Block {} found and accessible.", hash),
                     Err(_) => println!("❌ Block {} not found or node offline.", hash),
                 }
             }
@@ -738,7 +891,7 @@ async fn run(cmd: Commands) -> Result<()> {
                 println!("🔐 Staking {} BLEEP as validator '{}'…", amount, label);
                 match post_stake_tx(&rpc, amount, &label).await {
                     Ok(resp) => println!("✅ Stake submitted:\n{}", resp),
-                    Err(e)   => {
+                    Err(e) => {
                         println!("⚠️  Node unreachable ({}). Stake recorded locally.", e);
                         println!("    Re-run after starting the node to broadcast.");
                     }
@@ -749,22 +902,20 @@ async fn run(cmd: Commands) -> Result<()> {
                 println!("🔓 Initiating unstake for validator '{}'…", validator_id);
                 match post_unstake_tx(&rpc, &validator_id).await {
                     Ok(resp) => println!("✅ Unstake submitted:\n{}", resp),
-                    Err(e)   => println!("❌ Unstake failed: {}", e),
+                    Err(e) => println!("❌ Unstake failed: {}", e),
                 }
             }
 
-            ValidatorCommand::List => {
-                match get_validators(&rpc).await {
-                    Ok(body) => println!("Active validators:\n{}", body),
-                    Err(_)   => println!("Node not reachable at {}. Start with `./bleep`.", rpc),
-                }
-            }
+            ValidatorCommand::List => match get_validators(&rpc).await {
+                Ok(body) => println!("Active validators:\n{}", body),
+                Err(_) => println!("Node not reachable at {}. Start with `./bleep`.", rpc),
+            },
 
             ValidatorCommand::Status { validator_id } => {
                 let vid = validator_id.unwrap_or_else(|| "self".to_string());
                 match get_validator_status(&rpc, &vid).await {
                     Ok(body) => println!("Validator '{}':\n{}", vid, body),
-                    Err(_)   => println!("Could not fetch validator '{}' from {}.", vid, rpc),
+                    Err(_) => println!("Could not fetch validator '{}' from {}.", vid, rpc),
                 }
             }
 
@@ -774,7 +925,7 @@ async fn run(cmd: Commands) -> Result<()> {
                 println!("📋 Submitting slashing evidence from '{}'…", evidence_file);
                 match post_slashing_evidence(&rpc, &evidence_json).await {
                     Ok(resp) => println!("✅ Evidence accepted:\n{}", resp),
-                    Err(e)   => println!("❌ Evidence rejected: {}", e),
+                    Err(e) => println!("❌ Evidence rejected: {}", e),
                 }
             }
         },
@@ -790,7 +941,7 @@ async fn run(cmd: Commands) -> Result<()> {
 fn format_micro_bleep(micro: &str) -> String {
     let val: u128 = micro.parse().unwrap_or(0);
     let whole = val / 100_000_000;
-    let frac  = val % 100_000_000;
+    let frac = val % 100_000_000;
     format!("{}.{:08}", whole, frac)
 }
 
@@ -818,13 +969,7 @@ async fn get_block_by_id(rpc: &str, id: &str) -> Result<String> {
 async fn post_transaction(rpc: &str, tx: &ZKTransaction) -> Result<String> {
     let url = format!("{}/rpc/tx", rpc);
     let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .json(tx)
-        .send()
-        .await?
-        .text()
-        .await?;
+    let resp = client.post(&url).json(tx).send().await?.text().await?;
     Ok(resp)
 }
 
@@ -841,13 +986,13 @@ async fn get_tx_history(rpc: &str) -> Result<Vec<String>> {
 async fn get_account_state(rpc: &str, address: &str) -> Result<(String, u64, String)> {
     #[derive(serde::Deserialize)]
     struct AccountStateResp {
-        balance:    String,
-        nonce:      u64,
+        balance: String,
+        nonce: u64,
         state_root: String,
         #[allow(dead_code)]
         block_height: u64,
     }
-    let url  = format!("{}/rpc/state/{}", rpc, address);
+    let url = format!("{}/rpc/state/{}", rpc, address);
     let resp = reqwest::get(&url).await?.json::<AccountStateResp>().await?;
     Ok((resp.balance, resp.nonce, resp.state_root))
 }
@@ -881,17 +1026,17 @@ fn uuid_now() -> String {
 async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
     #[derive(serde::Serialize)]
     struct StakeRequest {
-        tx_type:    String,
-        amount:     u64,
-        label:      String,
-        timestamp:  u64,
+        tx_type: String,
+        amount: u64,
+        label: String,
+        timestamp: u64,
     }
     let url = format!("{}/rpc/validator/stake", rpc);
     let client = reqwest::Client::new();
     let body = StakeRequest {
-        tx_type:   "Stake".to_string(),
+        tx_type: "Stake".to_string(),
         amount,
-        label:     label.to_string(),
+        label: label.to_string(),
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -904,7 +1049,10 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
 /// POST /rpc/validator/unstake — broadcast an unstake / exit transaction.
 async fn post_unstake_tx(rpc: &str, validator_id: &str) -> Result<String> {
     #[derive(serde::Serialize)]
-    struct UnstakeRequest { validator_id: String, timestamp: u64 }
+    struct UnstakeRequest {
+        validator_id: String,
+        timestamp: u64,
+    }
     let url = format!("{}/rpc/validator/unstake", rpc);
     let client = reqwest::Client::new();
     let body = UnstakeRequest {
@@ -944,4 +1092,3 @@ async fn post_slashing_evidence(rpc: &str, evidence_json: &str) -> Result<String
         .await?;
     Ok(resp)
 }
-

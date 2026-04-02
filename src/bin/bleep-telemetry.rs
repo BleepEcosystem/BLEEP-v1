@@ -1,8 +1,8 @@
 // src/bin/bleep-telemetry.rs
 
 // use bleep_telemetry::metrics::{TelemetryCollector, TelemetryConfig};
+use log::{error, info};
 use std::error::Error;
-use log::{info, error};
 
 fn main() {
     env_logger::init();
@@ -17,16 +17,16 @@ fn main() {
 fn run_telemetry_engine() -> Result<(), Box<dyn Error>> {
     // Initialize telemetry collection
     info!("Initializing telemetry metrics collector...");
-    
+
     // Create telemetry collector instance
     let collector = TelemetryCollector::new();
     info!("Telemetry collector initialized: {}", collector.name());
     info!("Telemetry enabled: {}", collector.is_enabled());
-    
+
     // Start monitoring consensus and network metrics
     info!("Monitoring active: consensus metrics, network latency, validator participation");
     info!("Telemetry engine ready: publishing metrics to monitoring system");
-    
+
     Ok(())
 }
 
@@ -38,7 +38,7 @@ impl TelemetryCollector {
     fn new() -> Self {
         TelemetryCollector { enabled: true }
     }
-    
+
     fn name(&self) -> &'static str {
         "BLEEPTelemetry"
     }

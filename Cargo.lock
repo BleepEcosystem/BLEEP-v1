@@ -1500,6 +1500,7 @@ dependencies = [
  "bleep-connect-layer3-zkproof",
  "bleep-connect-layer4-instant",
  "bleep-connect-types",
+ "bleep-crypto",
  "hex",
  "log",
  "rand 0.8.5",
@@ -1822,16 +1823,7 @@ dependencies = [
 name = "bleep-zkp"
 version = "0.2.0"
 dependencies = [
- "ark-bls12-381",
- "ark-ec",
- "ark-ff",
- "ark-groth16",
- "ark-r1cs-std",
- "ark-relations",
- "ark-serialize",
- "ark-snark",
- "ark-std",
- "rand 0.8.5",
+ "bleep-crypto",
  "serde",
  "sha3",
 ]

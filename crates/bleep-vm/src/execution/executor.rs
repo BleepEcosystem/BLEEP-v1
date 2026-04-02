@@ -30,7 +30,7 @@ use crate::engines::zk_engine_adapter::ZkEngineAdapter;
 use crate::error::VmResult;
 use crate::execution::state_transition::{StateDiff, StateTransition};
 use crate::intent::{Intent, IntentKind};
-use crate::router::vm_router::{RouterConfig, RoutedResult, VmRouter};
+use crate::router::vm_router::{RoutedResult, RouterConfig, VmRouter};
 use crate::runtime::gas_model::GasModel;
 
 use std::sync::Arc;
@@ -43,7 +43,7 @@ use tracing::{info, instrument};
 
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
-    pub router:   RouterConfig,
+    pub router: RouterConfig,
     /// Current block number (injected by the node).
     pub block_number: u64,
     /// Whether to produce `StateTransition` objects for the state layer.
@@ -53,8 +53,8 @@ pub struct ExecutorConfig {
 impl Default for ExecutorConfig {
     fn default() -> Self {
         ExecutorConfig {
-            router:           RouterConfig::default(),
-            block_number:     1,
+            router: RouterConfig::default(),
+            block_number: 1,
             emit_transitions: true,
         }
     }
@@ -67,9 +67,9 @@ impl Default for ExecutorConfig {
 /// Full outcome of one intent execution including state transition.
 pub struct ExecutionOutcome {
     pub routed_result: RoutedResult,
-    pub transition:    Option<StateTransition>,
-    pub bleep_gas:     u64,
-    pub total_time:    Duration,
+    pub transition: Option<StateTransition>,
+    pub bleep_gas: u64,
+    pub total_time: Duration,
 }
 
 impl ExecutionOutcome {
@@ -93,11 +93,11 @@ impl ExecutionOutcome {
 /// The main BLEEP VM executor.
 /// Instantiate once per node; it's thread-safe.
 pub struct Executor {
-    router:  VmRouter,
-    bridge:  Arc<ConnectBridge>,
+    router: VmRouter,
+    bridge: Arc<ConnectBridge>,
     #[allow(dead_code)]
-    gas:     GasModel,
-    config:  ExecutorConfig,
+    gas: GasModel,
+    config: ExecutorConfig,
 }
 
 impl Executor {
@@ -113,7 +113,7 @@ impl Executor {
         Executor {
             router,
             bridge: Arc::new(ConnectBridge::new()),
-            gas:    GasModel::default(),
+            gas: GasModel::default(),
             config,
         }
     }
@@ -128,7 +128,11 @@ impl Executor {
             let (msg_id, diff) = self.bridge.submit(x, &intent.signer).await?;
             let bleep_gas = diff.gas_charged;
             let transition = if self.config.emit_transitions {
-                Some(StateTransition::new(intent.id, diff.clone(), self.config.block_number))
+                Some(StateTransition::new(
+                    intent.id,
+                    diff.clone(),
+                    self.config.block_number,
+                ))
             } else {
                 None
             };
@@ -136,21 +140,21 @@ impl Executor {
             use crate::router::vm_router::EngineResult;
             use crate::types::{ExecutionLog, LogLevel};
             let result = RoutedResult {
-                intent_id:   intent.id,
+                intent_id: intent.id,
                 engine_name: "connect-bridge".into(),
-                vm:          "CrossChain".into(),
-                result:      EngineResult {
-                    success:       true,
-                    output:        msg_id.to_vec(),
-                    gas_used:      bleep_gas,
-                    state_diff:    diff,
-                    logs:          vec![ExecutionLog {
-                        level:   LogLevel::Info,
+                vm: "CrossChain".into(),
+                result: EngineResult {
+                    success: true,
+                    output: msg_id.to_vec(),
+                    gas_used: bleep_gas,
+                    state_diff: diff,
+                    logs: vec![ExecutionLog {
+                        level: LogLevel::Info,
                         message: format!("Cross-chain message queued: {}", hex::encode(msg_id)),
-                        data:    Vec::new(),
+                        data: Vec::new(),
                     }],
                     revert_reason: None,
-                    exec_time:     start.elapsed(),
+                    exec_time: start.elapsed(),
                 },
                 bleep_gas,
             };
@@ -225,7 +229,7 @@ mod tests {
 
     fn test_executor() -> Executor {
         let mut cfg = ExecutorConfig::default();
-        cfg.router.verify_signatures  = false;
+        cfg.router.verify_signatures = false;
         cfg.router.sandbox_validation = false;
         Executor::production(cfg)
     }
@@ -235,10 +239,10 @@ mod tests {
         let exec = test_executor();
         let intent = Intent::new_unsigned(
             IntentKind::Transfer(TransferIntent {
-                from:   [1u8; 32],
-                to:     [2u8; 32],
+                from: [1u8; 32],
+                to: [2u8; 32],
                 amount: 1000,
-                memo:   None,
+                memo: None,
             }),
             ChainId::Bleep,
         );
@@ -253,7 +257,10 @@ mod tests {
         let exec = test_executor();
         let intent = Intent::new_unsigned(
             IntentKind::Transfer(TransferIntent {
-                from: [0u8; 32], to: [1u8; 32], amount: 42, memo: None,
+                from: [0u8; 32],
+                to: [1u8; 32],
+                amount: 42,
+                memo: None,
             }),
             ChainId::Bleep,
         );
@@ -267,7 +274,10 @@ mod tests {
         for _ in 0..5 {
             let intent = Intent::new_unsigned(
                 IntentKind::Transfer(TransferIntent {
-                    from: [0u8; 32], to: [1u8; 32], amount: 1, memo: None,
+                    from: [0u8; 32],
+                    to: [1u8; 32],
+                    amount: 1,
+                    memo: None,
                 }),
                 ChainId::Bleep,
             );

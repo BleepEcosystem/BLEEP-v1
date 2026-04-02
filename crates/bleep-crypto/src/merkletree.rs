@@ -8,7 +8,10 @@ pub struct MerkleTree {
 
 impl MerkleTree {
     pub fn new() -> Self {
-        MerkleTree { leaves: vec![], root: vec![] }
+        MerkleTree {
+            leaves: vec![],
+            root: vec![],
+        }
     }
 
     pub fn add_leaf(&mut self, leaf: Vec<u8>) {
@@ -28,11 +31,15 @@ impl MerkleTree {
         if self.leaves.is_empty() {
             return vec![0u8; 32];
         }
-        let mut hashes: Vec<Vec<u8>> = self.leaves.iter().map(|leaf| {
-            let mut hasher = Sha3_256::new();
-            hasher.update(leaf);
-            hasher.finalize().to_vec()
-        }).collect();
+        let mut hashes: Vec<Vec<u8>> = self
+            .leaves
+            .iter()
+            .map(|leaf| {
+                let mut hasher = Sha3_256::new();
+                hasher.update(leaf);
+                hasher.finalize().to_vec()
+            })
+            .collect();
         while hashes.len() > 1 {
             let mut next_level = vec![];
             for pair in hashes.chunks(2) {
@@ -47,4 +54,4 @@ impl MerkleTree {
         }
         hashes[0].clone()
     }
-        }
+}

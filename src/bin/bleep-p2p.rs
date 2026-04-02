@@ -1,8 +1,8 @@
 // src/bin/bleep_p2p.rs
 
-use std::error::Error;
-use log::{info, error};
 use bleep_p2p::{P2PNode, P2PNodeConfig};
+use log::{error, info};
+use std::error::Error;
 
 #[tokio::main]
 async fn main() {

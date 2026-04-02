@@ -1,7 +1,7 @@
 /// Cryptographic AI Attestation
 ///
 /// This module provides cryptographic commitment and signing for all AI outputs.
-/// 
+///
 /// CORE INVARIANT:
 /// No unsigned AI output may be consumed by the protocol.
 ///
@@ -16,15 +16,14 @@
 /// - Audit trail for all AI-assisted decisions
 /// - Accountability even if model is compromised
 /// - Replay attack prevention via nonces
-
 use crate::ai_proposal_types::AIProposal;
 use crate::deterministic_inference::InferenceRecord;
+use bincode;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
-use uuid::Uuid;
-use bincode;
 use std::fmt;
+use uuid::Uuid;
 
 // ==================== ERROR TYPES ====================
 
@@ -43,7 +42,9 @@ pub enum AttestationError {
 impl fmt::Display for AttestationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SignatureVerificationFailed(msg) => write!(f, "Signature verification failed: {}", msg),
+            Self::SignatureVerificationFailed(msg) => {
+                write!(f, "Signature verification failed: {}", msg)
+            }
             Self::CommitmentMismatch(msg) => write!(f, "Commitment mismatch: {}", msg),
             Self::NonceReplay(msg) => write!(f, "Nonce replay: {}", msg),
             Self::InvalidTimestamp(msg) => write!(f, "Invalid timestamp: {}", msg),
@@ -106,9 +107,7 @@ pub enum ConstraintOutcome {
     },
 
     /// Constraints passed with warnings
-    ApprovedWithWarnings {
-        warnings: Vec<String>,
-    },
+    ApprovedWithWarnings { warnings: Vec<String> },
 }
 
 impl ProofOfInference {
@@ -155,13 +154,14 @@ impl ProofOfInference {
 
         // Verify constraint logic
         match &self.constraint_outcome {
-            ConstraintOutcome::Rejected { failed_constraints, .. } => {
+            ConstraintOutcome::Rejected {
+                failed_constraints, ..
+            } => {
                 // Failed constraints must be in the constraints_failed list
                 for failed in failed_constraints {
                     if !self.constraints_failed.contains(failed) {
                         return Err(AttestationError::InvalidFormat(
-                            "Constraint outcome inconsistent with checked constraints"
-                                .to_string(),
+                            "Constraint outcome inconsistent with checked constraints".to_string(),
                         ));
                     }
                 }
@@ -397,21 +397,24 @@ impl AIAttestationManager {
     /// Record an AI attestation
     pub fn record_attestation(&mut self, mut record: AIAttestationRecord) -> AttestationResult<()> {
         // Check nonce hasn't been used
-        if self.used_nonces.contains(&record.commitment.commitment_nonce) {
+        if self
+            .used_nonces
+            .contains(&record.commitment.commitment_nonce)
+        {
             return Err(AttestationError::NonceReplay(
                 "Commitment nonce already used".to_string(),
             ));
         }
 
         // Mark as used
-        self.used_nonces.insert(record.commitment.commitment_nonce.clone());
+        self.used_nonces
+            .insert(record.commitment.commitment_nonce.clone());
 
         // Mark as verified (manager's implicit verification)
         record.mark_verified("AIAttestationManager".to_string());
 
         // Store record
-        self.records
-            .insert(record.attestation_id.clone(), record);
+        self.records.insert(record.attestation_id.clone(), record);
 
         Ok(())
     }
@@ -539,8 +542,7 @@ mod tests {
 
         let commitment1 =
             AIOutputCommitment::new(proposal.clone(), 10, vec![1, 2, 3], None).unwrap();
-        let commitment2 =
-            AIOutputCommitment::new(proposal, 10, vec![1, 2, 3], None).unwrap();
+        let commitment2 = AIOutputCommitment::new(proposal, 10, vec![1, 2, 3], None).unwrap();
 
         let hash1 = commitment1.compute_hash();
         let hash2 = commitment2.compute_hash();

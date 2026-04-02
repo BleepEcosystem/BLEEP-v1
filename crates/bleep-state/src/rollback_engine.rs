@@ -13,11 +13,11 @@
 // 9. All in-flight transactions are ABORTED or REPLAYED correctly
 // 10. Cross-shard consistency is MAINTAINED (or transaction rolled back)
 
-use crate::shard_registry::{ShardId, EpochId,};
-use crate::snapshot_engine::{SnapshotEngine, SnapshotId, StateSnapshot, SnapshotStatus};
-use serde::{Serialize, Deserialize};
+use crate::shard_registry::{EpochId, ShardId};
+use crate::snapshot_engine::{SnapshotEngine, SnapshotId, SnapshotStatus, StateSnapshot};
+use log::{error, info};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use log::{info, error};
 use std::collections::{HashMap, VecDeque};
 
 /// Rollback operation phase state machine
@@ -349,12 +349,7 @@ impl RollbackEngine {
         let target = self
             .snapshot_engine
             .get_snapshot(target_snapshot_id)
-            .ok_or_else(|| {
-                format!(
-                    "Target snapshot {} not found",
-                    target_snapshot_id.as_u64()
-                )
-            })?;
+            .ok_or_else(|| format!("Target snapshot {} not found", target_snapshot_id.as_u64()))?;
 
         // INVARIANT 1: Target must be finalized
         if target.status != SnapshotStatus::Finalized {
@@ -452,9 +447,7 @@ impl RollbackEngine {
             return Ok(InvariantCheckResult {
                 passed: false,
                 invariant_name: "supply_non_increase".to_string(),
-                failure_reason: Some(
-                    "Shard state exceeds total supply".to_string()
-                ),
+                failure_reason: Some("Shard state exceeds total supply".to_string()),
                 evidence_hash: "supply_violation".to_string(),
             });
         }
@@ -470,7 +463,11 @@ impl RollbackEngine {
     }
 
     /// SAFETY: Release state locks
-    pub fn release_locks(&mut self, shard_id: ShardId, locks: Vec<StateLock>) -> Result<(), String> {
+    pub fn release_locks(
+        &mut self,
+        shard_id: ShardId,
+        locks: Vec<StateLock>,
+    ) -> Result<(), String> {
         let record = self
             .active_rollbacks
             .get_mut(&shard_id)
@@ -504,10 +501,7 @@ impl RollbackEngine {
             .ok_or_else(|| format!("No active rollback for shard {}", shard_id.as_u64()))?;
 
         if record.phase != RollbackPhase::ReleasingLocks {
-            return Err(format!(
-                "Cannot restore state in phase {:?}",
-                record.phase
-            ));
+            return Err(format!("Cannot restore state in phase {:?}", record.phase));
         }
 
         // Get the target snapshot
@@ -599,7 +593,7 @@ impl RollbackEngine {
             .ok_or_else(|| "Target snapshot disappeared".to_string())?;
 
         let mut evidence = RollbackEvidence {
-            rollback_id: format!("rollback_{}_{}",shard_id.as_u64(), record.timestamp),
+            rollback_id: format!("rollback_{}_{}", shard_id.as_u64(), record.timestamp),
             shard_id,
             target_snapshot_id: record.target_snapshot_id,
             reason: record.reason.clone(),
@@ -694,13 +688,7 @@ mod tests {
 
         let snapshot_id = engine
             .snapshot_engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                50,
-                root,
-                "merkle".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 50, root, "merkle".to_string())
             .unwrap();
 
         engine
@@ -734,13 +722,7 @@ mod tests {
 
         let snapshot_id = engine
             .snapshot_engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                50,
-                root,
-                "merkle".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 50, root, "merkle".to_string())
             .unwrap();
 
         // Don't finalize it
@@ -768,13 +750,7 @@ mod tests {
 
         let snapshot_id = engine
             .snapshot_engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                50,
-                root,
-                "merkle".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 50, root, "merkle".to_string())
             .unwrap();
 
         engine

@@ -14,14 +14,13 @@ use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use bleep_connect_types::{
-    FullNodeVerification, VerifierAttestation, ClientImplementation,
-    TEEAttestation, TEEType, StateCommitment, CommitmentType,
-    BleepConnectError, BleepConnectResult, ChainId,
-    constants::{CONSENSUS_THRESHOLD, MIN_VERIFIER_NODES},
-};
-use bleep_connect_crypto::{sha256, ClassicalKeyPair};
 use bleep_connect_commitment_chain::CommitmentChain;
+use bleep_connect_crypto::{sha256, ClassicalKeyPair};
+use bleep_connect_types::{
+    constants::{CONSENSUS_THRESHOLD, MIN_VERIFIER_NODES},
+    BleepConnectError, BleepConnectResult, ChainId, ClientImplementation, CommitmentType,
+    FullNodeVerification, StateCommitment, TEEAttestation, TEEType, VerifierAttestation,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VERIFIER NODE (represents a remote full-node verifier)
@@ -58,7 +57,11 @@ impl VerifierNode {
     /// (e.g., eth_getBlockByNumber for Ethereum, getBlock for Solana).
     /// Here we use a deterministic derivation from the block number and client
     /// so different client implementations can independently verify the same block.
-    pub async fn query_state_root(&self, chain: ChainId, block_number: u64) -> BleepConnectResult<[u8; 32]> {
+    pub async fn query_state_root(
+        &self,
+        chain: ChainId,
+        block_number: u64,
+    ) -> BleepConnectResult<[u8; 32]> {
         // Production: RPC call to self.endpoint
         // Example for Ethereum: POST {"method":"eth_getBlockByNumber","params":["0x{block_number:x}",false]}
         // Here: deterministic simulation using chain + block
@@ -66,12 +69,17 @@ impl VerifierNode {
             chain.to_u32().to_be_bytes().as_slice(),
             block_number.to_be_bytes().as_slice(),
             b"STATE_ROOT",
-        ].concat();
+        ]
+        .concat();
         Ok(sha256(&data))
     }
 
     /// Sign an attestation over a state root with this node's key.
-    pub fn sign_attestation(&self, signing_key: &ClassicalKeyPair, state_root: [u8; 32]) -> Vec<u8> {
+    pub fn sign_attestation(
+        &self,
+        signing_key: &ClassicalKeyPair,
+        state_root: [u8; 32],
+    ) -> Vec<u8> {
         let mut data = self.node_id.to_vec();
         data.extend_from_slice(&state_root);
         signing_key.sign(&sha256(&data))
@@ -121,7 +129,8 @@ impl VerificationRequest {
             chain.to_u32().to_be_bytes().as_slice(),
             block_number.to_be_bytes().as_slice(),
             &intent_id,
-        ].concat();
+        ]
+        .concat();
         Self {
             verification_id: sha256(&id_data),
             chain,
@@ -167,14 +176,15 @@ impl VerifierNetwork {
     ) -> BleepConnectResult<Vec<VerifierAttestation>> {
         let nodes = self.nodes.read().await;
         if nodes.len() < self.min_nodes {
-            return Err(BleepConnectError::ConsensusNotReached {
-                agreement: 0.0,
-            });
+            return Err(BleepConnectError::ConsensusNotReached { agreement: 0.0 });
         }
 
         let mut attestations = Vec::new();
         for (node, keypair) in nodes.iter() {
-            match node.query_state_root(request.chain, request.block_number).await {
+            match node
+                .query_state_root(request.chain, request.block_number)
+                .await
+            {
                 Ok(state_root) => {
                     let sig = node.sign_attestation(keypair, state_root);
                     let tee = node.generate_tee_attestation(state_root);
@@ -193,7 +203,11 @@ impl VerifierNetwork {
             }
         }
 
-        info!("Collected {} attestations from {} nodes", attestations.len(), nodes.len());
+        info!(
+            "Collected {} attestations from {} nodes",
+            attestations.len(),
+            nodes.len()
+        );
         Ok(attestations)
     }
 
@@ -215,12 +229,23 @@ impl VerifierNetwork {
         // Find root with sufficient votes
         for (root, count) in &votes {
             if *count >= required {
-                info!("Consensus reached: {}/{} nodes agree on root {}", count, total, hex::encode(root));
+                info!(
+                    "Consensus reached: {}/{} nodes agree on root {}",
+                    count,
+                    total,
+                    hex::encode(root)
+                );
                 return Some(*root);
             }
         }
 
-        warn!("No consensus: {:?}", votes.iter().map(|(r, c)| (hex::encode(r), c)).collect::<Vec<_>>());
+        warn!(
+            "No consensus: {:?}",
+            votes
+                .iter()
+                .map(|(r, c)| (hex::encode(r), c))
+                .collect::<Vec<_>>()
+        );
         None
     }
 
@@ -230,19 +255,22 @@ impl VerifierNetwork {
         attestations: &[VerifierAttestation],
         nodes: &[(VerifierNode, ClassicalKeyPair)],
     ) -> Vec<bool> {
-        attestations.iter().map(|att| {
-            // Find matching node
-            let node = nodes.iter().find(|(n, _)| n.node_id == att.node_id);
-            match node {
-                Some((n, _)) => {
-                    let mut data = att.node_id.to_vec();
-                    data.extend_from_slice(&att.state_root);
-                    ClassicalKeyPair::verify(&n.public_key, &sha256(&data), &att.signature)
-                        .unwrap_or(false)
+        attestations
+            .iter()
+            .map(|att| {
+                // Find matching node
+                let node = nodes.iter().find(|(n, _)| n.node_id == att.node_id);
+                match node {
+                    Some((n, _)) => {
+                        let mut data = att.node_id.to_vec();
+                        data.extend_from_slice(&att.state_root);
+                        ClassicalKeyPair::verify(&n.public_key, &sha256(&data), &att.signature)
+                            .unwrap_or(false)
+                    }
+                    None => false,
                 }
-                None => false,
-            }
-        }).collect()
+            })
+            .collect()
     }
 }
 
@@ -291,19 +319,21 @@ impl Layer2FullNode {
 
     /// Execute a full verification: collect attestations and reach consensus.
     pub async fn verify(&self, request_id: [u8; 32]) -> BleepConnectResult<FullNodeVerification> {
-        let request = self.pending_requests.get(&request_id)
+        let request = self
+            .pending_requests
+            .get(&request_id)
             .ok_or_else(|| BleepConnectError::InternalError("Unknown verification request".into()))?
             .clone();
         drop(self.pending_requests.get(&request_id)); // release borrow
 
         let attestations = self.network.collect_attestations(&request).await?;
 
-        let consensus_root = self.network.check_consensus(&attestations)
-            .ok_or_else(|| {
-                let agreement = attestations.len() as f64 /
-                    self.network.nodes.try_read().map(|n| n.len()).unwrap_or(1) as f64 * 100.0;
-                BleepConnectError::ConsensusNotReached { agreement }
-            })?;
+        let consensus_root = self.network.check_consensus(&attestations).ok_or_else(|| {
+            let agreement = attestations.len() as f64
+                / self.network.nodes.try_read().map(|n| n.len()).unwrap_or(1) as f64
+                * 100.0;
+            BleepConnectError::ConsensusNotReached { agreement }
+        })?;
 
         // Validate against claimed root
         let consensus_reached = consensus_root == request.claimed_state_root;
@@ -343,7 +373,11 @@ impl Layer2FullNode {
 
         self.completed.insert(request_id, verification.clone());
         self.pending_requests.remove(&request_id);
-        info!("Verification {} complete: consensus={}", hex::encode(request_id), consensus_reached);
+        info!(
+            "Verification {} complete: consensus={}",
+            hex::encode(request_id),
+            consensus_reached
+        );
         Ok(verification)
     }
 
@@ -357,7 +391,10 @@ impl Layer2FullNode {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -380,7 +417,12 @@ mod tests {
             ClientImplementation::Erigon,
         ] {
             let kp = ClassicalKeyPair::generate();
-            let node = VerifierNode::new(kp.public_key_bytes(), client, "http://localhost".into(), true);
+            let node = VerifierNode::new(
+                kp.public_key_bytes(),
+                client,
+                "http://localhost".into(),
+                true,
+            );
             layer2.add_verifier_node(node, kp).await;
         }
         layer2
@@ -393,18 +435,19 @@ mod tests {
 
         let intent_id = sha256(b"high-value-transfer");
         // Compute what the consensus state root should be (deterministic)
-        let expected_root = sha256(&[
-            ChainId::Ethereum.to_u32().to_be_bytes().as_slice(),
-            42u64.to_be_bytes().as_slice(),
-            b"STATE_ROOT",
-        ].concat());
+        let expected_root = sha256(
+            &[
+                ChainId::Ethereum.to_u32().to_be_bytes().as_slice(),
+                42u64.to_be_bytes().as_slice(),
+                b"STATE_ROOT",
+            ]
+            .concat(),
+        );
 
-        let req_id = layer2.request_verification(
-            ChainId::Ethereum,
-            42,
-            intent_id,
-            expected_root,
-        ).await.unwrap();
+        let req_id = layer2
+            .request_verification(ChainId::Ethereum, 42, intent_id, expected_root)
+            .await
+            .unwrap();
 
         let result = layer2.verify(req_id).await.unwrap();
         assert!(result.consensus_reached);
@@ -418,9 +461,30 @@ mod tests {
         let root_a = sha256(b"root-a");
         let root_b = sha256(b"root-b");
         let attestations = vec![
-            VerifierAttestation { node_id: [0;32], client_implementation: ClientImplementation::Geth, state_root: root_a, tee_attestation: None, signature: vec![], attested_at: 0 },
-            VerifierAttestation { node_id: [1;32], client_implementation: ClientImplementation::Nethermind, state_root: root_a, tee_attestation: None, signature: vec![], attested_at: 0 },
-            VerifierAttestation { node_id: [2;32], client_implementation: ClientImplementation::Erigon, state_root: root_b, tee_attestation: None, signature: vec![], attested_at: 0 },
+            VerifierAttestation {
+                node_id: [0; 32],
+                client_implementation: ClientImplementation::Geth,
+                state_root: root_a,
+                tee_attestation: None,
+                signature: vec![],
+                attested_at: 0,
+            },
+            VerifierAttestation {
+                node_id: [1; 32],
+                client_implementation: ClientImplementation::Nethermind,
+                state_root: root_a,
+                tee_attestation: None,
+                signature: vec![],
+                attested_at: 0,
+            },
+            VerifierAttestation {
+                node_id: [2; 32],
+                client_implementation: ClientImplementation::Erigon,
+                state_root: root_b,
+                tee_attestation: None,
+                signature: vec![],
+                attested_at: 0,
+            },
         ];
         // 2/3 = 66.7% < 90%, so no consensus
         let result = network.check_consensus(&attestations);

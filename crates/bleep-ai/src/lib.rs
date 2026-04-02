@@ -1,5 +1,5 @@
 // ==================== PHASE 4: AI ADVISORY MODULE ====================
-// 
+//
 // This module implements BLEEP's AI Advisory System that enhances protocol
 // safety without becoming a trusted party.
 //
@@ -11,17 +11,17 @@
 // 5. Deterministic feature extraction (reproducible)
 // 6. Fallback mechanisms if AI fails
 
-pub mod feature_extractor;
 pub mod ai_decision_module;
+pub mod feature_extractor;
 pub mod governance_integration;
 
 // Legacy modules (Phase 3)
-pub mod deterministic_inference;
-pub mod ai_proposal_types;
 pub mod ai_attestation;
-pub mod ai_constraint_validator;
 pub mod ai_consensus_integration;
+pub mod ai_constraint_validator;
 pub mod ai_feedback_loop;
+pub mod ai_proposal_types;
+pub mod deterministic_inference;
 
 #[cfg(test)]
 mod phase3_tests;
@@ -31,70 +31,64 @@ mod phase3_unit_tests;
 
 // Re-export commonly used types
 pub use deterministic_inference::{
-    DeterministicInferenceEngine, InferenceRecord, ModelMetadata,
-    DeterministicInferenceError, DeterministicInferenceResult,
+    DeterministicInferenceEngine, DeterministicInferenceError, DeterministicInferenceResult,
+    InferenceRecord, ModelMetadata,
 };
 
 pub use ai_proposal_types::{
-    AIProposal, AIProposalError, ConsensusModeProposal,
-    ShardRollbackProposal, ShardRebalanceProposal,
-    ValidatorSecurityProposal, TokenomicsProposal,
-    GovernancePriorityProposal, EvidenceType,
+    AIProposal, AIProposalError, ConsensusModeProposal, EvidenceType, GovernancePriorityProposal,
+    ShardRebalanceProposal, ShardRollbackProposal, TokenomicsProposal, ValidatorSecurityProposal,
 };
 
 pub use ai_attestation::{
-    AIAttestationManager, AIAttestationRecord, AIOutputCommitment,
-    ProofOfInference, ConstraintOutcome,
+    AIAttestationManager, AIAttestationRecord, AIOutputCommitment, ConstraintOutcome,
+    ProofOfInference,
 };
 
 pub use ai_constraint_validator::{
-    ConstraintValidator, ProtocolInvariants, ConstraintContext,
-    ConstraintError, ConstraintResult,
+    ConstraintContext, ConstraintError, ConstraintResult, ConstraintValidator, ProtocolInvariants,
 };
 
 pub use ai_consensus_integration::{
-    AIConsensusOrchestrator, ConsensusProposal, ProposalOutcome,
-    ProposalState, HealingAction, HealingExecution,
+    AIConsensusOrchestrator, ConsensusProposal, HealingAction, HealingExecution, ProposalOutcome,
+    ProposalState,
 };
 
 pub use ai_feedback_loop::{
-    FeedbackManager, ModelPerformance, AccuracyMetrics,
-    ConfidenceCalibration, SystemHealthMetrics,
+    AccuracyMetrics, ConfidenceCalibration, FeedbackManager, ModelPerformance, SystemHealthMetrics,
 };
 
 // PHASE 4: AI ADVISORY SYSTEM
 pub use feature_extractor::{
-    FeatureExtractor, ExtractedFeatures, OnChainTelemetry,
-    NetworkMetrics, ConsensusMetrics, ValidatorMetrics, FinalityMetrics,
+    ConsensusMetrics, ExtractedFeatures, FeatureExtractor, FinalityMetrics, NetworkMetrics,
+    OnChainTelemetry, ValidatorMetrics,
 };
 
 pub use ai_decision_module::{
-    AIDecisionModule, AnomalyAssessment, AnomalyClass, AISignature,
-    RecoveryRecommendation, AIError,
+    AIDecisionModule, AIError, AISignature, AnomalyAssessment, AnomalyClass, RecoveryRecommendation,
 };
 
 pub use governance_integration::{
-    GovernanceIntegration, AIAssessmentProposal, AIFeedback, VoteStatus,
-    GovernanceError,
+    AIAssessmentProposal, AIFeedback, GovernanceError, GovernanceIntegration, VoteStatus,
 };
 
-pub mod wallet;
-pub mod governance;
-pub mod security;
-pub mod smart_contracts;
-pub mod interoperability;
-pub mod analytics;
-pub mod compliance;
-pub mod sharding;
-pub mod energy_monitor;
-pub mod ai_decision;
-pub mod zkp_verification;
-pub mod bleep_connect;
-pub mod consensus;
 pub mod ai_assistant;
+pub mod ai_decision;
+pub mod analytics;
+pub mod bleep_connect;
+pub mod compliance;
+pub mod consensus;
+pub mod energy_monitor;
+pub mod governance;
+pub mod interoperability;
+pub mod security;
+pub mod sharding;
+pub mod smart_contracts;
+pub mod wallet;
+pub mod zkp_verification;
 
 /// Initialize BLEEP AI services
-/// 
+///
 /// This function sets up all AI subsystems:
 /// 1. Feature extraction from on-chain telemetry
 /// 2. Deterministic AI analysis with signed outputs
@@ -113,7 +107,7 @@ pub fn start_ai_services() {
     // - Constraint evaluation rules
     // - Feedback aggregation system
     // - Integration with consensus and healing layers
-    
+
     log::info!("BLEEP AI Services initialized");
     log::info!("  - Feature extraction engine ready");
     log::info!("  - AI decision module (advisory only)");
@@ -124,5 +118,3 @@ pub fn start_ai_services() {
     log::info!("  - Consensus integration ready");
     log::info!("  - Feedback loop monitoring enabled");
 }
-
-

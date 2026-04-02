@@ -29,9 +29,9 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageUpdate {
     /// Contract address (32 bytes).
-    pub contract:  [u8; 32],
+    pub contract: [u8; 32],
     /// Storage key (32 bytes — EVM-compatible slot).
-    pub key:       [u8; 32],
+    pub key: [u8; 32],
     /// Previous value (`None` means the slot was unset).
     pub old_value: Option<[u8; 32]>,
     /// New value (`None` means the slot is being cleared / selfdestruct).
@@ -45,27 +45,27 @@ pub struct BalanceUpdate {
     pub account: [u8; 32],
     /// Signed delta in the chain's base unit.
     /// Positive = credit, negative = debit.
-    pub delta:   i128,
+    pub delta: i128,
 }
 
 /// An event emitted by contract execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmittedEvent {
     /// Emitting contract address.
-    pub contract:   [u8; 32],
+    pub contract: [u8; 32],
     /// Up to 4 indexed topics (32 bytes each — EVM LOG0-4 compatible).
-    pub topics:     Vec<[u8; 32]>,
+    pub topics: Vec<[u8; 32]>,
     /// Non-indexed event data.
-    pub data:       Vec<u8>,
+    pub data: Vec<u8>,
     /// Sequential index within this execution.
-    pub log_index:  u32,
+    pub log_index: u32,
 }
 
 /// A code deployment (new contract or code update).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeDeployment {
     /// Address of the deployed contract.
-    pub address:  [u8; 32],
+    pub address: [u8; 32],
     /// Contract bytecode.
     pub bytecode: Vec<u8>,
     /// SHA-256 of the bytecode.
@@ -75,7 +75,11 @@ pub struct CodeDeployment {
 impl CodeDeployment {
     pub fn new(address: [u8; 32], bytecode: Vec<u8>) -> Self {
         let code_hash = Sha256::digest(&bytecode).into();
-        CodeDeployment { address, bytecode, code_hash }
+        CodeDeployment {
+            address,
+            bytecode,
+            code_hash,
+        }
     }
 }
 
@@ -97,20 +101,20 @@ pub struct NonceUpdate {
 pub struct StateDiff {
     /// Storage slot mutations, keyed by (contract, slot) for deduplication.
     /// Later writes to the same slot override earlier ones.
-    pub storage:   BTreeMap<([u8; 32], [u8; 32]), StorageUpdate>,
+    pub storage: BTreeMap<([u8; 32], [u8; 32]), StorageUpdate>,
 
     /// Account balance changes.
     /// Multiple deltas for the same account are accumulated.
-    pub balances:  BTreeMap<[u8; 32], BalanceUpdate>,
+    pub balances: BTreeMap<[u8; 32], BalanceUpdate>,
 
     /// Events emitted in execution order.
-    pub events:    Vec<EmittedEvent>,
+    pub events: Vec<EmittedEvent>,
 
     /// New or updated contract code.
-    pub code:      Vec<CodeDeployment>,
+    pub code: Vec<CodeDeployment>,
 
     /// Account nonce updates.
-    pub nonces:    BTreeMap<[u8; 32], NonceUpdate>,
+    pub nonces: BTreeMap<[u8; 32], NonceUpdate>,
 
     /// Total gas charged for this diff (in BLEEP gas units).
     pub gas_charged: u64,
@@ -118,19 +122,26 @@ pub struct StateDiff {
 
 impl StateDiff {
     /// Create an empty diff.
-    pub fn empty() -> Self { StateDiff::default() }
+    pub fn empty() -> Self {
+        StateDiff::default()
+    }
 
     /// Write a storage slot. Later writes to the same key override earlier ones.
     pub fn write_storage(
         &mut self,
-        contract:  [u8; 32],
-        key:       [u8; 32],
+        contract: [u8; 32],
+        key: [u8; 32],
         old_value: Option<[u8; 32]>,
         new_value: Option<[u8; 32]>,
     ) {
         self.storage.insert(
             (contract, key),
-            StorageUpdate { contract, key, old_value, new_value },
+            StorageUpdate {
+                contract,
+                key,
+                old_value,
+                new_value,
+            },
         );
     }
 
@@ -143,14 +154,14 @@ impl StateDiff {
     }
 
     /// Emit a contract event.
-    pub fn emit_event(
-        &mut self,
-        contract: [u8; 32],
-        topics:   Vec<[u8; 32]>,
-        data:     Vec<u8>,
-    ) {
+    pub fn emit_event(&mut self, contract: [u8; 32], topics: Vec<[u8; 32]>, data: Vec<u8>) {
         let log_index = self.events.len() as u32;
-        self.events.push(EmittedEvent { contract, topics, data, log_index });
+        self.events.push(EmittedEvent {
+            contract,
+            topics,
+            data,
+            log_index,
+        });
     }
 
     /// Record a code deployment.
@@ -160,11 +171,14 @@ impl StateDiff {
 
     /// Bump a nonce.
     pub fn increment_nonce(&mut self, account: [u8; 32], old_nonce: u64) {
-        self.nonces.insert(account, NonceUpdate {
+        self.nonces.insert(
             account,
-            old_nonce,
-            new_nonce: old_nonce + 1,
-        });
+            NonceUpdate {
+                account,
+                old_nonce,
+                new_nonce: old_nonce + 1,
+            },
+        );
     }
 
     /// Merge another diff into this one (other takes precedence on conflicts).
@@ -206,8 +220,18 @@ impl StateDiff {
         for ((contract, key), update) in &self.storage {
             h.update(contract);
             h.update(key);
-            h.update(update.old_value.as_ref().map_or(&[0u8; 32][..], |v| v.as_slice()));
-            h.update(update.new_value.as_ref().map_or(&[0u8; 32][..], |v| v.as_slice()));
+            h.update(
+                update
+                    .old_value
+                    .as_ref()
+                    .map_or(&[0u8; 32][..], |v| v.as_slice()),
+            );
+            h.update(
+                update
+                    .new_value
+                    .as_ref()
+                    .map_or(&[0u8; 32][..], |v| v.as_slice()),
+            );
         }
 
         // Balance updates (BTreeMap — deterministic order)
@@ -219,7 +243,9 @@ impl StateDiff {
         // Events (in order)
         for ev in &self.events {
             h.update(&ev.contract);
-            for topic in &ev.topics { h.update(topic); }
+            for topic in &ev.topics {
+                h.update(topic);
+            }
             h.update(&ev.data);
             h.update(&ev.log_index.to_le_bytes());
         }
@@ -256,17 +282,17 @@ impl StateDiff {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateTransition {
     /// Which intent produced this transition.
-    pub intent_id:    uuid::Uuid,
+    pub intent_id: uuid::Uuid,
     /// The state mutations.
-    pub diff:         StateDiff,
+    pub diff: StateDiff,
     /// Deterministic hash of `diff` — validators sign this.
-    pub diff_root:    [u8; 32],
+    pub diff_root: [u8; 32],
     /// Block number this transition targets.
     pub block_number: u64,
     /// Unix timestamp.
-    pub timestamp:    u64,
+    pub timestamp: u64,
     /// Whether this transition should be applied (false = dry-run / simulation).
-    pub apply:        bool,
+    pub apply: bool,
 }
 
 impl StateTransition {
@@ -316,7 +342,7 @@ mod tests {
     #[test]
     fn test_balance_update_accumulation() {
         let mut diff = StateDiff::empty();
-        diff.add_balance_update([1u8; 32],  1000);
+        diff.add_balance_update([1u8; 32], 1000);
         diff.add_balance_update([1u8; 32], -400);
         // Should accumulate: 1000 - 400 = 600
         assert_eq!(diff.balances[&[1u8; 32]].delta, 600);

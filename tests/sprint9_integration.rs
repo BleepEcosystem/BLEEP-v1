@@ -17,8 +17,11 @@ mod chaos_integration {
         let _ = engine.run_full_suite(10_000);
         let summary = engine.summary();
         // Most scenarios must pass; only symmetric partition may not achieve liveness
-        assert!(summary.pass_rate_pct >= 80.0,
-            "expected ≥80% pass rate, got {:.1}%", summary.pass_rate_pct);
+        assert!(
+            summary.pass_rate_pct >= 80.0,
+            "expected ≥80% pass rate, got {:.1}%",
+            summary.pass_rate_pct
+        );
     }
 
     #[test]
@@ -37,8 +40,16 @@ mod chaos_integration {
         let mut engine = ChaosEngine::new(7);
         for vid in &["validator-0", "validator-1", "validator-6"] {
             let o = engine.run_scenario(
-                ChaosScenario::DoubleSign { validator_id: vid.to_string() }, 5000);
-            assert!(o.passed, "double-sign by {} must be detected and slashed", vid);
+                ChaosScenario::DoubleSign {
+                    validator_id: vid.to_string(),
+                },
+                5000,
+            );
+            assert!(
+                o.passed,
+                "double-sign by {} must be detected and slashed",
+                vid
+            );
             assert!(o.notes.contains("33%"), "slash must be 33%");
         }
     }
@@ -48,9 +59,16 @@ mod chaos_integration {
         let mut engine = ChaosEngine::new(7);
         for i in 0..5u32 {
             let o = engine.run_scenario(
-                ChaosScenario::TxReplay { tx_id: format!("replay-tx-{}", i) }, 6000);
+                ChaosScenario::TxReplay {
+                    tx_id: format!("replay-tx-{}", i),
+                },
+                6000,
+            );
             assert!(o.passed);
-            assert!(o.violations.is_empty(), "replay must be rejected cleanly, no invariant violations");
+            assert!(
+                o.violations.is_empty(),
+                "replay must be rejected cleanly, no invariant violations"
+            );
         }
     }
 
@@ -71,7 +89,7 @@ mod chaos_integration {
 
 #[cfg(test)]
 mod mpc_ceremony_integration {
-    use bleep_zkp::mpc_ceremony::{MPCCeremony, Participant, CeremonyState, MIN_PARTICIPANTS};
+    use bleep_zkp::mpc_ceremony::{CeremonyState, MPCCeremony, Participant, MIN_PARTICIPANTS};
 
     fn participant(id: &str, seed: u8, ts: u64) -> Participant {
         Participant::new(id, [seed; 32], ts)
@@ -86,14 +104,24 @@ mod mpc_ceremony_integration {
             ("participant-2-anon", 0xA2),
             ("participant-3-anon", 0xA3),
             ("participant-4-anon", 0xA4),
-        ].iter().enumerate() {
-            ceremony.contribute(participant(name, *seed, 1_746_000_000 + i as u64 * 3_600)).unwrap();
+        ]
+        .iter()
+        .enumerate()
+        {
+            ceremony
+                .contribute(participant(name, *seed, 1_746_000_000 + i as u64 * 3_600))
+                .unwrap();
         }
-        let srs = ceremony.finalise("https://ceremony.bleep.network/transcript-v1.json").unwrap();
+        let srs = ceremony
+            .finalise("https://ceremony.bleep.network/transcript-v1.json")
+            .unwrap();
         assert_eq!(srs.participant_count, 5);
         assert_eq!(ceremony.state, CeremonyState::Complete);
         assert_eq!(ceremony.transcript_len(), 5);
-        assert!(srs.g1_powers_len >= 1_000_000, "SRS must cover large circuits");
+        assert!(
+            srs.g1_powers_len >= 1_000_000,
+            "SRS must cover large circuits"
+        );
         assert!(srs.security_claim.contains('5'));
     }
 
@@ -101,10 +129,16 @@ mod mpc_ceremony_integration {
     fn ceremony_transcript_integrity_after_5_participants() {
         let mut ceremony = MPCCeremony::new(1_000_000);
         for i in 0..5u8 {
-            ceremony.contribute(participant(&format!("p{}", i), i * 0x11, i as u64)).unwrap();
+            ceremony
+                .contribute(participant(&format!("p{}", i), i * 0x11, i as u64))
+                .unwrap();
         }
         let result = ceremony.verify_transcript();
-        assert!(result.valid, "transcript must be valid after 5 participants: {:?}", result.error);
+        assert!(
+            result.valid,
+            "transcript must be valid after 5 participants: {:?}",
+            result.error
+        );
         assert_eq!(result.entries_verified, 5);
     }
 
@@ -112,10 +146,15 @@ mod mpc_ceremony_integration {
     fn ceremony_requires_at_least_min_participants() {
         let mut ceremony = MPCCeremony::new(1_000_000);
         for i in 0..(MIN_PARTICIPANTS - 1) {
-            ceremony.contribute(participant(&format!("p{}", i), i as u8, i as u64)).unwrap();
+            ceremony
+                .contribute(participant(&format!("p{}", i), i as u8, i as u64))
+                .unwrap();
         }
-        assert!(ceremony.finalise("https://example.com").is_err(),
-            "must reject finalisation with fewer than {} participants", MIN_PARTICIPANTS);
+        assert!(
+            ceremony.finalise("https://example.com").is_err(),
+            "must reject finalisation with fewer than {} participants",
+            MIN_PARTICIPANTS
+        );
     }
 }
 
@@ -123,7 +162,7 @@ mod mpc_ceremony_integration {
 
 #[cfg(test)]
 mod layer3_bridge_integration {
-    use bleep_interop::layer3_bridge::{Layer3Bridge, Chain, L3State, L3_BATCH_SIZE};
+    use bleep_interop::layer3_bridge::{Chain, L3State, Layer3Bridge, L3_BATCH_SIZE};
     use bleep_interop::nullifier_store::GlobalNullifierSet;
 
     #[test]
@@ -132,10 +171,13 @@ mod layer3_bridge_integration {
         let mut ids = Vec::new();
         for i in 0..L3_BATCH_SIZE {
             let id = bridge.initiate(
-                Chain::Bleep, Chain::EthereumSepolia,
-                &format!("bleep:alice{}", i), &format!("0xBob{:04x}", i),
+                Chain::Bleep,
+                Chain::EthereumSepolia,
+                &format!("bleep:alice{}", i),
+                &format!("0xBob{:04x}", i),
                 (i as u128 + 1) * 1_000_000,
-                "BLEEP", i as u64 + 1,
+                "BLEEP",
+                i as u64 + 1,
             );
             ids.push(id);
         }
@@ -165,7 +207,11 @@ mod layer3_bridge_integration {
 
         // Second spend of any fails
         for n in &nullifiers {
-            assert!(ns.spend(*n).is_err(), "double spend of {:?} must be rejected", n);
+            assert!(
+                ns.spend(*n).is_err(),
+                "double spend of {:?} must be rejected",
+                n
+            );
         }
     }
 
@@ -175,9 +221,13 @@ mod layer3_bridge_integration {
         let mut ns = GlobalNullifierSet::new();
 
         let id = bridge.initiate(
-            Chain::Bleep, Chain::EthereumSepolia,
-            "bleep:testnet:alice", "0xAlice",
-            5_000_000_000, "BLEEP", 1,
+            Chain::Bleep,
+            Chain::EthereumSepolia,
+            "bleep:testnet:alice",
+            "0xAlice",
+            5_000_000_000,
+            "BLEEP",
+            1,
         );
 
         let proof = bridge.flush_batch([0x11; 32], [0x22; 32]).unwrap();
@@ -192,7 +242,10 @@ mod layer3_bridge_integration {
 
         // Second submission attempt: nullifier already spent — must be rejected
         let err = ns.spend(nullifier);
-        assert!(err.is_err(), "replay must be blocked by nullifier store (SA-C1 fix)");
+        assert!(
+            err.is_err(),
+            "replay must be blocked by nullifier store (SA-C1 fix)"
+        );
     }
 }
 
@@ -201,8 +254,7 @@ mod layer3_bridge_integration {
 #[cfg(test)]
 mod governance_live_integration {
     use bleep_governance::live_governance::{
-        LiveGovernanceEngine, GovernanceConfig, GovernableParam,
-        ProposalState, Vote,
+        GovernableParam, GovernanceConfig, LiveGovernanceEngine, ProposalState, Vote,
     };
 
     fn engine() -> LiveGovernanceEngine {
@@ -217,24 +269,36 @@ mod governance_live_integration {
         let voting_period = gov.config.voting_period_blocks;
 
         // Submit: reduce max inflation from 5% to 4%
-        let pid = gov.submit(
-            "bleep:testnet:foundation",
-            "Reduce max inflation to 4% (400 bps)",
-            "Proposal to lower the epoch inflation cap from 500 to 400 bps.",
-            Some(GovernableParam::MaxInflationBps(400)),
-            min_deposit,
-        ).unwrap();
+        let pid = gov
+            .submit(
+                "bleep:testnet:foundation",
+                "Reduce max inflation to 4% (400 bps)",
+                "Proposal to lower the epoch inflation cap from 500 to 400 bps.",
+                Some(GovernableParam::MaxInflationBps(400)),
+                min_deposit,
+            )
+            .unwrap();
 
         // 7 validators each with 10% of total stake vote YES
         let stake_per_validator = total_staked / 10;
         for i in 0..7 {
-            gov.vote(pid, &format!("validator-{}", i), Vote::Yes, stake_per_validator).unwrap();
+            gov.vote(
+                pid,
+                &format!("validator-{}", i),
+                Vote::Yes,
+                stake_per_validator,
+            )
+            .unwrap();
         }
 
         gov.advance_block(voting_period + 1);
 
         let state = gov.tally(pid).unwrap();
-        assert_eq!(state, ProposalState::Passed, "7 validators with 70% stake must pass proposal");
+        assert_eq!(
+            state,
+            ProposalState::Passed,
+            "7 validators with 70% stake must pass proposal"
+        );
 
         let result = gov.execute(pid).unwrap();
         assert_eq!(gov.proposal(pid).unwrap().state, ProposalState::Executed);
@@ -260,17 +324,28 @@ mod governance_live_integration {
             Some(GovernableParam::MaxInflationBps(600)),
             gov.config.min_deposit,
         );
-        assert!(err.is_err(), "6% inflation must be rejected by constitutional guard");
+        assert!(
+            err.is_err(),
+            "6% inflation must be rejected by constitutional guard"
+        );
     }
 
     #[test]
     fn veto_mechanism_blocks_controversial_proposals() {
         let mut gov = engine();
         let total = gov.config.total_staked;
-        let pid = gov.submit("alice", "Controversial change", "...", None, gov.config.min_deposit).unwrap();
+        let pid = gov
+            .submit(
+                "alice",
+                "Controversial change",
+                "...",
+                None,
+                gov.config.min_deposit,
+            )
+            .unwrap();
 
         // 40% of stake veto — exceeds 33.33% veto threshold
-        gov.vote(pid, "v0", Vote::Yes,  total / 5).unwrap(); // 20% yes
+        gov.vote(pid, "v0", Vote::Yes, total / 5).unwrap(); // 20% yes
         gov.vote(pid, "v1", Vote::Veto, total * 2 / 5).unwrap(); // 40% veto
 
         gov.advance_block(gov.config.voting_period_blocks + 1);
@@ -281,16 +356,21 @@ mod governance_live_integration {
     fn first_testnet_proposal_executes_fee_burn_change() {
         // Mirror the production Sprint 9 testnet proposal-001
         let mut gov = engine();
-        let pid = gov.submit(
-            "bleep:testnet:foundation",
-            "Reduce fee burn to 20% (proposal-testnet-001)",
-            "Lower the base fee burn from 25% to 20% to increase validator rewards.",
-            Some(GovernableParam::FeeBurnBps(2_000)),
-            gov.config.min_deposit,
-        ).unwrap();
+        let pid = gov
+            .submit(
+                "bleep:testnet:foundation",
+                "Reduce fee burn to 20% (proposal-testnet-001)",
+                "Lower the base fee burn from 25% to 20% to increase validator rewards.",
+                Some(GovernableParam::FeeBurnBps(2_000)),
+                gov.config.min_deposit,
+            )
+            .unwrap();
 
         let stake = gov.config.total_staked / 10;
-        for i in 0..7 { gov.vote(pid, &format!("validator-{}", i), Vote::Yes, stake).unwrap(); }
+        for i in 0..7 {
+            gov.vote(pid, &format!("validator-{}", i), Vote::Yes, stake)
+                .unwrap();
+        }
         gov.advance_block(gov.config.voting_period_blocks + 1);
         assert_eq!(gov.tally(pid).unwrap(), ProposalState::Passed);
         let r = gov.execute(pid).unwrap();
@@ -303,7 +383,7 @@ mod governance_live_integration {
 #[cfg(test)]
 mod shard_stress_integration {
     use bleep_consensus::shard_coordinator::{
-        ShardCoordinator, NUM_SHARDS, CROSS_SHARD_CONCURRENT_TARGET, STRESS_EPOCH_COUNT,
+        ShardCoordinator, CROSS_SHARD_CONCURRENT_TARGET, NUM_SHARDS, STRESS_EPOCH_COUNT,
     };
 
     #[test]
@@ -311,12 +391,21 @@ mod shard_stress_integration {
         let mut coord = ShardCoordinator::new();
         let result = coord.run_stress_test();
 
-        assert_eq!(result.total_epochs, STRESS_EPOCH_COUNT,
-            "must complete all {} epochs", STRESS_EPOCH_COUNT);
-        assert!(result.total_xs_txs >= CROSS_SHARD_CONCURRENT_TARGET as u64,
-            "must process at least {} cross-shard txs", CROSS_SHARD_CONCURRENT_TARGET);
-        assert_eq!(result.committed_xs + result.rolledback_xs, result.total_xs_txs,
-            "every XS tx must be either committed or rolled back");
+        assert_eq!(
+            result.total_epochs, STRESS_EPOCH_COUNT,
+            "must complete all {} epochs",
+            STRESS_EPOCH_COUNT
+        );
+        assert!(
+            result.total_xs_txs >= CROSS_SHARD_CONCURRENT_TARGET as u64,
+            "must process at least {} cross-shard txs",
+            CROSS_SHARD_CONCURRENT_TARGET
+        );
+        assert_eq!(
+            result.committed_xs + result.rolledback_xs,
+            result.total_xs_txs,
+            "every XS tx must be either committed or rolled back"
+        );
         assert!(result.total_txs > 0, "total transactions must be non-zero");
     }
 
@@ -325,8 +414,11 @@ mod shard_stress_integration {
         let mut coord = ShardCoordinator::new();
         coord.tick_epoch();
         for shard in coord.shards.values() {
-            assert!(shard.block_height > 0,
-                "shard {:?} must have produced blocks", shard.shard_id);
+            assert!(
+                shard.block_height > 0,
+                "shard {:?} must have produced blocks",
+                shard.shard_id
+            );
             assert!(shard.txs_processed > 0);
         }
     }
@@ -342,8 +434,12 @@ mod shard_stress_integration {
             assigned.insert(id.0);
         }
         // With 1000 addresses we should cover all 10 shards
-        assert_eq!(assigned.len(), NUM_SHARDS,
-            "1000 addresses should distribute across all {} shards", NUM_SHARDS);
+        assert_eq!(
+            assigned.len(),
+            NUM_SHARDS,
+            "1000 addresses should distribute across all {} shards",
+            NUM_SHARDS
+        );
     }
 }
 
@@ -352,15 +448,19 @@ mod shard_stress_integration {
 #[cfg(test)]
 mod performance_integration {
     use bleep_consensus::performance_bench::{
-        PerformanceBenchmark, NUM_SHARDS, TARGET_TPS, MAX_TXS_PER_BLOCK,
+        PerformanceBenchmark, MAX_TXS_PER_BLOCK, NUM_SHARDS, TARGET_TPS,
     };
 
     #[test]
     fn theoretical_max_tps_exceeds_10k_target() {
         // 10 shards × 4096 tx/block ÷ 3s = 13,653 TPS theoretical maximum
         let theoretical = NUM_SHARDS as u64 * MAX_TXS_PER_BLOCK as u64 / 3;
-        assert!(theoretical >= TARGET_TPS,
-            "theoretical max {}tps must exceed {}tps target", theoretical, TARGET_TPS);
+        assert!(
+            theoretical >= TARGET_TPS,
+            "theoretical max {}tps must exceed {}tps target",
+            theoretical,
+            TARGET_TPS
+        );
     }
 
     #[test]
@@ -380,7 +480,10 @@ mod performance_integration {
         let result = bench.run_simulated();
         let summary = result.summary();
         assert!(summary.contains("avg_tps="), "summary must contain avg_tps");
-        assert!(summary.contains("target_met="), "summary must contain target_met");
+        assert!(
+            summary.contains("target_met="),
+            "summary must contain target_met"
+        );
         assert!(summary.contains("blocks="), "summary must contain blocks");
     }
 }
@@ -389,13 +492,16 @@ mod performance_integration {
 
 #[cfg(test)]
 mod security_audit_integration {
-    use bleep_consensus::security_audit::{AuditReport, Severity, FindingStatus};
+    use bleep_consensus::security_audit::{AuditReport, FindingStatus, Severity};
 
     #[test]
     fn sprint9_audit_complete_14_findings() {
         let report = AuditReport::sprint9_report();
         let summary = report.summary();
-        assert_eq!(summary.total, 14, "Sprint 9 audit must have exactly 14 findings");
+        assert_eq!(
+            summary.total, 14,
+            "Sprint 9 audit must have exactly 14 findings"
+        );
         assert_eq!(summary.critical, 2);
         assert_eq!(summary.high, 3);
         assert_eq!(summary.medium, 4);
@@ -406,20 +512,40 @@ mod security_audit_integration {
     #[test]
     fn all_critical_and_high_findings_resolved_before_mainnet() {
         let report = AuditReport::sprint9_report();
-        let blocking: Vec<_> = report.findings.iter()
+        let blocking: Vec<_> = report
+            .findings
+            .iter()
             .filter(|f| matches!(f.severity, Severity::Critical | Severity::High))
             .filter(|f| !matches!(f.status, FindingStatus::Resolved { .. }))
             .collect();
-        assert!(blocking.is_empty(),
-            "blocking unresolved findings: {:?}", blocking.iter().map(|f| &f.id).collect::<Vec<_>>());
+        assert!(
+            blocking.is_empty(),
+            "blocking unresolved findings: {:?}",
+            blocking.iter().map(|f| &f.id).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn audit_report_crate_coverage_includes_all_sprint9_scope() {
         let report = AuditReport::sprint9_report();
-        let crates: Vec<&str> = report.findings.iter().map(|f| f.crate_name.as_str()).collect();
-        for expected in &["bleep-crypto", "bleep-consensus", "bleep-state", "bleep-interop", "bleep-auth", "bleep-rpc"] {
-            assert!(crates.contains(expected), "audit must cover crate {}", expected);
+        let crates: Vec<&str> = report
+            .findings
+            .iter()
+            .map(|f| f.crate_name.as_str())
+            .collect();
+        for expected in &[
+            "bleep-crypto",
+            "bleep-consensus",
+            "bleep-state",
+            "bleep-interop",
+            "bleep-auth",
+            "bleep-rpc",
+        ] {
+            assert!(
+                crates.contains(expected),
+                "audit must cover crate {}",
+                expected
+            );
         }
     }
 

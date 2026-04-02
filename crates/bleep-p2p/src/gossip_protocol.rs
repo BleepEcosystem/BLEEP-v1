@@ -61,13 +61,16 @@ pub struct GossipProtocol {
 }
 
 impl GossipProtocol {
-    pub fn new(peer_manager: Arc<PeerManager>, message_protocol: Arc<MessageProtocol>) -> Arc<Self> {
+    pub fn new(
+        peer_manager: Arc<PeerManager>,
+        message_protocol: Arc<MessageProtocol>,
+    ) -> Arc<Self> {
         Arc::new(GossipProtocol {
             peer_manager,
             message_protocol,
-            seen: Arc::new(Mutex::new(LruCache::new(
-                unsafe { std::num::NonZeroUsize::new_unchecked(SEEN_CACHE_CAPACITY) },
-            ))),
+            seen: Arc::new(Mutex::new(LruCache::new(unsafe {
+                std::num::NonZeroUsize::new_unchecked(SEEN_CACHE_CAPACITY)
+            }))),
             pending: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -143,17 +146,17 @@ impl GossipProtocol {
                 None => continue,
             };
             // Re-wrap as a Gossip envelope — the payload stays encrypted.
-            let gossip_msg = match self.message_protocol.seal_message(
-                peer_id,
-                MessageType::Gossip,
-                &msg.payload,
-            ) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(peer = %peer_id, error = %e, "Gossip: seal failed, skipping");
-                    continue;
-                }
-            };
+            let gossip_msg =
+                match self
+                    .message_protocol
+                    .seal_message(peer_id, MessageType::Gossip, &msg.payload)
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(peer = %peer_id, error = %e, "Gossip: seal failed, skipping");
+                        continue;
+                    }
+                };
             if let Err(e) = self.message_protocol.send_message(addr, &gossip_msg).await {
                 warn!(peer = %peer_id, error = %e, "Gossip: send failed");
                 self.peer_manager.record_failure(peer_id);
@@ -185,7 +188,7 @@ mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
     use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair};
-    use crate::types::{MessageType, unix_now};
+    use crate::types::{unix_now, MessageType};
 
     fn make_gossip() -> Arc<GossipProtocol> {
         let local_id = NodeId::random();

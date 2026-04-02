@@ -32,24 +32,24 @@ use sha3::{Digest, Sha3_256};
 /// Maximum entries kept in the in-memory LRU cache.
 pub const AUDIT_CACHE_SIZE: usize = 10_000;
 
-const CF_LOG:  &str = "audit_log";
+const CF_LOG: &str = "audit_log";
 const CF_META: &str = "audit_meta";
-const KEY_NEXT_SEQ:  &[u8] = b"next_seq";
+const KEY_NEXT_SEQ: &[u8] = b"next_seq";
 const KEY_CHAIN_TIP: &[u8] = b"chain_tip";
 
 // ── Entry type ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredAuditEntry {
-    pub sequence:     u64,
+    pub sequence: u64,
     /// SHA3-256( prev_hash || seq_le8 || actor || action || result || detail )
-    pub entry_hash:   [u8; 32],
-    pub prev_hash:    [u8; 32],
+    pub entry_hash: [u8; 32],
+    pub prev_hash: [u8; 32],
     pub timestamp_ms: u64,
-    pub actor:        String,
-    pub action:       String,
-    pub result:       String,
-    pub detail:       String,
+    pub actor: String,
+    pub action: String,
+    pub result: String,
+    pub detail: String,
 }
 
 impl StoredAuditEntry {
@@ -85,10 +85,10 @@ impl StoredAuditEntry {
 
 /// RocksDB-backed, Merkle-chained append-only audit log.
 pub struct AuditLogStore {
-    db:        Arc<DB>,
+    db: Arc<DB>,
     /// In-memory LRU cache of the most recent AUDIT_CACHE_SIZE entries.
-    cache:     BTreeMap<u64, StoredAuditEntry>,
-    next_seq:  u64,
+    cache: BTreeMap<u64, StoredAuditEntry>,
+    next_seq: u64,
     chain_tip: [u8; 32],
 }
 
@@ -106,7 +106,7 @@ impl AuditLogStore {
         opts.create_missing_column_families(true);
 
         let cfs = vec![
-            ColumnFamilyDescriptor::new(CF_LOG,  Options::default()),
+            ColumnFamilyDescriptor::new(CF_LOG, Options::default()),
             ColumnFamilyDescriptor::new(CF_META, Options::default()),
         ];
 
@@ -126,7 +126,12 @@ impl AuditLogStore {
             cache.len()
         );
 
-        Ok(Self { db, cache, next_seq, chain_tip })
+        Ok(Self {
+            db,
+            cache,
+            next_seq,
+            chain_tip,
+        })
     }
 
     /// Open an in-memory (temp-dir) audit log.  Used in tests and devnet.
@@ -148,13 +153,13 @@ impl AuditLogStore {
     /// durable write succeeds, so a crash leaves the DB in a consistent state.
     pub fn append(
         &mut self,
-        actor:        &str,
-        action:       &str,
-        result:       &str,
-        detail:       &str,
+        actor: &str,
+        action: &str,
+        result: &str,
+        detail: &str,
         timestamp_ms: u64,
     ) -> u64 {
-        let seq       = self.next_seq;
+        let seq = self.next_seq;
         let prev_hash = self.chain_tip;
 
         let entry_hash = compute_entry_hash(&prev_hash, seq, actor, action, result, detail);
@@ -164,7 +169,7 @@ impl AuditLogStore {
             entry_hash,
             prev_hash,
             timestamp_ms,
-            actor:  actor.into(),
+            actor: actor.into(),
             action: action.into(),
             result: result.into(),
             detail: detail.into(),
@@ -178,7 +183,7 @@ impl AuditLogStore {
 
         // Update in-memory state only after successful (or best-effort) persist.
         self.chain_tip = entry_hash;
-        self.next_seq  = seq + 1;
+        self.next_seq = seq + 1;
 
         // LRU eviction: drop oldest if over limit.
         if self.cache.len() >= AUDIT_CACHE_SIZE {
@@ -234,22 +239,25 @@ impl AuditLogStore {
         true
     }
 
-    pub fn entry_count(&self) -> u64 { self.next_seq }
-    pub fn chain_tip(&self)   -> [u8; 32] { self.chain_tip }
+    pub fn entry_count(&self) -> u64 {
+        self.next_seq
+    }
+    pub fn chain_tip(&self) -> [u8; 32] {
+        self.chain_tip
+    }
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
     fn persist_entry(&self, entry: &StoredAuditEntry) -> Result<(), String> {
-        let log_cf  = self.cf(CF_LOG)?;
+        let log_cf = self.cf(CF_LOG)?;
         let meta_cf = self.cf(CF_META)?;
 
-        let key   = entry.sequence.to_be_bytes();
-        let value = bincode::serialize(entry)
-            .map_err(|e| format!("bincode serialise: {}", e))?;
+        let key = entry.sequence.to_be_bytes();
+        let value = bincode::serialize(entry).map_err(|e| format!("bincode serialise: {}", e))?;
 
         let mut batch = WriteBatch::default();
-        batch.put_cf(&log_cf,  key, value);
-        batch.put_cf(&meta_cf, KEY_NEXT_SEQ,  (entry.sequence + 1).to_be_bytes());
+        batch.put_cf(&log_cf, key, value);
+        batch.put_cf(&meta_cf, KEY_NEXT_SEQ, (entry.sequence + 1).to_be_bytes());
         batch.put_cf(&meta_cf, KEY_CHAIN_TIP, entry.entry_hash);
 
         let mut wo = rocksdb::WriteOptions::default();
@@ -275,9 +283,7 @@ impl AuditLogStore {
             .get_cf(&meta_cf, KEY_NEXT_SEQ)
             .map_err(|e| e.to_string())?
         {
-            Some(v) if v.len() == 8 => {
-                u64::from_be_bytes(v.as_slice().try_into().unwrap())
-            }
+            Some(v) if v.len() == 8 => u64::from_be_bytes(v.as_slice().try_into().unwrap()),
             _ => 0,
         };
 
@@ -313,7 +319,9 @@ impl AuditLogStore {
         for item in iter {
             let (_, value) = item.map_err(|e| e.to_string())?;
             match bincode::deserialize::<StoredAuditEntry>(&value) {
-                Ok(entry) => { cache.insert(entry.sequence, entry); }
+                Ok(entry) => {
+                    cache.insert(entry.sequence, entry);
+                }
                 Err(e) => {
                     log::warn!("[AuditLogStore] Skipping undeserializable entry: {}", e);
                 }
@@ -325,7 +333,9 @@ impl AuditLogStore {
 }
 
 impl Default for AuditLogStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Cryptographic helpers ─────────────────────────────────────────────────────
@@ -333,11 +343,11 @@ impl Default for AuditLogStore {
 /// SHA3-256( prev_hash || seq_le8 || actor || action || result || detail )
 fn compute_entry_hash(
     prev_hash: &[u8; 32],
-    seq:       u64,
-    actor:     &str,
-    action:    &str,
-    result:    &str,
-    detail:    &str,
+    seq: u64,
+    actor: &str,
+    action: &str,
+    result: &str,
+    detail: &str,
 ) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(prev_hash);
@@ -358,10 +368,10 @@ fn hex_encode(b: &[u8]) -> String {
 
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\")
-     .replace('"', "\\\"")
-     .replace('\n', "\\n")
-     .replace('\r', "\\r")
-     .replace('\t', "\\t")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 fn rand_suffix() -> u64 {
@@ -385,11 +395,26 @@ mod tests {
     #[test]
     fn append_and_verify_chain() {
         let mut s = store();
-        s.append("validator-0", "stake",  "ok", "staked 10000 BLEEP", 1_000_000);
-        s.append("validator-1", "vote",   "ok", "voted yes on proposal 1", 1_000_001);
-        s.append("alice",       "faucet", "ok", "drip 1000 BLEEP", 1_000_002);
+        s.append(
+            "validator-0",
+            "stake",
+            "ok",
+            "staked 10000 BLEEP",
+            1_000_000,
+        );
+        s.append(
+            "validator-1",
+            "vote",
+            "ok",
+            "voted yes on proposal 1",
+            1_000_001,
+        );
+        s.append("alice", "faucet", "ok", "drip 1000 BLEEP", 1_000_002);
         assert_eq!(s.entry_count(), 3);
-        assert!(s.verify_chain(), "chain integrity must hold after 3 appends");
+        assert!(
+            s.verify_chain(),
+            "chain integrity must hold after 3 appends"
+        );
     }
 
     #[test]
@@ -420,7 +445,7 @@ mod tests {
         {
             let mut s = AuditLogStore::open(&path).unwrap();
             s.append("alice", "tx", "ok", "transfer 100", 1);
-            s.append("bob",   "stake", "ok", "staked 1000", 2);
+            s.append("bob", "stake", "ok", "staked 1000", 2);
             assert_eq!(s.entry_count(), 2);
         }
         // Re-open — should restore next_seq = 2 and chain_tip from disk.
@@ -439,11 +464,11 @@ mod tests {
     fn tampered_entry_fails_verify() {
         let mut s = store();
         s.append("alice", "login", "ok", "details", 1_000);
-        s.append("bob",   "vote",  "ok", "details", 2_000);
+        s.append("bob", "vote", "ok", "details", 2_000);
         // Tamper with the first entry's stored hash in the cache.
         if let Some(entry) = s.cache.get_mut(&0) {
             entry.entry_hash[0] ^= 0xFF;
         }
         assert!(!s.verify_chain(), "tampered chain must fail verification");
     }
-            } 
+}

@@ -35,14 +35,14 @@ const BRIDGE_INTERVAL_MS: u64 = 500; // 2× per second
 /// Run the Mempool → TransactionPool bridge forever.
 ///
 /// Call this inside `tokio::spawn`. It runs until the process exits.
-pub async fn run_mempool_bridge(
-    mempool:  Arc<Mempool>,
-    tx_pool:  Arc<TransactionPool>,
-) {
+pub async fn run_mempool_bridge(mempool: Arc<Mempool>, tx_pool: Arc<TransactionPool>) {
     let mut seen: HashSet<String> = HashSet::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(BRIDGE_INTERVAL_MS));
 
-    info!("[MempoolBridge] Started — draining every {}ms", BRIDGE_INTERVAL_MS);
+    info!(
+        "[MempoolBridge] Started — draining every {}ms",
+        BRIDGE_INTERVAL_MS
+    );
 
     loop {
         ticker.tick().await;
@@ -56,8 +56,10 @@ pub async fn run_mempool_bridge(
         let mut forwarded = 0usize;
 
         for tx in pending {
-            let tx_id = format!("{}:{}:{}:{}",
-                tx.sender, tx.receiver, tx.amount, tx.timestamp);
+            let tx_id = format!(
+                "{}:{}:{}:{}",
+                tx.sender, tx.receiver, tx.amount, tx.timestamp
+            );
 
             // Deduplication: skip if already seen
             if seen.contains(&tx_id) {
@@ -77,7 +79,10 @@ pub async fn run_mempool_bridge(
         }
 
         if forwarded > 0 {
-            debug!("[MempoolBridge] Forwarded {} txs to TransactionPool", forwarded);
+            debug!(
+                "[MempoolBridge] Forwarded {} txs to TransactionPool",
+                forwarded
+            );
         }
 
         // Prune seen set on overflow to prevent unbounded growth

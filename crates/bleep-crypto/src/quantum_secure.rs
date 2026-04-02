@@ -1,13 +1,13 @@
 // Real quantum-safe encryption and signature using pqcrypto-kyber and pqcrypto
+use aes_gcm::aead::Aead;
+use aes_gcm::KeyInit;
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use pqcrypto_kyber::kyber1024;
+use pqcrypto_sphincsplus::sphincssha2128fsimple;
 use pqcrypto_traits::kem::SharedSecret;
 use pqcrypto_traits::sign::DetachedSignature;
-use pqcrypto_sphincsplus::sphincssha2128fsimple;
-use aes_gcm::KeyInit;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use aes_gcm::{Aes256Gcm, Key, Nonce};
-use aes_gcm::aead::Aead;
 
 pub struct KyberAESHybrid {
     pub public_key: kyber1024::PublicKey,
@@ -17,7 +17,10 @@ pub struct KyberAESHybrid {
 impl KyberAESHybrid {
     pub fn keygen() -> Self {
         let (pk, sk) = kyber1024::keypair();
-        KyberAESHybrid { public_key: pk, secret_key: sk }
+        KyberAESHybrid {
+            public_key: pk,
+            secret_key: sk,
+        }
     }
 
     pub fn encapsulate(&self) -> (Vec<u8>, kyber1024::Ciphertext) {
@@ -43,12 +46,19 @@ impl KyberAESHybrid {
     }
 
     /// Decrypt data using Kyber shared secret and AES-GCM
-    pub fn decrypt(&self, ciphertext: &[u8], ct: &kyber1024::Ciphertext, nonce_bytes: &[u8]) -> Vec<u8> {
+    pub fn decrypt(
+        &self,
+        ciphertext: &[u8],
+        ct: &kyber1024::Ciphertext,
+        nonce_bytes: &[u8],
+    ) -> Vec<u8> {
         let ss = self.decapsulate(ct);
         let key = Key::<Aes256Gcm>::from_slice(&ss[..32]);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
-        cipher.decrypt(nonce, ciphertext).expect("decryption failure!")
+        cipher
+            .decrypt(nonce, ciphertext)
+            .expect("decryption failure!")
     }
 }
 
@@ -60,7 +70,10 @@ pub struct QuantumSecure {
 impl QuantumSecure {
     pub fn keygen() -> Self {
         let (pk, sk) = sphincssha2128fsimple::keypair();
-        QuantumSecure { public_key: pk, secret_key: sk }
+        QuantumSecure {
+            public_key: pk,
+            secret_key: sk,
+        }
     }
 
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
@@ -73,6 +86,7 @@ impl QuantumSecure {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        sphincssha2128fsimple::verify_detached_signature(&detached_sig, message, &self.public_key).is_ok()
+        sphincssha2128fsimple::verify_detached_signature(&detached_sig, message, &self.public_key)
+            .is_ok()
     }
-                                           }
+}

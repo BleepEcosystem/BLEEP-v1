@@ -1,10 +1,16 @@
 // Stubs for missing modules and functions
 #[allow(dead_code)]
-fn zero_knowledge_verify(_sender: &str, _identity_proof: &[u8]) -> bool { true }
+fn zero_knowledge_verify(_sender: &str, _identity_proof: &[u8]) -> bool {
+    true
+}
 #[allow(dead_code)]
-fn detect_fraud<T>(_transaction: &T) -> bool { false }
+fn detect_fraud<T>(_transaction: &T) -> bool {
+    false
+}
 #[allow(dead_code)]
-fn multisig_approve(_sender: &str, _approvers: &[&str]) -> bool { true }
+fn multisig_approve(_sender: &str, _approvers: &[&str]) -> bool {
+    true
+}
 #[allow(dead_code)]
 fn execute_smart_recovery(_sender: &str, _transaction: &Transaction) {}
 #[allow(dead_code)]
@@ -56,7 +62,11 @@ impl AntiAssetLoss {
     }
 
     /// Requests asset recovery with identity verification
-    pub fn request_recovery(&mut self, sender: &str, identity_proof: &[u8]) -> Result<String, String> {
+    pub fn request_recovery(
+        &mut self,
+        sender: &str,
+        identity_proof: &[u8],
+    ) -> Result<String, String> {
         let current_time = chrono::Utc::now().timestamp() as u64;
 
         if let Some(record) = self.lost_assets.get_mut(sender) {
@@ -82,7 +92,11 @@ impl AntiAssetLoss {
     }
 
     /// Executes the recovery process with AI-Powered Fraud Detection & Multi-Sig Approval
-    pub fn execute_recovery(&mut self, sender: &str, approvers: Vec<&str>) -> Result<String, String> {
+    pub fn execute_recovery(
+        &mut self,
+        sender: &str,
+        approvers: Vec<&str>,
+    ) -> Result<String, String> {
         if let Some(record) = self.lost_assets.get_mut(sender) {
             if !record.recovery_requested {
                 return Err("⚠️ Recovery not requested yet.".to_string());
@@ -90,7 +104,10 @@ impl AntiAssetLoss {
 
             // AI-Powered Fraud Detection (Detect suspicious activities)
             if detect_fraud(&record.transaction) {
-                return Err("🚨 AI Fraud Detection Alert: Potential fraud detected. Recovery halted.".to_string());
+                return Err(
+                    "🚨 AI Fraud Detection Alert: Potential fraud detected. Recovery halted."
+                        .to_string(),
+                );
             }
 
             // Enforce Multi-Signature Approval from Validators

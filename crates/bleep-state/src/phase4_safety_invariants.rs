@@ -10,50 +10,50 @@
 // 6. Byzantine fault tolerance maintained
 // 7. Fork prevention (all nodes reach identical state)
 
-use crate::shard_registry::ShardId;
-use crate::shard_checkpoint::{ShardCheckpoint, CheckpointStatus};
-use crate::shard_fault_detection::{FaultEvidence, FaultSeverity};
 use crate::phase4_recovery_orchestrator::RecoveryStage;
+use crate::shard_checkpoint::{CheckpointStatus, ShardCheckpoint};
+use crate::shard_fault_detection::{FaultEvidence, FaultSeverity};
+use crate::shard_registry::ShardId;
 
-use serde::{Serialize, Deserialize};
 use log::{error, warn};
+use serde::{Deserialize, Serialize};
 
 /// Safety invariant violation result
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvariantViolation {
     /// Global rollback attempted
     GlobalRollbackAttempted,
-    
+
     /// Cross-shard state corruption detected
     CrossShardCorruption,
-    
+
     /// Silent recovery attempted (no audit trail)
     SilentRecovery,
-    
+
     /// Shard resurrection without verification
     UnverifiedReintegration,
-    
+
     /// Determinism violation (different nodes reached different states)
     DeterminismViolation,
-    
+
     /// Byzantine threshold exceeded
     ByzantineThresholdExceeded,
-    
+
     /// Fork detected
     ForkDetected,
-    
+
     /// Invalid state transition
     InvalidStateTransition,
 }
 
 /// Safety invariant checker
-/// 
+///
 /// SAFETY: All critical invariants are verified before state changes.
 pub struct SafetyInvariantChecker;
 
 impl SafetyInvariantChecker {
     /// Verify shard-level rollback is valid (not global)
-    /// 
+    ///
     /// SAFETY: Ensures only shard state is rolled back, not global chain.
     pub fn verify_shard_rollback_only(
         _rolled_back_shard: ShardId,
@@ -62,29 +62,31 @@ impl SafetyInvariantChecker {
         if !other_shards_unaffected {
             return Err(InvariantViolation::GlobalRollbackAttempted);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify checkpoint state integrity
-    /// 
+    ///
     /// SAFETY: Ensures checkpoint has required signatures and is finalized.
-    pub fn verify_checkpoint_integrity(checkpoint: &ShardCheckpoint) -> Result<(), InvariantViolation> {
+    pub fn verify_checkpoint_integrity(
+        checkpoint: &ShardCheckpoint,
+    ) -> Result<(), InvariantViolation> {
         // Must be finalized
         if checkpoint.status != CheckpointStatus::Finalized {
             return Err(InvariantViolation::InvalidStateTransition);
         }
-        
+
         // Must have quorum signatures
         if checkpoint.validator_signatures.is_empty() {
             return Err(InvariantViolation::SilentRecovery);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify rollback is bounded
-    /// 
+    ///
     /// SAFETY: Rollback cannot exceed maximum window to prevent historical attacks.
     pub fn verify_rollback_bounded(
         current_height: u64,
@@ -92,16 +94,16 @@ impl SafetyInvariantChecker {
         max_rollback_depth: u64,
     ) -> Result<(), InvariantViolation> {
         let rollback_distance = current_height.saturating_sub(target_height);
-        
+
         if rollback_distance > max_rollback_depth {
             return Err(InvariantViolation::InvalidStateTransition);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify cross-shard transaction abort is complete
-    /// 
+    ///
     /// SAFETY: All cross-shard transactions involving rolled-back shard are aborted.
     pub fn verify_crossshard_abort_complete(
         involved_shards: &[ShardId],
@@ -116,23 +118,23 @@ impl SafetyInvariantChecker {
                 return Err(InvariantViolation::CrossShardCorruption);
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify fault evidence is complete
-    /// 
+    ///
     /// SAFETY: All fault evidence has cryptographic proof.
     pub fn verify_fault_evidence(evidence: &FaultEvidence) -> Result<(), InvariantViolation> {
         if evidence.proof.is_empty() {
             return Err(InvariantViolation::SilentRecovery);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify state transition is valid
-    /// 
+    ///
     /// SAFETY: Recovery stage transitions follow protocol rules.
     pub fn verify_recovery_stage_transition(
         from_stage: RecoveryStage,
@@ -146,13 +148,19 @@ impl SafetyInvariantChecker {
                 matches!(to_stage, RecoveryStage::RollingBack | RecoveryStage::Failed)
             }
             RecoveryStage::RollingBack => {
-                matches!(to_stage, RecoveryStage::ValidatorAdjustment | RecoveryStage::Failed)
+                matches!(
+                    to_stage,
+                    RecoveryStage::ValidatorAdjustment | RecoveryStage::Failed
+                )
             }
             RecoveryStage::ValidatorAdjustment => {
                 matches!(to_stage, RecoveryStage::Healing | RecoveryStage::Failed)
             }
             RecoveryStage::Healing => {
-                matches!(to_stage, RecoveryStage::RecoveryComplete | RecoveryStage::Failed)
+                matches!(
+                    to_stage,
+                    RecoveryStage::RecoveryComplete | RecoveryStage::Failed
+                )
             }
             RecoveryStage::RecoveryComplete => {
                 matches!(to_stage, RecoveryStage::Reintegrated)
@@ -161,16 +169,16 @@ impl SafetyInvariantChecker {
                 false // Terminal states
             }
         };
-        
+
         if !valid_transitions {
             return Err(InvariantViolation::InvalidStateTransition);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify Byzantine fault tolerance is maintained
-    /// 
+    ///
     /// SAFETY: Slashing decisions don't remove consensus threshold.
     pub fn verify_byzantine_tolerance(
         total_validators: usize,
@@ -178,16 +186,16 @@ impl SafetyInvariantChecker {
         min_quorum: usize,
     ) -> Result<(), InvariantViolation> {
         let remaining = total_validators.saturating_sub(slashed_count);
-        
+
         if remaining < min_quorum {
             return Err(InvariantViolation::ByzantineThresholdExceeded);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify shard cannot be reintegrated without full healing
-    /// 
+    ///
     /// SAFETY: No shortcuts in recovery process.
     pub fn verify_full_healing_required(
         expected_state_root: &str,
@@ -197,27 +205,27 @@ impl SafetyInvariantChecker {
         if !healing_complete {
             return Err(InvariantViolation::UnverifiedReintegration);
         }
-        
+
         if expected_state_root != actual_state_root {
             return Err(InvariantViolation::CrossShardCorruption);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify consensus-approved transitions
-    /// 
+    ///
     /// SAFETY: Recovery operations are consensus-verifiable.
     pub fn verify_consensus_approval(finalized: bool) -> Result<(), InvariantViolation> {
         if !finalized {
             return Err(InvariantViolation::SilentRecovery);
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify fault severity triggers appropriate response
-    /// 
+    ///
     /// SAFETY: Fault severity determines isolation level.
     pub fn verify_severity_response(
         severity: FaultSeverity,
@@ -239,21 +247,24 @@ impl SafetyInvariantChecker {
             }
             _ => {}
         }
-        
+
         Ok(())
     }
 }
 
 /// Invariant violation handler
-/// 
+///
 /// SAFETY: Handles violations according to severity.
 pub struct InvariantViolationHandler;
 
 impl InvariantViolationHandler {
     /// Handle an invariant violation
-    /// 
+    ///
     /// SAFETY: Prevents state corruption by halting affected operations.
-    pub fn handle_violation(violation: InvariantViolation, shard_id: ShardId) -> Result<(), String> {
+    pub fn handle_violation(
+        violation: InvariantViolation,
+        shard_id: ShardId,
+    ) -> Result<(), String> {
         match violation {
             InvariantViolation::GlobalRollbackAttempted => {
                 error!(
@@ -316,13 +327,13 @@ impl InvariantViolationHandler {
 }
 
 /// Determinism verifier
-/// 
+///
 /// SAFETY: Ensures all nodes independently derive identical recovery decisions.
 pub struct DeterminismVerifier;
 
 impl DeterminismVerifier {
     /// Verify that multiple nodes reach identical recovery decision
-    /// 
+    ///
     /// SAFETY: All honest nodes must independently derive the same result.
     pub fn verify_deterministic_decision(
         local_decision: &[u8],
@@ -333,12 +344,12 @@ impl DeterminismVerifier {
                 return Err(InvariantViolation::DeterminismViolation);
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Verify checkpoint hashes are identical across nodes
-    /// 
+    ///
     /// SAFETY: Checkpoint is deterministically computed.
     pub fn verify_checkpoint_determinism(
         local_hash: &str,
@@ -349,7 +360,7 @@ impl DeterminismVerifier {
                 return Err(InvariantViolation::DeterminismViolation);
             }
         }
-        
+
         Ok(())
     }
 }
@@ -360,39 +371,25 @@ mod tests {
 
     #[test]
     fn test_shard_rollback_only() {
-        let result = SafetyInvariantChecker::verify_shard_rollback_only(
-            ShardId(0),
-            true,
-        );
+        let result = SafetyInvariantChecker::verify_shard_rollback_only(ShardId(0), true);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_shard_rollback_global_prevention() {
-        let result = SafetyInvariantChecker::verify_shard_rollback_only(
-            ShardId(0),
-            false,
-        );
+        let result = SafetyInvariantChecker::verify_shard_rollback_only(ShardId(0), false);
         assert_eq!(result, Err(InvariantViolation::GlobalRollbackAttempted));
     }
 
     #[test]
     fn test_rollback_bounded() {
-        let result = SafetyInvariantChecker::verify_rollback_bounded(
-            1000,
-            500,
-            1000,
-        );
+        let result = SafetyInvariantChecker::verify_rollback_bounded(1000, 500, 1000);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_rollback_unbounded() {
-        let result = SafetyInvariantChecker::verify_rollback_bounded(
-            2000,
-            100,
-            500,
-        );
+        let result = SafetyInvariantChecker::verify_rollback_bounded(2000, 100, 500);
         assert_eq!(result, Err(InvariantViolation::InvalidStateTransition));
     }
 
@@ -416,41 +413,27 @@ mod tests {
 
     #[test]
     fn test_byzantine_tolerance() {
-        let result = SafetyInvariantChecker::verify_byzantine_tolerance(
-            10,
-            3,
-            4,
-        );
+        let result = SafetyInvariantChecker::verify_byzantine_tolerance(10, 3, 4);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_byzantine_tolerance_exceeded() {
-        let result = SafetyInvariantChecker::verify_byzantine_tolerance(
-            10,
-            8,
-            4,
-        );
+        let result = SafetyInvariantChecker::verify_byzantine_tolerance(10, 8, 4);
         assert_eq!(result, Err(InvariantViolation::ByzantineThresholdExceeded));
     }
 
     #[test]
     fn test_severity_response_critical() {
-        let result = SafetyInvariantChecker::verify_severity_response(
-            FaultSeverity::Critical,
-            true,
-            false,
-        );
+        let result =
+            SafetyInvariantChecker::verify_severity_response(FaultSeverity::Critical, true, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_severity_response_critical_not_isolated() {
-        let result = SafetyInvariantChecker::verify_severity_response(
-            FaultSeverity::Critical,
-            false,
-            false,
-        );
+        let result =
+            SafetyInvariantChecker::verify_severity_response(FaultSeverity::Critical, false, false);
         assert_eq!(result, Err(InvariantViolation::InvalidStateTransition));
     }
 }

@@ -1,6 +1,6 @@
-use crate::{Block, block::Transaction};
-use std::sync::Mutex;
+use crate::{block::Transaction, Block};
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 pub struct BlockchainState {
     pub blocks: Mutex<Vec<Block>>,

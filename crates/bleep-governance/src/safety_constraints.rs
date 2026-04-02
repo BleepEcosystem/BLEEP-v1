@@ -11,26 +11,26 @@
 
 use crate::apip::APIP;
 use crate::protocol_rules::ProtocolRuleSet;
-use log::{info};
+use log::info;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SafetyConstraintError {
     #[error("Invariant violation: {0}")]
     InvariantViolation(String),
-    
+
     #[error("Constraint check failed: {0}")]
     ConstraintCheckFailed(String),
-    
+
     #[error("Simulation failed: {0}")]
     SimulationFailed(String),
-    
+
     #[error("Compatibility check failed: {0}")]
     CompatibilityCheckFailed(String),
-    
+
     #[error("Unknown rule: {0}")]
     UnknownRule(String),
-    
+
     #[error("Validation error: {0}")]
     ValidationError(String),
 }
@@ -46,13 +46,13 @@ impl From<crate::protocol_rules::ProtocolRuleError> for SafetyConstraintError {
 pub struct ConstraintCheckResult {
     /// Whether the constraint passed
     pub passed: bool,
-    
+
     /// Constraint name
     pub constraint_name: String,
-    
+
     /// Detailed message
     pub message: String,
-    
+
     /// Severity if failed (informational, warning, error)
     pub severity: CheckSeverity,
 }
@@ -61,10 +61,10 @@ pub struct ConstraintCheckResult {
 pub enum CheckSeverity {
     /// Informational, doesn't fail validation
     Informational,
-    
+
     /// Warning, should be reviewed but doesn't fail
     Warning,
-    
+
     /// Hard failure, proposal rejected
     Error,
 }
@@ -74,22 +74,22 @@ pub enum CheckSeverity {
 pub struct ValidationReport {
     /// Proposal ID being validated
     pub proposal_id: String,
-    
+
     /// Whether validation passed overall
     pub is_valid: bool,
-    
+
     /// Timestamp of validation
     pub validated_at: u64,
-    
+
     /// All constraint check results
     pub checks: Vec<ConstraintCheckResult>,
-    
+
     /// Count of passed checks
     pub passed_count: usize,
-    
+
     /// Count of failed checks
     pub failed_count: usize,
-    
+
     /// Count of warning checks
     pub warning_count: usize,
 }
@@ -110,7 +110,7 @@ impl ValidationReport {
             warning_count: 0,
         }
     }
-    
+
     /// Add a check result
     pub fn add_check(&mut self, result: ConstraintCheckResult) {
         if result.severity == CheckSeverity::Error && !result.passed {
@@ -121,10 +121,10 @@ impl ValidationReport {
         } else if result.passed {
             self.passed_count += 1;
         }
-        
+
         self.checks.push(result);
     }
-    
+
     /// Generate a human-readable summary
     pub fn summary(&self) -> String {
         format!(
@@ -139,7 +139,7 @@ pub struct SafetyConstraintsEngine;
 
 impl SafetyConstraintsEngine {
     /// Validate an A-PIP against all safety constraints
-    /// 
+    ///
     /// SAFETY: This performs comprehensive deterministic validation.
     /// All checks must pass for the proposal to be valid.
     pub fn validate_proposal(
@@ -147,36 +147,36 @@ impl SafetyConstraintsEngine {
         current_ruleset: &ProtocolRuleSet,
     ) -> Result<ValidationReport, SafetyConstraintError> {
         let mut report = ValidationReport::new(apip.proposal_id.clone());
-        
+
         // Constraint 1: Basic structural validation
         Self::check_apip_completeness(apip, &mut report);
-        
+
         // Constraint 2: Rule bounds validation
         Self::check_rule_bounds(apip, current_ruleset, &mut report)?;
-        
+
         // Constraint 3: Safety bounds validation
         Self::check_safety_bounds(apip, &mut report)?;
-        
+
         // Constraint 4: Invariant compatibility
         Self::check_invariant_compatibility(apip, current_ruleset, &mut report)?;
-        
+
         // Constraint 5: Worst-case scenario simulation
         Self::check_worst_case_scenarios(apip, current_ruleset, &mut report)?;
-        
+
         // Constraint 6: AI confidence thresholds
         Self::check_ai_confidence(apip, current_ruleset, &mut report)?;
-        
+
         // Constraint 7: Risk level approval threshold
         Self::check_risk_approval_requirements(apip, &mut report);
-        
+
         // Constraint 8: Epoch validity
         Self::check_epoch_validity(apip, &mut report);
-        
+
         info!("Proposal validation complete: {}", report.summary());
-        
+
         Ok(report)
     }
-    
+
     /// Constraint 1: Check A-PIP completeness and structure
     fn check_apip_completeness(apip: &APIP, report: &mut ValidationReport) {
         let result = ConstraintCheckResult {
@@ -191,7 +191,7 @@ impl SafetyConstraintsEngine {
         };
         report.add_check(result);
     }
-    
+
     /// Constraint 2: Verify all rule changes respect bounds
     fn check_rule_bounds(
         apip: &APIP,
@@ -199,41 +199,39 @@ impl SafetyConstraintsEngine {
         report: &mut ValidationReport,
     ) -> Result<(), SafetyConstraintError> {
         for change in &apip.rule_changes {
-            let rule = ruleset.get_rule(&change.rule_name)
-                .map_err(|e| SafetyConstraintError::UnknownRule(format!("Failed to get rule {}: {}", change.rule_name, e)))?;
-            
+            let rule = ruleset.get_rule(&change.rule_name).map_err(|e| {
+                SafetyConstraintError::UnknownRule(format!(
+                    "Failed to get rule {}: {}",
+                    change.rule_name, e
+                ))
+            })?;
+
             // Check new value is within rule bounds
             let in_bounds = rule.bounds.contains(change.new_value);
-            
+
             let result = ConstraintCheckResult {
                 passed: in_bounds,
                 constraint_name: format!("RULE_BOUNDS_{}", change.rule_name),
                 message: if in_bounds {
                     format!(
                         "Rule {} new value {} in bounds [{}, {}]",
-                        change.rule_name,
-                        change.new_value,
-                        rule.bounds.min,
-                        rule.bounds.max
+                        change.rule_name, change.new_value, rule.bounds.min, rule.bounds.max
                     )
                 } else {
                     format!(
                         "Rule {} new value {} OUT OF BOUNDS [{}, {}]",
-                        change.rule_name,
-                        change.new_value,
-                        rule.bounds.min,
-                        rule.bounds.max
+                        change.rule_name, change.new_value, rule.bounds.min, rule.bounds.max
                     )
                 },
                 severity: CheckSeverity::Error,
             };
-            
+
             report.add_check(result);
         }
-        
+
         Ok(())
     }
-    
+
     /// Constraint 3: Verify safety bounds are respected
     fn check_safety_bounds(
         apip: &APIP,
@@ -242,7 +240,7 @@ impl SafetyConstraintsEngine {
         for change in &apip.rule_changes {
             if let Some(bounds) = apip.safety_bounds.get(&change.rule_name) {
                 let is_safe = bounds.is_safe(change.new_value);
-                
+
                 let result = ConstraintCheckResult {
                     passed: is_safe,
                     constraint_name: format!("SAFETY_BOUNDS_{}", change.rule_name),
@@ -265,14 +263,14 @@ impl SafetyConstraintsEngine {
                     },
                     severity: CheckSeverity::Error,
                 };
-                
+
                 report.add_check(result);
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Constraint 4: Check compatibility with protocol invariants
     fn check_invariant_compatibility(
         apip: &APIP,
@@ -295,7 +293,7 @@ impl SafetyConstraintsEngine {
                 }
             }
         }
-        
+
         // INVARIANT 2: Validator rotation must be reasonable
         for change in &apip.rule_changes {
             if change.rule_name == "VALIDATOR_ROTATION_CADENCE" {
@@ -313,7 +311,7 @@ impl SafetyConstraintsEngine {
                 report.add_check(result);
             }
         }
-        
+
         // INVARIANT 3: Slashing proportion must be > 0%
         for change in &apip.rule_changes {
             if change.rule_name == "SLASHING_PROPORTION" {
@@ -331,10 +329,10 @@ impl SafetyConstraintsEngine {
                 report.add_check(result);
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Constraint 5: Simulate worst-case scenarios
     fn check_worst_case_scenarios(
         apip: &APIP,
@@ -349,7 +347,7 @@ impl SafetyConstraintsEngine {
                 // Minimum viable shard needs ~32 validators for safety
                 // At ~100 state bytes per validator record
                 let min_safe_threshold = 32 * 100;
-                
+
                 let scenario_passed = change.new_value >= min_safe_threshold as u64;
                 let result = ConstraintCheckResult {
                     passed: scenario_passed,
@@ -370,22 +368,19 @@ impl SafetyConstraintsEngine {
                 report.add_check(result);
             }
         }
-        
+
         // SCENARIO 2: Cross-shard timeout must allow for typical latency
         for change in &apip.rule_changes {
             if change.rule_name == "CROSS_SHARD_TIMEOUT" {
                 // At 14.4 seconds per block, 10 blocks = ~144 seconds
                 let minimum_timeout_blocks = 10;
-                
+
                 let scenario_passed = change.new_value >= minimum_timeout_blocks;
                 let result = ConstraintCheckResult {
                     passed: scenario_passed,
                     constraint_name: "SCENARIO_CROSS_SHARD_LATENCY".to_string(),
                     message: if scenario_passed {
-                        format!(
-                            "Cross-shard timeout {} blocks acceptable",
-                            change.new_value
-                        )
+                        format!("Cross-shard timeout {} blocks acceptable", change.new_value)
                     } else {
                         format!(
                             "Cross-shard timeout {} blocks too short (minimum: {})",
@@ -397,21 +392,27 @@ impl SafetyConstraintsEngine {
                 report.add_check(result);
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Constraint 6: Verify AI confidence meets minimum threshold
     fn check_ai_confidence(
         apip: &APIP,
         ruleset: &ProtocolRuleSet,
         report: &mut ValidationReport,
     ) -> Result<(), SafetyConstraintError> {
-let min_confidence = ruleset.get_rule_value("AI_PROPOSAL_MIN_CONFIDENCE")
-                .map_err(|e| SafetyConstraintError::UnknownRule(format!("AI_PROPOSAL_MIN_CONFIDENCE not found: {}", e)))?;
-        
+        let min_confidence = ruleset
+            .get_rule_value("AI_PROPOSAL_MIN_CONFIDENCE")
+            .map_err(|e| {
+                SafetyConstraintError::UnknownRule(format!(
+                    "AI_PROPOSAL_MIN_CONFIDENCE not found: {}",
+                    e
+                ))
+            })?;
+
         let confidence_met = apip.confidence_score >= min_confidence as u8;
-        
+
         let result = ConstraintCheckResult {
             passed: confidence_met,
             constraint_name: "AI_CONFIDENCE_THRESHOLD".to_string(),
@@ -428,15 +429,15 @@ let min_confidence = ruleset.get_rule_value("AI_PROPOSAL_MIN_CONFIDENCE")
             },
             severity: CheckSeverity::Error,
         };
-        
+
         report.add_check(result);
         Ok(())
     }
-    
+
     /// Constraint 7: Check risk level requires appropriate approval
     fn check_risk_approval_requirements(apip: &APIP, report: &mut ValidationReport) {
         let min_approval = apip.risk_level.min_approval_threshold();
-        
+
         let result = ConstraintCheckResult {
             passed: true,
             constraint_name: "RISK_APPROVAL_REQUIREMENT".to_string(),
@@ -447,10 +448,10 @@ let min_confidence = ruleset.get_rule_value("AI_PROPOSAL_MIN_CONFIDENCE")
             ),
             severity: CheckSeverity::Informational,
         };
-        
+
         report.add_check(result);
     }
-    
+
     /// Constraint 8: Check epoch validity
     fn check_epoch_validity(apip: &APIP, report: &mut ValidationReport) {
         let result = ConstraintCheckResult {
@@ -463,7 +464,7 @@ let min_confidence = ruleset.get_rule_value("AI_PROPOSAL_MIN_CONFIDENCE")
             },
             severity: CheckSeverity::Error,
         };
-        
+
         report.add_check(result);
     }
 }
@@ -488,7 +489,7 @@ mod tests {
             message: "Test passed".to_string(),
             severity: CheckSeverity::Error,
         };
-        
+
         assert!(result.passed);
     }
 

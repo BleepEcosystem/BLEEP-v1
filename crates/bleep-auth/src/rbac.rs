@@ -40,7 +40,8 @@ impl Role {
                 Permission::ReadChainState,
                 Permission::QueryBalance,
                 Permission::ReadValidatorInfo,
-            ].into(),
+            ]
+            .into(),
 
             Role::DappDeveloper => {
                 let mut p = Role::ReadOnly.all_permissions();
@@ -156,7 +157,9 @@ pub enum AccessDecision {
 }
 
 impl AccessDecision {
-    pub fn is_granted(&self) -> bool { matches!(self, AccessDecision::Granted) }
+    pub fn is_granted(&self) -> bool {
+        matches!(self, AccessDecision::Granted)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,12 +173,19 @@ pub struct RbacEngine {
 }
 
 impl RbacEngine {
-    pub fn new() -> Self { Self { assignments: DashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            assignments: DashMap::new(),
+        }
+    }
 
     // ── Write ────────────────────────────────────────────────────────────
 
     pub fn assign_role(&self, identity_id: &str, role: Role) {
-        self.assignments.entry(identity_id.to_string()).or_default().insert(role);
+        self.assignments
+            .entry(identity_id.to_string())
+            .or_default()
+            .insert(role);
     }
 
     pub fn revoke_role(&self, identity_id: &str, role: &Role) {
@@ -191,7 +201,8 @@ impl RbacEngine {
     // ── Read ─────────────────────────────────────────────────────────────
 
     pub fn get_roles(&self, identity_id: &str) -> Vec<Role> {
-        self.assignments.get(identity_id)
+        self.assignments
+            .get(identity_id)
             .map(|r| r.iter().cloned().collect())
             .unwrap_or_default()
     }
@@ -205,7 +216,11 @@ impl RbacEngine {
         }
         AccessDecision::Denied(format!(
             "None of the assigned roles ({}) grant permission {:?}",
-            roles.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().join(", "),
+            roles
+                .iter()
+                .map(|r| format!("{r:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
             required,
         ))
     }
@@ -229,25 +244,35 @@ mod tests {
         // Every permission that NodeOperator has, SystemAdmin must also have
         let op = Role::NodeOperator.all_permissions();
         let sa = Role::SystemAdmin.all_permissions();
-        for p in &op { assert!(sa.contains(p), "SystemAdmin missing {p:?}"); }
+        for p in &op {
+            assert!(sa.contains(p), "SystemAdmin missing {p:?}");
+        }
 
         // Every permission that DappDeveloper has, NodeOperator must also have
         let dev = Role::DappDeveloper.all_permissions();
-        for p in &dev { assert!(op.contains(p), "NodeOperator missing {p:?}"); }
+        for p in &dev {
+            assert!(op.contains(p), "NodeOperator missing {p:?}");
+        }
     }
 
     #[test]
     fn access_granted() {
         let engine = RbacEngine::new();
         engine.assign_role("u1", Role::Validator);
-        assert_eq!(engine.check("u1", Permission::SignBlock), AccessDecision::Granted);
+        assert_eq!(
+            engine.check("u1", Permission::SignBlock),
+            AccessDecision::Granted
+        );
     }
 
     #[test]
     fn access_denied() {
         let engine = RbacEngine::new();
         engine.assign_role("u1", Role::ReadOnly);
-        assert!(matches!(engine.check("u1", Permission::SignBlock), AccessDecision::Denied(_)));
+        assert!(matches!(
+            engine.check("u1", Permission::SignBlock),
+            AccessDecision::Denied(_)
+        ));
     }
 
     #[test]
@@ -255,6 +280,9 @@ mod tests {
         let engine = RbacEngine::new();
         engine.assign_role("u2", Role::Validator);
         engine.revoke_role("u2", &Role::Validator);
-        assert!(matches!(engine.check("u2", Permission::SignBlock), AccessDecision::Denied(_)));
+        assert!(matches!(
+            engine.check("u2", Permission::SignBlock),
+            AccessDecision::Denied(_)
+        ));
     }
 }

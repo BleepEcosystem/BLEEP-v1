@@ -13,12 +13,12 @@
 #[cfg(test)]
 mod integration_tests {
     use crate::{
-        protocol_rules::{ProtocolRuleSetFactory, RuleBounds},
-        apip::{APIPBuilder, RuleChange, AIModelMetadata, RiskLevel},
-        safety_constraints::SafetyConstraintsEngine,
-        protocol_evolution::ProtocolEvolutionOrchestrator,
-        ai_reputation::{ProposalOutcome, AIReputationTracker},
         ai_hooks::AIHooks,
+        ai_reputation::{AIReputationTracker, ProposalOutcome},
+        apip::{AIModelMetadata, APIPBuilder, RiskLevel, RuleChange},
+        protocol_evolution::ProtocolEvolutionOrchestrator,
+        protocol_rules::{ProtocolRuleSetFactory, RuleBounds},
+        safety_constraints::SafetyConstraintsEngine,
     };
 
     fn create_orchestrator() -> ProtocolEvolutionOrchestrator {
@@ -219,10 +219,7 @@ mod integration_tests {
         assert_eq!(records[0].activation_epoch, 10);
 
         // Verify rule was updated
-        let updated_rule = orch
-            .get_ruleset()
-            .get_rule("CHECKPOINT_FREQUENCY")
-            .unwrap();
+        let updated_rule = orch.get_ruleset().get_rule("CHECKPOINT_FREQUENCY").unwrap();
         assert_eq!(updated_rule.value, 120);
     }
 
@@ -236,7 +233,7 @@ mod integration_tests {
             "ai-model-1",
             "SLASHING_PROPORTION",
             5,
-            0, // This is bad - disables slashing
+            0,  // This is bad - disables slashing
             50, // Low confidence
             RiskLevel::Critical,
         );
@@ -249,10 +246,7 @@ mod integration_tests {
             .unwrap();
 
         // Verify it was activated
-        let rule = orch
-            .get_ruleset()
-            .get_rule("SLASHING_PROPORTION")
-            .unwrap();
+        let rule = orch.get_ruleset().get_rule("SLASHING_PROPORTION").unwrap();
         assert_eq!(rule.value, 0);
 
         // Now rollback due to critical issue
@@ -265,10 +259,7 @@ mod integration_tests {
         assert_eq!(rollback_records[0].rollback_epoch, Some(15));
 
         // Verify rule was restored
-        let restored_rule = orch
-            .get_ruleset()
-            .get_rule("SLASHING_PROPORTION")
-            .unwrap();
+        let restored_rule = orch.get_ruleset().get_rule("SLASHING_PROPORTION").unwrap();
         assert_eq!(restored_rule.value, 5);
     }
 
@@ -294,12 +285,8 @@ mod integration_tests {
             .unwrap();
 
         // Record success outcome
-        orch.record_proposal_outcome(
-            "APIP-008".to_string(),
-            ProposalOutcome::Accepted,
-            15,
-        )
-        .unwrap();
+        orch.record_proposal_outcome("APIP-008".to_string(), ProposalOutcome::Accepted, 15)
+            .unwrap();
 
         // Create another proposal from same model
         let proposal2 = create_proposal(
@@ -334,7 +321,11 @@ mod integration_tests {
                     "CHECKPOINT_FREQUENCY"
                 },
                 if i % 2 == 0 { 1_000_000 } else { 100 },
-                if i % 2 == 0 { 1_050_000 + (i as u64 * 10_000) } else { 110 + (i as u64) },
+                if i % 2 == 0 {
+                    1_050_000 + (i as u64 * 10_000)
+                } else {
+                    110 + (i as u64)
+                },
                 75 + (i as u8),
                 RiskLevel::Low,
             );
@@ -344,8 +335,14 @@ mod integration_tests {
         }
 
         // All proposals should be stored
-        assert_eq!(orch.get_proposal("APIP-100").unwrap().proposal_id, "APIP-100");
-        assert_eq!(orch.get_proposal("APIP-104").unwrap().proposal_id, "APIP-104");
+        assert_eq!(
+            orch.get_proposal("APIP-100").unwrap().proposal_id,
+            "APIP-100"
+        );
+        assert_eq!(
+            orch.get_proposal("APIP-104").unwrap().proposal_id,
+            "APIP-104"
+        );
     }
 
     // TEST 10: Epoch boundaries and determinism
@@ -472,7 +469,9 @@ mod integration_tests {
         let mut tracker = AIReputationTracker::new();
 
         // Register model
-        tracker.register_model("decay-test-model".to_string()).unwrap();
+        tracker
+            .register_model("decay-test-model".to_string())
+            .unwrap();
 
         // Record some successful outcomes
         for i in 0..5 {
@@ -488,18 +487,12 @@ mod integration_tests {
                 .unwrap();
         }
 
-        let rep_before = tracker
-            .get_reputation("decay-test-model")
-            .unwrap()
-            .score;
+        let rep_before = tracker.get_reputation("decay-test-model").unwrap().score;
 
         // Apply decay
         tracker.apply_global_decay(10, 95); // 5% decay
 
-        let rep_after = tracker
-            .get_reputation("decay-test-model")
-            .unwrap()
-            .score;
+        let rep_after = tracker.get_reputation("decay-test-model").unwrap().score;
 
         assert!(rep_after <= rep_before);
     }

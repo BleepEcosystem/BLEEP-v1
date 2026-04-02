@@ -23,33 +23,32 @@
 
 // ── Re-export the full public API of each sub-crate ────────────────────────
 
-pub use bleep_connect_types as types;
-pub use bleep_connect_crypto as crypto;
-pub use bleep_connect_commitment_chain as commitment_chain;
 pub use bleep_connect_adapters as adapters;
-pub use bleep_connect_executor as executor;
-pub use bleep_connect_layer4_instant as layer4;
-pub use bleep_connect_layer3_zkproof as layer3;
-pub use bleep_connect_layer2_fullnode as layer2;
-pub use bleep_connect_layer1_social as layer1;
+pub use bleep_connect_commitment_chain as commitment_chain;
 pub use bleep_connect_core as core;
+pub use bleep_connect_crypto as crypto;
+pub use bleep_connect_executor as executor;
+pub use bleep_connect_layer1_social as layer1;
+pub use bleep_connect_layer2_fullnode as layer2;
+pub use bleep_connect_layer3_zkproof as layer3;
+pub use bleep_connect_layer4_instant as layer4;
+pub use bleep_connect_types as types;
 
 // ── Flat re-exports for the most commonly used items ──────────────────────
 
 pub use bleep_connect_types::{
-    ChainId, UniversalAddress, AssetId, AssetType,
-    InstantIntent, TransferStatus, FailureReason,
-    ExecutorProfile, ExecutorTier, ExecutorCommitment,
-    StateCommitment, CommitmentType,
-    Vote, VoteChoice, VoterType,
-    SocialProposal, ProposalType, Evidence, EvidenceType,
-    BleepConnectError, BleepConnectResult,
+    AssetId, AssetType, BleepConnectError, BleepConnectResult, ChainId, CommitmentType, Evidence,
+    EvidenceType, ExecutorCommitment, ExecutorProfile, ExecutorTier, FailureReason, InstantIntent,
+    ProposalType, SocialProposal, StateCommitment, TransferStatus, UniversalAddress, Vote,
+    VoteChoice, VoterType,
 };
 
-pub use bleep_connect_adapters::{ChainAdapter, AdapterRegistry};
-pub use bleep_connect_adapters::{SepoliaRelay, SepoliaRelayTx, RelayStatus, SEPOLIA_CHAIN_ID, SEPOLIA_BLEEP_FULFILL_ADDR};
+pub use bleep_connect_adapters::{AdapterRegistry, ChainAdapter};
+pub use bleep_connect_adapters::{
+    RelayStatus, SepoliaRelay, SepoliaRelayTx, SEPOLIA_BLEEP_FULFILL_ADDR, SEPOLIA_CHAIN_ID,
+};
 
-pub use bleep_connect_core::{BleepConnectOrchestrator, BleepConnectBuilder, BleepConnectConfig};
+pub use bleep_connect_core::{BleepConnectBuilder, BleepConnectConfig, BleepConnectOrchestrator};
 
 // ── interoperability module: compatibility shim ───────────────────────────
 //
@@ -63,8 +62,7 @@ pub mod interoperability {
     // ── Adapter trait re-export ───────────────────────────────────────────
     pub use bleep_connect_adapters::ChainAdapter;
     pub use bleep_connect_adapters::{
-        EthereumAdapter, SolanaAdapter, CosmosAdapter,
-        BitcoinAdapter, BleepAdapter,
+        BitcoinAdapter, BleepAdapter, CosmosAdapter, EthereumAdapter, SolanaAdapter,
     };
 
     // ── BinanceAdapter: BSC uses EthereumAdapter internally ──────────────
@@ -85,9 +83,15 @@ pub mod interoperability {
         ) -> bleep_connect_types::BleepConnectResult<bool> {
             EthereumAdapter::new(ChainId::BSC).verify_execution(intent, proof)
         }
-        fn get_finality_blocks(&self) -> u64 { 15 }
-        fn chain_id(&self) -> ChainId { ChainId::BSC }
-        fn native_decimals(&self) -> u8 { 18 }
+        fn get_finality_blocks(&self) -> u64 {
+            15
+        }
+        fn chain_id(&self) -> ChainId {
+            ChainId::BSC
+        }
+        fn native_decimals(&self) -> u8 {
+            18
+        }
     }
 
     /// PolkadotAdapter: substrate-based chain adapter.
@@ -110,9 +114,15 @@ pub mod interoperability {
         ) -> bleep_connect_types::BleepConnectResult<bool> {
             Ok(true) // Stub: real impl queries Polkadot RPC
         }
-        fn get_finality_blocks(&self) -> u64 { 2 }
-        fn chain_id(&self) -> ChainId { ChainId::Polkadot }
-        fn native_decimals(&self) -> u8 { 10 }
+        fn get_finality_blocks(&self) -> u64 {
+            2
+        }
+        fn chain_id(&self) -> ChainId {
+            ChainId::Polkadot
+        }
+        fn native_decimals(&self) -> u8 {
+            10
+        }
     }
 
     // ── BLEEPInteroperabilityModule ───────────────────────────────────────
@@ -126,7 +136,9 @@ pub mod interoperability {
 
     impl BLEEPInteroperabilityModule {
         pub fn new() -> Self {
-            Self { adapters: HashMap::new() }
+            Self {
+                adapters: HashMap::new(),
+            }
         }
 
         /// Register a chain adapter by name.
@@ -172,7 +184,7 @@ pub mod interoperability {
         /// Adapt logging data for a specific blockchain (stub for governance logging)
         pub async fn adapt(&self, _chain: &str, data: &[u8]) -> Result<Vec<u8>, String> {
             // Stub: returns the hashed data for logging purposes
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(data);
             Ok(hasher.finalize().to_vec())
@@ -180,19 +192,30 @@ pub mod interoperability {
     }
 
     impl Default for BLEEPInteroperabilityModule {
-        fn default() -> Self { Self::new() }
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     // ── start_interop_services: called by main node startup ───────────────
     pub fn start_interop_services() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("BLEEP Connect interoperability layer starting…");
         let mut module = BLEEPInteroperabilityModule::new();
-        module.register_adapter("ethereum".into(), Box::new(EthereumAdapter::new(ChainId::Ethereum)));
-        module.register_adapter("binance".into(),  Box::new(BinanceAdapter));
-        module.register_adapter("cosmos".into(),   Box::new(CosmosAdapter::new(ChainId::Cosmos)));
+        module.register_adapter(
+            "ethereum".into(),
+            Box::new(EthereumAdapter::new(ChainId::Ethereum)),
+        );
+        module.register_adapter("binance".into(), Box::new(BinanceAdapter));
+        module.register_adapter(
+            "cosmos".into(),
+            Box::new(CosmosAdapter::new(ChainId::Cosmos)),
+        );
         module.register_adapter("polkadot".into(), Box::new(PolkadotAdapter));
-        module.register_adapter("solana".into(),   Box::new(SolanaAdapter));
-        log::info!("Registered {} chain adapters.", module.registered_chains().len());
+        module.register_adapter("solana".into(), Box::new(SolanaAdapter));
+        log::info!(
+            "Registered {} chain adapters.",
+            module.registered_chains().len()
+        );
         Ok(())
     }
 
@@ -206,9 +229,8 @@ pub mod interoperability {
 pub mod layer3_bridge;
 
 pub use layer3_bridge::{
-    Layer3Bridge, BridgeIntentL3, L3State, ZkBridgeProof,
-    L3BatchProver, Chain,
-    L3_PROOF_SIZE_BYTES, L3_BATCH_SIZE, L3_MAX_LATENCY_SECS,
+    BridgeIntentL3, Chain, L3BatchProver, L3State, Layer3Bridge, ZkBridgeProof, L3_BATCH_SIZE,
+    L3_MAX_LATENCY_SECS, L3_PROOF_SIZE_BYTES,
 };
 
 pub mod nullifier_store;

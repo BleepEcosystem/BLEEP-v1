@@ -1,10 +1,10 @@
 // src/bin/bleep-wallet_core.rs
 
-use bleep_wallet_core::wallet::{WalletManager, EncryptedWallet};
 use bleep_crypto::quantum_resistance::{generate_falcon_keypair, generate_kyber_keypair};
+use bleep_wallet_core::wallet::{EncryptedWallet, WalletManager};
 
+use log::{error, info};
 use std::error::Error;
-use log::{info, error};
 
 fn main() {
     env_logger::init();

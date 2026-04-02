@@ -14,19 +14,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use bleep_connect_types::{
-    SocialProposal, ProposalType, Evidence, Vote, VoterType, VoteChoice,
-    UniversalAddress, StateCommitment, CommitmentType,
-    BleepConnectError, BleepConnectResult,
-    constants::{
-        VOTING_PERIOD_NORMAL, VOTING_PERIOD_EMERGENCY,
-        VOTING_THRESHOLD_NORMAL, VOTING_THRESHOLD_EMERGENCY,
-    },
-};
-use bleep_connect_crypto::{sha256, ClassicalKeyPair};
 use bleep_connect_commitment_chain::CommitmentChain;
+use bleep_connect_crypto::{sha256, ClassicalKeyPair};
+use bleep_connect_types::{
+    constants::{
+        VOTING_PERIOD_EMERGENCY, VOTING_PERIOD_NORMAL, VOTING_THRESHOLD_EMERGENCY,
+        VOTING_THRESHOLD_NORMAL,
+    },
+    BleepConnectError, BleepConnectResult, CommitmentType, Evidence, ProposalType, SocialProposal,
+    StateCommitment, UniversalAddress, Vote, VoteChoice, VoterType,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PROPOSAL OUTCOME
@@ -102,7 +101,9 @@ impl VoterRegistry {
 }
 
 impl Default for VoterRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,11 +136,15 @@ impl ProposalStore {
     pub fn cast_vote(&self, vote: Vote) -> BleepConnectResult<()> {
         let id = vote.proposal_id;
         // Check proposal exists and is open
-        let proposal = self.proposals.get(&id)
+        let proposal = self
+            .proposals
+            .get(&id)
             .ok_or_else(|| BleepConnectError::InternalError("Proposal not found".into()))?;
 
         if now() > proposal.voting_deadline {
-            return Err(BleepConnectError::InternalError("Voting period has ended".into()));
+            return Err(BleepConnectError::InternalError(
+                "Voting period has ended".into(),
+            ));
         }
 
         // Prevent double-voting
@@ -153,7 +158,8 @@ impl ProposalStore {
     }
 
     pub fn get_votes(&self, proposal_id: &[u8; 32]) -> Vec<Vote> {
-        self.votes.get(proposal_id)
+        self.votes
+            .get(proposal_id)
             .map(|e| e.value().clone())
             .unwrap_or_default()
     }
@@ -168,7 +174,9 @@ impl ProposalStore {
 }
 
 impl Default for ProposalStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,7 +186,9 @@ impl Default for ProposalStore {
 pub struct ArbitrationEngine;
 
 impl ArbitrationEngine {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Tally votes and determine outcome.
     pub async fn tally(
@@ -266,9 +276,7 @@ impl ArbitrationEngine {
             _ => VOTING_THRESHOLD_NORMAL,
         }
     }
-
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EMERGENCY CONTROLLER
@@ -388,7 +396,11 @@ impl Layer1Social {
         };
         self.commitment_chain.submit_commitment(commitment).await?;
 
-        info!("Proposal {} submitted; voting closes at {}", hex::encode(proposal_id), ts + period);
+        info!(
+            "Proposal {} submitted; voting closes at {}",
+            hex::encode(proposal_id),
+            ts + period
+        );
         Ok(proposal_id)
     }
 
@@ -397,18 +409,29 @@ impl Layer1Social {
         // Verify the voter is registered
         let addr = vote.voter.to_string();
         if self.voters.get(&addr).is_none() {
-            return Err(BleepConnectError::InternalError(format!("Voter {} not registered", addr)));
+            return Err(BleepConnectError::InternalError(format!(
+                "Voter {} not registered",
+                addr
+            )));
         }
         self.proposals.cast_vote(vote)
     }
 
     /// Tally votes and finalize a proposal. Can be called after voting deadline.
-    pub async fn finalize_proposal(&self, proposal_id: [u8; 32]) -> BleepConnectResult<ProposalResult> {
-        let proposal = self.proposals.get_proposal(&proposal_id)
+    pub async fn finalize_proposal(
+        &self,
+        proposal_id: [u8; 32],
+    ) -> BleepConnectResult<ProposalResult> {
+        let proposal = self
+            .proposals
+            .get_proposal(&proposal_id)
             .ok_or_else(|| BleepConnectError::InternalError("Proposal not found".into()))?;
 
         let votes = self.proposals.get_votes(&proposal_id);
-        let result = self.arbitration.tally(&proposal, &votes, &self.voters).await;
+        let result = self
+            .arbitration
+            .tally(&proposal, &votes, &self.voters)
+            .await;
 
         // Execute approved proposals
         if result.outcome == ProposalOutcome::Approved {
@@ -436,29 +459,57 @@ impl Layer1Social {
         Ok(result)
     }
 
-    pub async fn execute_proposal(&self, proposal: &SocialProposal, _result: &ProposalResult) -> BleepConnectResult<()> {
+    pub async fn execute_proposal(
+        &self,
+        proposal: &SocialProposal,
+        _result: &ProposalResult,
+    ) -> BleepConnectResult<()> {
         match &proposal.proposal_type {
             ProposalType::EmergencyPause { reason } => {
                 self.emergency.pause(reason.clone()).await;
             }
-            ProposalType::StateRollback { target_block, affected_transfers } => {
+            ProposalType::StateRollback {
+                target_block,
+                affected_transfers,
+            } => {
                 warn!(
                     "State rollback approved to block {}, affecting {} transfers",
-                    target_block, affected_transfers.len()
+                    target_block,
+                    affected_transfers.len()
                 );
                 // In production: trigger rollback on commitment chain
             }
-            ProposalType::ProtocolUpgrade { upgrade_version, audit_report_hash } => {
-                info!("Protocol upgrade to {} approved (audit: {})",
-                    upgrade_version, hex::encode(audit_report_hash));
+            ProposalType::ProtocolUpgrade {
+                upgrade_version,
+                audit_report_hash,
+            } => {
+                info!(
+                    "Protocol upgrade to {} approved (audit: {})",
+                    upgrade_version,
+                    hex::encode(audit_report_hash)
+                );
                 // In production: apply upgrade via governance multisig
             }
-            ProposalType::ParameterChange { parameter, old_value, new_value } => {
-                info!("Parameter change: {} from {} to {} approved", parameter, old_value, new_value);
+            ProposalType::ParameterChange {
+                parameter,
+                old_value,
+                new_value,
+            } => {
+                info!(
+                    "Parameter change: {} from {} to {} approved",
+                    parameter, old_value, new_value
+                );
                 // In production: update parameter in configuration store
             }
-            ProposalType::DisputeResolution { transfer_id, ruling } => {
-                info!("Dispute for transfer {} resolved: {}", hex::encode(transfer_id), ruling);
+            ProposalType::DisputeResolution {
+                transfer_id,
+                ruling,
+            } => {
+                info!(
+                    "Dispute for transfer {} resolved: {}",
+                    hex::encode(transfer_id),
+                    ruling
+                );
                 // In production: apply ruling (slash, refund, release)
             }
         }
@@ -483,7 +534,10 @@ impl Layer1Social {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -501,7 +555,10 @@ mod tests {
         let layer1 = Layer1Social::new(chain);
 
         let mut voters = Vec::new();
-        for (i, vtype) in [VoterType::Validator, VoterType::Developer, VoterType::User].iter().enumerate() {
+        for (i, vtype) in [VoterType::Validator, VoterType::Developer, VoterType::User]
+            .iter()
+            .enumerate()
+        {
             let kp = ClassicalKeyPair::generate();
             let voter = RegisteredVoter {
                 address: UniversalAddress::new(ChainId::BLEEP, format!("voter{}", i)),
@@ -519,17 +576,20 @@ mod tests {
     async fn test_proposal_lifecycle() {
         let (layer1, voters) = make_layer1().await;
 
-        let proposal_id = layer1.submit_proposal(
-            voters[0].0.address.clone(),
-            ProposalType::ParameterChange {
-                parameter: "auction_duration".into(),
-                old_value: "15".into(),
-                new_value: "20".into(),
-            },
-            "Increase auction duration".into(),
-            "Give executors more time to bid".into(),
-            vec![],
-        ).await.unwrap();
+        let proposal_id = layer1
+            .submit_proposal(
+                voters[0].0.address.clone(),
+                ProposalType::ParameterChange {
+                    parameter: "auction_duration".into(),
+                    old_value: "15".into(),
+                    new_value: "20".into(),
+                },
+                "Increase auction duration".into(),
+                "Give executors more time to bid".into(),
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // All 3 voters approve
         for (voter, kp) in &voters {
@@ -538,15 +598,17 @@ mod tests {
             msg.extend_from_slice(&1000u128.to_be_bytes());
             let sig = kp.sign(&sha256(&msg));
 
-            layer1.cast_vote(Vote {
-                voter: voter.address.clone(),
-                voter_type: voter.voter_type,
-                proposal_id,
-                vote: VoteChoice::Approve,
-                voting_power: 1_000,
-                voted_at: now(),
-                signature: sig,
-            }).unwrap();
+            layer1
+                .cast_vote(Vote {
+                    voter: voter.address.clone(),
+                    voter_type: voter.voter_type,
+                    proposal_id,
+                    vote: VoteChoice::Approve,
+                    voting_power: 1_000,
+                    voted_at: now(),
+                    signature: sig,
+                })
+                .unwrap();
         }
 
         // Finalize (force as if deadline passed by checking tally)
@@ -562,7 +624,10 @@ mod tests {
     async fn test_emergency_pause() {
         let (layer1, _) = make_layer1().await;
         assert!(!layer1.is_paused().await);
-        layer1.emergency.pause("Quantum attack detected".into()).await;
+        layer1
+            .emergency
+            .pause("Quantum attack detected".into())
+            .await;
         assert!(layer1.is_paused().await);
         layer1.resume().await;
         assert!(!layer1.is_paused().await);

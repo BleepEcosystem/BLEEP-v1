@@ -35,9 +35,7 @@ use tracing::{info, instrument};
 /// Encodes calldata in the target chain's native format.
 pub fn encode_for_chain(chain: &ChainId, calldata: &[u8]) -> VmResult<Vec<u8>> {
     match chain {
-        ChainId::Ethereum | ChainId::EthereumL2(_) => {
-            Ok(calldata.to_vec())
-        }
+        ChainId::Ethereum | ChainId::EthereumL2(_) => Ok(calldata.to_vec()),
 
         ChainId::Solana => {
             let mut encoded = Vec::with_capacity(4 + calldata.len());
@@ -117,13 +115,13 @@ pub fn encode_for_chain(chain: &ChainId, calldata: &[u8]) -> VmResult<Vec<u8>> {
 /// Decodes a response from a remote chain back to BLEEP-native format.
 pub fn decode_from_chain(chain: &ChainId, response: &[u8]) -> VmResult<Vec<u8>> {
     match chain {
-        ChainId::Ethereum | ChainId::EthereumL2(_) | ChainId::Bleep => {
-            Ok(response.to_vec())
-        }
+        ChainId::Ethereum | ChainId::EthereumL2(_) | ChainId::Bleep => Ok(response.to_vec()),
         ChainId::Solana => {
-            if response.len() < 4 { return Ok(response.to_vec()); }
-            let len = u32::from_le_bytes([response[0], response[1], response[2], response[3]])
-                as usize;
+            if response.len() < 4 {
+                return Ok(response.to_vec());
+            }
+            let len =
+                u32::from_le_bytes([response[0], response[1], response[2], response[3]]) as usize;
             if response.len() >= 4 + len {
                 Ok(response[4..4 + len].to_vec())
             } else {
@@ -161,35 +159,35 @@ pub enum MessageStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossChainMessage {
-    pub id:                [u8; 32],
-    pub source_chain:      ChainId,
+    pub id: [u8; 32],
+    pub source_chain: ChainId,
     pub destination_chain: ChainId,
-    pub sender:            Vec<u8>,
-    pub contract:          Vec<u8>,
-    pub encoded_calldata:  Vec<u8>,
-    pub source_gas_limit:  u64,
-    pub dest_gas_limit:    u64,
-    pub bridge_value:      u128,
-    pub relay_fee:         u128,
-    pub require_zk_proof:  bool,
-    pub status:            MessageStatus,
-    pub created_at:        u64,
-    pub timeout_at:        u64,
-    pub source_proof:      Option<Vec<u8>>,
-    pub response:          Option<Vec<u8>>,
+    pub sender: Vec<u8>,
+    pub contract: Vec<u8>,
+    pub encoded_calldata: Vec<u8>,
+    pub source_gas_limit: u64,
+    pub dest_gas_limit: u64,
+    pub bridge_value: u128,
+    pub relay_fee: u128,
+    pub require_zk_proof: bool,
+    pub status: MessageStatus,
+    pub created_at: u64,
+    pub timeout_at: u64,
+    pub source_proof: Option<Vec<u8>>,
+    pub response: Option<Vec<u8>>,
 }
 
 impl CrossChainMessage {
     pub fn new(
-        source_chain:      ChainId,
+        source_chain: ChainId,
         destination_chain: ChainId,
-        sender:            Vec<u8>,
-        contract:          Vec<u8>,
-        encoded_calldata:  Vec<u8>,
-        dest_gas_limit:    u64,
-        bridge_value:      u128,
-        relay_fee:         u128,
-        require_zk_proof:  bool,
+        sender: Vec<u8>,
+        contract: Vec<u8>,
+        encoded_calldata: Vec<u8>,
+        dest_gas_limit: u64,
+        bridge_value: u128,
+        relay_fee: u128,
+        require_zk_proof: bool,
     ) -> Self {
         let now = unix_now();
         let id = Self::compute_id(
@@ -212,17 +210,20 @@ impl CrossChainMessage {
             bridge_value,
             relay_fee,
             require_zk_proof,
-            status:     MessageStatus::Pending,
+            status: MessageStatus::Pending,
             created_at: now,
             timeout_at: now + 3600,
             source_proof: None,
-            response:     None,
+            response: None,
         }
     }
 
     pub fn compute_id(
-        src: &ChainId, dst: &ChainId,
-        sender: &[u8], contract: &[u8], calldata: &[u8],
+        src: &ChainId,
+        dst: &ChainId,
+        sender: &[u8],
+        contract: &[u8],
+        calldata: &[u8],
         ts: u64,
     ) -> [u8; 32] {
         let mut h = Sha256::new();
@@ -241,17 +242,17 @@ impl CrossChainMessage {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct ConnectBridge {
-    gas_model:        GasModel,
+    gas_model: GasModel,
     supported_chains: HashMap<String, ChainConfig>,
-    pending:          parking_lot::RwLock<HashMap<[u8; 32], CrossChainMessage>>,
+    pending: parking_lot::RwLock<HashMap<[u8; 32], CrossChainMessage>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ChainConfig {
-    pub chain_id:            ChainId,
-    pub relayer_url:         String,
+    pub chain_id: ChainId,
+    pub relayer_url: String,
     pub confirmation_blocks: u32,
-    pub max_message_size:    usize,
+    pub max_message_size: usize,
 }
 
 impl ConnectBridge {
@@ -259,22 +260,67 @@ impl ConnectBridge {
         let mut supported_chains = HashMap::new();
 
         let chains: Vec<(&str, ChainId, &str, u32, usize)> = vec![
-            ("ethereum", ChainId::Ethereum,  "https://relay.bleep.network/eth",    12, 128_000),
-            ("solana",   ChainId::Solana,    "https://relay.bleep.network/sol",     1, 1_232),
-            ("cosmos",   ChainId::CosmosHub, "https://relay.bleep.network/cosmos",  6, 256_000),
-            ("polkadot", ChainId::Polkadot,  "https://relay.bleep.network/dot",     2, 262_144),
-            ("near",     ChainId::Near,      "https://relay.bleep.network/near",    1, 1_048_576),
-            ("sui",      ChainId::Sui,       "https://relay.bleep.network/sui",     1, 131_072),
-            ("aptos",    ChainId::Aptos,     "https://relay.bleep.network/aptos",   1, 131_072),
+            (
+                "ethereum",
+                ChainId::Ethereum,
+                "https://relay.bleep.network/eth",
+                12,
+                128_000,
+            ),
+            (
+                "solana",
+                ChainId::Solana,
+                "https://relay.bleep.network/sol",
+                1,
+                1_232,
+            ),
+            (
+                "cosmos",
+                ChainId::CosmosHub,
+                "https://relay.bleep.network/cosmos",
+                6,
+                256_000,
+            ),
+            (
+                "polkadot",
+                ChainId::Polkadot,
+                "https://relay.bleep.network/dot",
+                2,
+                262_144,
+            ),
+            (
+                "near",
+                ChainId::Near,
+                "https://relay.bleep.network/near",
+                1,
+                1_048_576,
+            ),
+            (
+                "sui",
+                ChainId::Sui,
+                "https://relay.bleep.network/sui",
+                1,
+                131_072,
+            ),
+            (
+                "aptos",
+                ChainId::Aptos,
+                "https://relay.bleep.network/aptos",
+                1,
+                131_072,
+            ),
         ];
 
         for (key, chain_id, url, confirmations, max_size) in chains {
-            supported_chains.insert(key.to_string(), ChainConfig {
-                chain_id,
-                relayer_url: url.to_string(),
-                confirmation_blocks: confirmations,
-                max_message_size: max_size,
-            });
+            supported_chains.insert(
+                key.to_string(),
+                ChainConfig {
+                    chain_id,
+                    relayer_url: url.to_string(),
+                    confirmation_blocks: confirmations,
+                    max_message_size: max_size,
+                },
+            );
         }
 
         ConnectBridge {
@@ -292,10 +338,12 @@ impl ConnectBridge {
     ) -> VmResult<([u8; 32], StateDiff)> {
         let chain_key = chain_key(&intent.destination_chain);
 
-        let config = self.supported_chains.get(chain_key)
-            .ok_or_else(|| VmError::ValidationError(
-                format!("Unsupported destination chain: {}", intent.destination_chain),
-            ))?;
+        let config = self.supported_chains.get(chain_key).ok_or_else(|| {
+            VmError::ValidationError(format!(
+                "Unsupported destination chain: {}",
+                intent.destination_chain
+            ))
+        })?;
 
         if intent.calldata.len() > config.max_message_size {
             return Err(VmError::ValidationError(format!(
@@ -335,13 +383,12 @@ impl ConnectBridge {
 
         let mut diff = StateDiff::empty();
         diff.add_balance_update(*sender, -(intent.relay_fee as i128));
-        diff.gas_charged = self.gas_model.cross_chain_base()
-            + (intent.calldata.len() as u64 * 10);
+        diff.gas_charged = self.gas_model.cross_chain_base() + (intent.calldata.len() as u64 * 10);
 
         // Emit bridge event (BLEEP Connect contract address = [0xBB; 32])
         let contract_bytes = [0xBBu8; 32];
         let mut topic_chain = [0u8; 32];
-        let dst_str  = intent.destination_chain.to_string();
+        let dst_str = intent.destination_chain.to_string();
         let copy_len = dst_str.len().min(32);
         topic_chain[..copy_len].copy_from_slice(&dst_str.as_bytes()[..copy_len]);
 
@@ -359,11 +406,10 @@ impl ConnectBridge {
     }
 
     pub fn pending_for_chain(&self, chain: &ChainId) -> Vec<[u8; 32]> {
-        self.pending.read()
+        self.pending
+            .read()
             .iter()
-            .filter(|(_, m)| {
-                &m.destination_chain == chain && m.status == MessageStatus::Pending
-            })
+            .filter(|(_, m)| &m.destination_chain == chain && m.status == MessageStatus::Pending)
             .map(|(id, _)| *id)
             .collect()
     }
@@ -373,25 +419,30 @@ impl ConnectBridge {
     }
 
     pub fn supported_chains(&self) -> Vec<&ChainId> {
-        self.supported_chains.values().map(|c| &c.chain_id).collect()
+        self.supported_chains
+            .values()
+            .map(|c| &c.chain_id)
+            .collect()
     }
 }
 
 impl Default for ConnectBridge {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn chain_key(chain: &ChainId) -> &'static str {
     match chain {
         ChainId::Ethereum | ChainId::EthereumL2(_) => "ethereum",
-        ChainId::Solana    => "solana",
+        ChainId::Solana => "solana",
         ChainId::CosmosHub => "cosmos",
-        ChainId::Polkadot  => "polkadot",
-        ChainId::Near      => "near",
-        ChainId::Sui       => "sui",
-        ChainId::Aptos     => "aptos",
-        ChainId::Bleep     => "bleep",
-        _                  => "unknown",
+        ChainId::Polkadot => "polkadot",
+        ChainId::Near => "near",
+        ChainId::Sui => "sui",
+        ChainId::Aptos => "aptos",
+        ChainId::Bleep => "bleep",
+        _ => "unknown",
     }
 }
 
@@ -412,14 +463,14 @@ mod tests {
 
     #[test]
     fn test_encode_for_evm_passthrough() {
-        let data    = vec![0x12u8, 0x34, 0x56];
+        let data = vec![0x12u8, 0x34, 0x56];
         let encoded = encode_for_chain(&ChainId::Ethereum, &data).unwrap();
         assert_eq!(encoded, data);
     }
 
     #[test]
     fn test_encode_for_solana_length_prefix() {
-        let data    = vec![0xAAu8, 0xBB, 0xCC];
+        let data = vec![0xAAu8, 0xBB, 0xCC];
         let encoded = encode_for_chain(&ChainId::Solana, &data).unwrap();
         assert_eq!(&encoded[0..4], &[3u8, 0, 0, 0]);
         assert_eq!(&encoded[4..], &data);
@@ -427,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_decode_solana_roundtrip() {
-        let data    = vec![0x01u8, 0x02, 0x03, 0x04];
+        let data = vec![0x01u8, 0x02, 0x03, 0x04];
         let encoded = encode_for_chain(&ChainId::Solana, &data).unwrap();
         let decoded = decode_from_chain(&ChainId::Solana, &encoded).unwrap();
         assert_eq!(decoded, data);
@@ -435,15 +486,15 @@ mod tests {
 
     #[test]
     fn test_bitcoin_size_limit() {
-        let ok_data  = vec![0u8; 80];
+        let ok_data = vec![0u8; 80];
         assert!(encode_for_chain(&ChainId::Bitcoin, &ok_data).is_ok());
-        let too_big  = vec![0u8; 81];
+        let too_big = vec![0u8; 81];
         assert!(encode_for_chain(&ChainId::Bitcoin, &too_big).is_err());
     }
 
     #[test]
     fn test_sui_bcs_encoding() {
-        let data    = vec![0xAAu8; 5];
+        let data = vec![0xAAu8; 5];
         let encoded = encode_for_chain(&ChainId::Sui, &data).unwrap();
         assert_eq!(encoded[0], 5u8);
         assert_eq!(&encoded[1..], &data);
@@ -451,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_cosmos_json_encoding() {
-        let data    = vec![0x01u8, 0x02];
+        let data = vec![0x01u8, 0x02];
         let encoded = encode_for_chain(&ChainId::CosmosHub, &data).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(json["type"], "wasm/execute");
@@ -472,13 +523,13 @@ mod tests {
         let sender = [0x01u8; 32];
         let intent = CrossChainIntent {
             destination_chain: ChainId::Ethereum,
-            contract:          vec![0xABu8; 20],
-            calldata:          vec![0x12, 0x34, 0x56],
-            source_gas_limit:  100_000,
-            dest_gas_limit:    200_000,
-            bridge_value:      0,
-            relay_fee:         1_000,
-            require_zk_proof:  false,
+            contract: vec![0xABu8; 20],
+            calldata: vec![0x12, 0x34, 0x56],
+            source_gas_limit: 100_000,
+            dest_gas_limit: 200_000,
+            bridge_value: 0,
+            relay_fee: 1_000,
+            require_zk_proof: false,
         };
         let (msg_id, diff) = bridge.submit(&intent, &sender).await.unwrap();
         assert_ne!(msg_id, [0u8; 32]);
@@ -492,13 +543,13 @@ mod tests {
         let sender = [0u8; 32];
         let intent = CrossChainIntent {
             destination_chain: ChainId::Bitcoin,
-            contract:          vec![],
-            calldata:          vec![],
-            source_gas_limit:  100_000,
-            dest_gas_limit:    100_000,
-            bridge_value:      0,
-            relay_fee:         0,
-            require_zk_proof:  false,
+            contract: vec![],
+            calldata: vec![],
+            source_gas_limit: 100_000,
+            dest_gas_limit: 100_000,
+            bridge_value: 0,
+            relay_fee: 0,
+            require_zk_proof: false,
         };
         assert!(bridge.submit(&intent, &sender).await.is_err());
     }
@@ -509,13 +560,13 @@ mod tests {
         let sender = [0u8; 32];
         let intent = CrossChainIntent {
             destination_chain: ChainId::Solana,
-            contract:          vec![0u8; 32],
-            calldata:          vec![1, 2, 3],
-            source_gas_limit:  100_000,
-            dest_gas_limit:    100_000,
-            bridge_value:      0,
-            relay_fee:         500,
-            require_zk_proof:  false,
+            contract: vec![0u8; 32],
+            calldata: vec![1, 2, 3],
+            source_gas_limit: 100_000,
+            dest_gas_limit: 100_000,
+            bridge_value: 0,
+            relay_fee: 500,
+            require_zk_proof: false,
         };
         let (msg_id, _) = bridge.submit(&intent, &sender).await.unwrap();
         assert_eq!(bridge.status(&msg_id), Some(MessageStatus::Pending));
@@ -525,12 +576,20 @@ mod tests {
     fn test_message_id_determinism() {
         let now = unix_now();
         let id1 = CrossChainMessage::compute_id(
-            &ChainId::Bleep, &ChainId::Ethereum,
-            &[1u8; 32], &[2u8; 20], &[3, 4], now,
+            &ChainId::Bleep,
+            &ChainId::Ethereum,
+            &[1u8; 32],
+            &[2u8; 20],
+            &[3, 4],
+            now,
         );
         let id2 = CrossChainMessage::compute_id(
-            &ChainId::Bleep, &ChainId::Ethereum,
-            &[1u8; 32], &[2u8; 20], &[3, 4], now,
+            &ChainId::Bleep,
+            &ChainId::Ethereum,
+            &[1u8; 32],
+            &[2u8; 20],
+            &[3, 4],
+            now,
         );
         assert_eq!(id1, id2);
     }

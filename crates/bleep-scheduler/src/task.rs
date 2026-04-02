@@ -11,11 +11,15 @@ use std::fmt;
 pub struct TaskId(pub String);
 
 impl TaskId {
-    pub fn new(s: &str) -> Self { Self(s.to_string()) }
+    pub fn new(s: &str) -> Self {
+        Self(s.to_string())
+    }
 }
 
 impl fmt::Display for TaskId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 // ── Task Kind ─────────────────────────────────────────────────────────────────
@@ -66,7 +70,7 @@ pub enum Trigger {
 pub enum ExecutionOutcome {
     Success { duration_ms: u64 },
     Skipped { reason: String },
-    Failed  { error: String },
+    Failed { error: String },
     TimedOut,
 }
 
@@ -74,10 +78,10 @@ pub enum ExecutionOutcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunRecord {
-    pub task_id:     String,
-    pub started_at:  chrono::DateTime<chrono::Utc>,
+    pub task_id: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub status:      TaskStatus,
+    pub status: TaskStatus,
     pub duration_ms: Option<u64>,
-    pub error:       Option<String>,
+    pub error: Option<String>,
 }

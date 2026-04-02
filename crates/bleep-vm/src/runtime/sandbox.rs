@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use tracing::debug;
-use wasmparser::{Parser, Payload, Operator};
+use wasmparser::{Operator, Parser, Payload};
 
 use crate::error::{VmError, VmResult};
 
@@ -78,25 +78,25 @@ const FORBIDDEN_IMPORTS: &[&str] = &[
 /// Configurable security policy applied before each execution.
 #[derive(Debug, Clone)]
 pub struct SecurityPolicy {
-    pub allow_floats:          bool,
-    pub allow_simd:            bool,
-    pub allow_bulk_memory:     bool,
-    pub max_bytecode_bytes:    usize,
+    pub allow_floats: bool,
+    pub allow_simd: bool,
+    pub allow_bulk_memory: bool,
+    pub max_bytecode_bytes: usize,
     pub max_memory_grow_calls: u32,
-    pub timeout:               Duration,
-    pub extra_forbidden:       HashSet<String>,
+    pub timeout: Duration,
+    pub extra_forbidden: HashSet<String>,
 }
 
 impl Default for SecurityPolicy {
     fn default() -> Self {
         SecurityPolicy {
-            allow_floats:          true,
-            allow_simd:            false,
-            allow_bulk_memory:     true,
-            max_bytecode_bytes:    MAX_BYTECODE_BYTES,
+            allow_floats: true,
+            allow_simd: false,
+            allow_bulk_memory: true,
+            max_bytecode_bytes: MAX_BYTECODE_BYTES,
             max_memory_grow_calls: 64,
-            timeout:               DEFAULT_EXECUTION_TIMEOUT,
-            extra_forbidden:       HashSet::new(),
+            timeout: DEFAULT_EXECUTION_TIMEOUT,
+            extra_forbidden: HashSet::new(),
         }
     }
 }
@@ -116,12 +116,14 @@ impl SecurityPolicy {
         }
         if bytecode[..4] != WASM_MAGIC {
             return Err(VmError::SecurityViolation(format!(
-                "Invalid WASM magic bytes: {:02x?}", &bytecode[..4]
+                "Invalid WASM magic bytes: {:02x?}",
+                &bytecode[..4]
             )));
         }
         if bytecode[4..8] != WASM_VERSION {
             return Err(VmError::SecurityViolation(format!(
-                "Unsupported WASM version: {:02x?}", &bytecode[4..8]
+                "Unsupported WASM version: {:02x?}",
+                &bytecode[4..8]
             )));
         }
         Ok(())
@@ -131,7 +133,8 @@ impl SecurityPolicy {
         if bytecode.len() > self.max_bytecode_bytes {
             return Err(VmError::SecurityViolation(format!(
                 "Bytecode size {} exceeds limit {}",
-                bytecode.len(), self.max_bytecode_bytes
+                bytecode.len(),
+                self.max_bytecode_bytes
             )));
         }
         Ok(())
@@ -157,12 +160,12 @@ impl SecurityPolicy {
                         }
                         if !ALLOWED_HOST_MODULES.contains(&imp.module) {
                             return Err(VmError::SecurityViolation(format!(
-                                "Forbidden import module: '{}'", imp.module
+                                "Forbidden import module: '{}'",
+                                imp.module
                             )));
                         }
                         let name = imp.name;
-                        if FORBIDDEN_IMPORTS.contains(&name)
-                            || self.extra_forbidden.contains(name)
+                        if FORBIDDEN_IMPORTS.contains(&name) || self.extra_forbidden.contains(name)
                         {
                             return Err(VmError::ForbiddenSyscall {
                                 syscall: name.to_string(),
@@ -220,10 +223,10 @@ impl SecurityPolicy {
         }
 
         debug!(
-            functions    = report.function_count,
+            functions = report.function_count,
             instructions = report.total_instructions,
-            imports      = report.import_count,
-            exports      = report.export_count,
+            imports = report.import_count,
+            exports = report.export_count,
             "WASM validation passed"
         );
         Ok(report)
@@ -237,17 +240,58 @@ impl SecurityPolicy {
     ) -> VmResult<()> {
         use Operator::*;
         match op {
-            F32Add | F32Sub | F32Mul | F32Div | F32Sqrt | F32Ceil | F32Floor
-            | F32Trunc | F32Nearest | F32Abs | F32Neg | F32Copysign | F32Min | F32Max
-            | F64Add | F64Sub | F64Mul | F64Div | F64Sqrt | F64Ceil | F64Floor
-            | F64Trunc | F64Nearest | F64Abs | F64Neg | F64Copysign | F64Min | F64Max
-            | F32Const { .. } | F64Const { .. }
-            | F32Load { .. } | F64Load { .. } | F32Store { .. } | F64Store { .. }
-            | F32ConvertI32U | F32ConvertI32S | F32ConvertI64U | F32ConvertI64S
-            | F64ConvertI32U | F64ConvertI32S | F64ConvertI64U | F64ConvertI64S
-            | I32TruncF32U | I32TruncF32S | I32TruncF64U | I32TruncF64S
-            | I64TruncF32U | I64TruncF32S | I64TruncF64U | I64TruncF64S
-            | F32DemoteF64 | F64PromoteF32 => {
+            F32Add
+            | F32Sub
+            | F32Mul
+            | F32Div
+            | F32Sqrt
+            | F32Ceil
+            | F32Floor
+            | F32Trunc
+            | F32Nearest
+            | F32Abs
+            | F32Neg
+            | F32Copysign
+            | F32Min
+            | F32Max
+            | F64Add
+            | F64Sub
+            | F64Mul
+            | F64Div
+            | F64Sqrt
+            | F64Ceil
+            | F64Floor
+            | F64Trunc
+            | F64Nearest
+            | F64Abs
+            | F64Neg
+            | F64Copysign
+            | F64Min
+            | F64Max
+            | F32Const { .. }
+            | F64Const { .. }
+            | F32Load { .. }
+            | F64Load { .. }
+            | F32Store { .. }
+            | F64Store { .. }
+            | F32ConvertI32U
+            | F32ConvertI32S
+            | F32ConvertI64U
+            | F32ConvertI64S
+            | F64ConvertI32U
+            | F64ConvertI32S
+            | F64ConvertI64U
+            | F64ConvertI64S
+            | I32TruncF32U
+            | I32TruncF32S
+            | I32TruncF64U
+            | I32TruncF64S
+            | I64TruncF32U
+            | I64TruncF32S
+            | I64TruncF64U
+            | I64TruncF64S
+            | F32DemoteF64
+            | F64PromoteF32 => {
                 if !self.allow_floats {
                     return Err(VmError::SecurityViolation(
                         "Floating-point instructions are disabled by security policy".into(),
@@ -330,16 +374,16 @@ impl Default for SandboxValidator {
 
 #[derive(Debug, Default, Clone)]
 pub struct ValidationReport {
-    pub function_count:      u32,
-    pub total_instructions:  u64,
-    pub import_count:        u32,
-    pub export_count:        u32,
-    pub table_count:         u32,
-    pub global_count:        u32,
-    pub float_instructions:  u64,
-    pub unreachable_count:   u64,
-    pub imports:             Vec<String>,
-    pub exports:             Vec<String>,
+    pub function_count: u32,
+    pub total_instructions: u64,
+    pub import_count: u32,
+    pub export_count: u32,
+    pub table_count: u32,
+    pub global_count: u32,
+    pub float_instructions: u64,
+    pub unreachable_count: u64,
+    pub imports: Vec<String>,
+    pub exports: Vec<String>,
 }
 
 impl ValidationReport {
@@ -366,21 +410,34 @@ mod tests {
     fn test_invalid_magic_rejected() {
         let policy = SecurityPolicy::default();
         let bad = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00];
-        assert!(matches!(policy.validate(&bad), Err(VmError::SecurityViolation(_))));
+        assert!(matches!(
+            policy.validate(&bad),
+            Err(VmError::SecurityViolation(_))
+        ));
     }
 
     #[test]
     fn test_too_short_rejected() {
         let policy = SecurityPolicy::default();
-        assert!(matches!(policy.validate(&[0x00, 0x61]), Err(VmError::SecurityViolation(_))));
+        assert!(matches!(
+            policy.validate(&[0x00, 0x61]),
+            Err(VmError::SecurityViolation(_))
+        ));
     }
 
     #[test]
     fn test_oversized_bytecode_rejected() {
-        let policy = SecurityPolicy { max_bytecode_bytes: 10, ..Default::default() };
-        let large = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
-                         0x00, 0x00, 0x00];
-        assert!(matches!(policy.validate(&large), Err(VmError::SecurityViolation(_))));
+        let policy = SecurityPolicy {
+            max_bytecode_bytes: 10,
+            ..Default::default()
+        };
+        let large = vec![
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert!(matches!(
+            policy.validate(&large),
+            Err(VmError::SecurityViolation(_))
+        ));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // PHASE 1: FINALITY PROOFS & CERTIFICATES
 // Cryptographic proofs that a block is irreversibly finalized
-// 
+//
 // SAFETY INVARIANTS:
 // 1. A finalized block's hash cannot change
 // 2. Finality proofs are cryptographically verifiable
@@ -8,40 +8,40 @@
 // 4. Proofs are deterministic (same input → same proof)
 // 5. Proofs can be stored on-chain or in light client proofs
 
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 use log::info;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A finality certificate: cryptographic proof that a block is finalized.
-/// 
+///
 /// SAFETY: This certificate can be verified by any node in the network
 /// and proves that a block has been finalized under consensus rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalizyCertificate {
     /// Block height that was finalized
     pub block_height: u64,
-    
+
     /// Hash of the finalized block (immutable)
     pub block_hash: String,
-    
+
     /// Epoch during which block was finalized
     pub finalized_epoch: u64,
-    
+
     /// Consensus mode used to finalize this block
     pub consensus_mode: String,
-    
+
     /// List of validator IDs that participated in finalization
     pub validator_signatures: Vec<ValidatorSignature>,
-    
+
     /// Aggregated signature from participating validators (optional BLS aggregation)
     pub aggregate_signature: Vec<u8>,
-    
+
     /// Merkle root of all transactions in the block
     pub merkle_root: String,
-    
+
     /// Timestamp when finality was achieved (seconds since epoch)
     pub finalized_timestamp: u64,
-    
+
     /// Protocol version used
     pub protocol_version: u32,
 }
@@ -78,7 +78,7 @@ impl FinalizyCertificate {
     }
 
     /// Add a validator's signature to this certificate.
-    /// 
+    ///
     /// SAFETY: The same validator should only sign once.
     pub fn add_validator_signature(
         &mut self,
@@ -92,7 +92,10 @@ impl FinalizyCertificate {
             .iter()
             .any(|s| s.validator_id == validator_id)
         {
-            return Err(format!("Validator {} already signed this certificate", validator_id));
+            return Err(format!(
+                "Validator {} already signed this certificate",
+                validator_id
+            ));
         }
 
         self.validator_signatures.push(ValidatorSignature {
@@ -106,7 +109,10 @@ impl FinalizyCertificate {
 
     /// Get the total voting power of all signers.
     pub fn total_voting_power(&self) -> u128 {
-        self.validator_signatures.iter().map(|s| s.voting_power).sum()
+        self.validator_signatures
+            .iter()
+            .map(|s| s.voting_power)
+            .sum()
     }
 
     /// Get the count of validators that signed.
@@ -115,7 +121,7 @@ impl FinalizyCertificate {
     }
 
     /// Check if this certificate meets the 2/3 quorum threshold.
-    /// 
+    ///
     /// SAFETY: For Byzantine fault tolerance, we need >2/3 of total stake.
     pub fn meets_quorum(&self, total_stake: u128) -> bool {
         let threshold = (total_stake * 2) / 3;
@@ -123,7 +129,7 @@ impl FinalizyCertificate {
     }
 
     /// Verify that the block hash hasn't been tampered with.
-    /// 
+    ///
     /// SAFETY: This is a basic hash verification.
     /// Cryptographic verification of signatures would use public keys.
     pub fn verify_hash(&self, claimed_hash: &str) -> Result<(), String> {
@@ -153,26 +159,26 @@ impl FinalizyCertificate {
 pub struct ValidatorSignature {
     /// Validator ID that provided the signature
     pub validator_id: String,
-    
+
     /// The actual digital signature (post-quantum safe)
     pub signature: Vec<u8>,
-    
+
     /// Voting power of this validator at time of signing
     pub voting_power: u128,
 }
 
 /// Finality proof: evidence that a block is finalized.
-/// 
+///
 /// SAFETY: This proof can be included in transactions or stored separately.
 /// It provides cryptographic evidence of finality.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalityProof {
     /// The finality certificate
     pub certificate: FinalizyCertificate,
-    
+
     /// Optional: Merkle path from the block to a finalized anchor
     pub merkle_path: Vec<String>,
-    
+
     /// Optional: List of other blocks that depend on this finality
     pub dependent_blocks: Vec<u64>,
 }
@@ -200,7 +206,7 @@ impl FinalityProof {
     }
 
     /// Verify the finality proof.
-    /// 
+    ///
     /// SAFETY: In a production system, this would verify:
     /// 1. Certificate quorum (>2/3 stake)
     /// 2. Signature validity
@@ -223,19 +229,19 @@ impl FinalityProof {
 }
 
 /// Finality manager: tracks finalized blocks and manages finality proofs.
-/// 
+///
 /// SAFETY: This is the authoritative record of what has been finalized.
 /// Once a block is recorded here, it is immutable.
 pub struct FinalizityManager {
     /// Map of block height to finality certificate
     finalized_blocks: HashMap<u64, FinalizyCertificate>,
-    
+
     /// Map of block height to finality proof
     finality_proofs: HashMap<u64, FinalityProof>,
-    
+
     /// Total stake of the network (used for quorum calculation)
     total_stake: u128,
-    
+
     /// Highest block height that has been finalized
     highest_finalized_height: u64,
 }
@@ -252,7 +258,7 @@ impl FinalizityManager {
     }
 
     /// Record that a block has been finalized.
-    /// 
+    ///
     /// SAFETY: Once finalized, a block cannot be changed.
     pub fn finalize_block(&mut self, certificate: FinalizyCertificate) -> Result<(), String> {
         let height = certificate.block_height;
@@ -363,8 +369,10 @@ mod tests {
         )
         .unwrap();
 
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 100).unwrap();
-        cert.add_validator_signature("v2".to_string(), vec![4, 5, 6], 200).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 100)
+            .unwrap();
+        cert.add_validator_signature("v2".to_string(), vec![4, 5, 6], 200)
+            .unwrap();
 
         assert_eq!(cert.signer_count(), 2);
         assert_eq!(cert.total_voting_power(), 300);
@@ -383,7 +391,8 @@ mod tests {
         )
         .unwrap();
 
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 100).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 100)
+            .unwrap();
 
         // Try to add duplicate signature from v1
         let result = cert.add_validator_signature("v1".to_string(), vec![4, 5, 6], 100);
@@ -406,10 +415,12 @@ mod tests {
         let total_stake = 1000;
 
         // Need >2/3 of 1000 = > 666
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 600).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 600)
+            .unwrap();
         assert!(!cert.meets_quorum(total_stake));
 
-        cert.add_validator_signature("v2".to_string(), vec![4, 5, 6], 100).unwrap();
+        cert.add_validator_signature("v2".to_string(), vec![4, 5, 6], 100)
+            .unwrap();
         assert!(cert.meets_quorum(total_stake));
     }
 
@@ -426,7 +437,8 @@ mod tests {
         )
         .unwrap();
 
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700)
+            .unwrap();
 
         let proof = FinalityProof::new(cert);
         assert!(proof.verify(1000).is_ok());
@@ -447,7 +459,8 @@ mod tests {
         )
         .unwrap();
 
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700)
+            .unwrap();
 
         manager.finalize_block(cert).unwrap();
 
@@ -470,7 +483,8 @@ mod tests {
         )
         .unwrap();
 
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700)
+            .unwrap();
 
         manager.finalize_block(cert.clone()).unwrap();
 
@@ -495,7 +509,8 @@ mod tests {
         .unwrap();
 
         // Only 600 of 1000 stake = not enough
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 600).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 600)
+            .unwrap();
 
         let result = manager.finalize_block(cert);
         assert!(result.is_err());

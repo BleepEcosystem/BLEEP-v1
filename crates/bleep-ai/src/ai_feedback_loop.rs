@@ -16,7 +16,6 @@
 /// - Miscalibrated confidence triggers model retraining
 /// - Systematic bias is detected and corrected
 /// - Model drift over time triggers governance review
-
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -308,7 +307,12 @@ impl ModelPerformance {
     }
 
     /// Record inference execution
-    pub fn record_inference(&mut self, latency_ms: f32, correct: bool, confidence: f32) -> FeedbackResult<()> {
+    pub fn record_inference(
+        &mut self,
+        latency_ms: f32,
+        correct: bool,
+        confidence: f32,
+    ) -> FeedbackResult<()> {
         // Update latency
         self.avg_latency_ms = (self.avg_latency_ms + latency_ms) / 2.0;
         self.min_latency_ms = self.min_latency_ms.min(latency_ms);
@@ -335,8 +339,9 @@ impl ModelPerformance {
             50.0
         };
 
-        self.performance_score = (accuracy_score * 0.5 + calibration_score * 0.3 + latency_score * 0.2)
-            .clamp(0.0, 100.0);
+        self.performance_score =
+            (accuracy_score * 0.5 + calibration_score * 0.3 + latency_score * 0.2)
+                .clamp(0.0, 100.0);
     }
 
     /// Detect model drift
@@ -422,7 +427,11 @@ impl FeedbackManager {
     }
 
     /// Get model performance
-    pub fn get_model_performance(&self, model_id: &str, model_version: &str) -> Option<ModelPerformance> {
+    pub fn get_model_performance(
+        &self,
+        model_id: &str,
+        model_version: &str,
+    ) -> Option<ModelPerformance> {
         let key = format!("{}:{}", model_id, model_version);
         self.models.get(&key).cloned()
     }
@@ -447,10 +456,14 @@ impl FeedbackManager {
             return 0.0;
         }
 
-        let total_correct: u64 = self.models.values()
+        let total_correct: u64 = self
+            .models
+            .values()
             .map(|m| m.accuracy.correct_predictions)
             .sum();
-        let total_predictions: u64 = self.models.values()
+        let total_predictions: u64 = self
+            .models
+            .values()
             .map(|m| m.accuracy.total_predictions)
             .sum();
 
@@ -548,8 +561,12 @@ mod tests {
         let mut manager = FeedbackManager::new(0);
         manager.register_model("test".to_string(), "1.0".to_string());
 
-        manager.record_outcome("test", "1.0", 10.0, true, 0.9).unwrap();
-        manager.record_outcome("test", "1.0", 12.0, true, 0.85).unwrap();
+        manager
+            .record_outcome("test", "1.0", 10.0, true, 0.9)
+            .unwrap();
+        manager
+            .record_outcome("test", "1.0", 12.0, true, 0.85)
+            .unwrap();
 
         let perf = manager.get_model_performance("test", "1.0");
         assert!(perf.is_some());

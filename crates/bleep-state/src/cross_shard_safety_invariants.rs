@@ -210,10 +210,8 @@
 //! 6. **Review slashing evidence**: Byzantine behavior is provable
 //! 7. **Trace recovery paths**: All recovery is consensus-verifiable
 
-use crate::cross_shard_transaction::{
-    CrossShardTransactionStatus,
-};
 use crate::cross_shard_locking::ShardLockManager;
+use crate::cross_shard_transaction::CrossShardTransactionStatus;
 use crate::shard_registry::ShardId;
 use std::collections::BTreeSet;
 
@@ -231,7 +229,7 @@ impl SafetyVerifier {
             _ => Err("Transaction not in terminal state".to_string()),
         }
     }
-    
+
     /// Verify coordinator is deterministic
     pub fn verify_coordinator_deterministic(
         involved_shards: &BTreeSet<ShardId>,
@@ -239,12 +237,12 @@ impl SafetyVerifier {
         if involved_shards.is_empty() {
             return Err("No shards involved".to_string());
         }
-        
+
         // Coordinator must be smallest shard
         let coordinator = *involved_shards.iter().next().unwrap();
         Ok(coordinator)
     }
-    
+
     /// Verify locking manager consistency
     pub fn verify_lock_consistency(manager: &ShardLockManager) -> Result<(), String> {
         manager.verify_consistency()
@@ -259,21 +257,15 @@ mod safety_tests {
     #[test]
     fn test_atomicity_verification() {
         // Valid terminal states
-        assert!(SafetyVerifier::verify_atomicity(
-            CrossShardTransactionStatus::Committed
-        )
-        .is_ok());
-        
-        assert!(SafetyVerifier::verify_atomicity(
-            CrossShardTransactionStatus::AbortedPrepare
-        )
-        .is_ok());
-        
+        assert!(SafetyVerifier::verify_atomicity(CrossShardTransactionStatus::Committed).is_ok());
+
+        assert!(
+            SafetyVerifier::verify_atomicity(CrossShardTransactionStatus::AbortedPrepare).is_ok()
+        );
+
         // Invalid non-terminal states
         assert!(SafetyVerifier::verify_atomicity(CrossShardTransactionStatus::Pending).is_err());
-        assert!(
-            SafetyVerifier::verify_atomicity(CrossShardTransactionStatus::Preparing).is_err()
-        );
+        assert!(SafetyVerifier::verify_atomicity(CrossShardTransactionStatus::Preparing).is_err());
     }
 
     #[test]
@@ -282,9 +274,9 @@ mod safety_tests {
         shards.insert(ShardId(2));
         shards.insert(ShardId(0));
         shards.insert(ShardId(1));
-        
+
         let coordinator = SafetyVerifier::verify_coordinator_deterministic(&shards).unwrap();
-        
+
         // Must be smallest shard ID
         assert_eq!(coordinator, ShardId(0));
     }
@@ -294,12 +286,12 @@ mod safety_tests {
         let mut shards = BTreeSet::new();
         shards.insert(ShardId(0));
         shards.insert(ShardId(1));
-        
+
         let tx = CrossShardTransaction::new(vec![1, 2, 3], shards, EpochId(5), 42).unwrap();
-        
+
         // Transaction starts pending
         assert_eq!(tx.status, CrossShardTransactionStatus::Pending);
-        
+
         // Coordinator would process 2PC phases
         let coordinator_shard = tx.get_coordinator_shard();
         assert_eq!(coordinator_shard, ShardId(0));
@@ -308,7 +300,7 @@ mod safety_tests {
     #[test]
     fn test_lock_manager_consistency() {
         let manager = ShardLockManager::new(ShardId(0));
-        
+
         // Should verify cleanly when no locks
         assert!(manager.verify_consistency().is_ok());
     }

@@ -11,7 +11,7 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng as AeadOsRng},
     Aes256Gcm, Key, Nonce,
 };
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use pqcrypto_kyber::kyber768;
 use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
@@ -139,13 +139,19 @@ impl Ed25519Keypair {
         let mut rng = rand::thread_rng();
         let signing_key = SigningKey::generate(&mut rng);
         let verifying_key = signing_key.verifying_key();
-        Ed25519Keypair { signing_key, verifying_key }
+        Ed25519Keypair {
+            signing_key,
+            verifying_key,
+        }
     }
 
     pub fn from_bytes(secret_bytes: &[u8; 32]) -> P2PResult<Self> {
         let signing_key = SigningKey::from_bytes(secret_bytes);
         let verifying_key = signing_key.verifying_key();
-        Ok(Ed25519Keypair { signing_key, verifying_key })
+        Ok(Ed25519Keypair {
+            signing_key,
+            verifying_key,
+        })
     }
 
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
@@ -158,7 +164,11 @@ impl Ed25519Keypair {
 }
 
 /// Verify an Ed25519 signature.
-pub fn ed25519_verify(message: &[u8], signature_bytes: &[u8], public_key_bytes: &[u8]) -> P2PResult<()> {
+pub fn ed25519_verify(
+    message: &[u8],
+    signature_bytes: &[u8],
+    public_key_bytes: &[u8],
+) -> P2PResult<()> {
     let vk_bytes: &[u8; 32] = public_key_bytes
         .try_into()
         .map_err(|_| P2PError::Crypto("Ed25519 pk must be 32 bytes".into()))?;
@@ -168,7 +178,8 @@ pub fn ed25519_verify(message: &[u8], signature_bytes: &[u8], public_key_bytes: 
         .try_into()
         .map_err(|_| P2PError::Crypto("Ed25519 sig must be 64 bytes".into()))?;
     let sig = Signature::from_bytes(sig_bytes);
-    vk.verify(message, &sig).map_err(|_| P2PError::AuthenticationFailed)
+    vk.verify(message, &sig)
+        .map_err(|_| P2PError::AuthenticationFailed)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +191,8 @@ pub fn ed25519_verify(message: &[u8], signature_bytes: &[u8], public_key_bytes: 
 pub fn derive_key(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<sha2::Sha256>::new(Some(salt), ikm);
     let mut okm = [0u8; 32];
-    hk.expand(info, &mut okm).expect("HKDF expand should not fail for 32-byte output");
+    hk.expand(info, &mut okm)
+        .expect("HKDF expand should not fail for 32-byte output");
     okm
 }
 

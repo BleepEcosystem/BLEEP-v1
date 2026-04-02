@@ -2,10 +2,9 @@
 ///
 /// Trust-minimized integration with external data sources.
 /// Multi-source aggregation, cryptographic commitments, and slashing for false data.
-
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use sha2::{Sha256, Digest};
 use thiserror::Error;
 
 /// Oracle data source identifier
@@ -257,10 +256,7 @@ impl OracleBridgeEngine {
     }
 
     /// Submit price update from oracle operator
-    pub fn submit_price_update(
-        &mut self,
-        update: PriceUpdate,
-    ) -> Result<(), OracleError> {
+    pub fn submit_price_update(&mut self, update: PriceUpdate) -> Result<(), OracleError> {
         // Verify operator is registered
         if !self.operators.contains_key(&update.operator_id) {
             return Err(OracleError::OperatorNotRegistered);
@@ -279,8 +275,8 @@ impl OracleBridgeEngine {
         if !update.signature.is_empty() {
             let expected = update.compute_hash();
             // Reject all-zero placeholder signatures that were used as a devnet bypass
-            let is_zero_placeholder = update.signature.len() == 64
-                && update.signature.iter().all(|&b| b == 0);
+            let is_zero_placeholder =
+                update.signature.len() == 64 && update.signature.iter().all(|&b| b == 0);
             if is_zero_placeholder || update.signature != expected {
                 if let Some(op) = self.operators.get_mut(&update.operator_id) {
                     op.updates_submitted += 1;
@@ -313,7 +309,8 @@ impl OracleBridgeEngine {
         current_timestamp: u64,
         max_age_seconds: u64,
     ) -> Result<AggregatedPrice, OracleError> {
-        let updates = self.price_updates
+        let updates = self
+            .price_updates
             .get(asset)
             .ok_or(OracleError::NoDataForAsset)?;
 
@@ -328,10 +325,7 @@ impl OracleBridgeEngine {
         }
 
         // Calculate median price
-        let mut prices: Vec<u128> = fresh_updates
-            .iter()
-            .map(|u| u.price)
-            .collect();
+        let mut prices: Vec<u128> = fresh_updates.iter().map(|u| u.price).collect();
         prices.sort();
         let median_price = prices[prices.len() / 2];
 
@@ -356,7 +350,8 @@ impl OracleBridgeEngine {
         };
 
         agg.aggregation_hash = agg.compute_hash();
-        self.aggregated_prices.insert(asset.to_string(), agg.clone());
+        self.aggregated_prices
+            .insert(asset.to_string(), agg.clone());
 
         Ok(agg)
     }
@@ -418,7 +413,8 @@ impl OracleBridgeEngine {
         tx: BridgeTransaction,
     ) -> Result<(), OracleError> {
         // Get bridge config
-        let config = self.bridge_configs
+        let config = self
+            .bridge_configs
             .get(&tx.dest_chain)
             .ok_or(OracleError::BridgeNotRegistered)?;
 
@@ -506,46 +502,52 @@ mod tests {
     #[test]
     fn test_price_aggregation() {
         let mut engine = OracleBridgeEngine::genesis();
-        
+
         let op1 = vec![1];
         let op2 = vec![2];
         let op3 = vec![3];
-        
+
         engine.register_operator(op1.clone(), 1000).ok();
         engine.register_operator(op2.clone(), 1000).ok();
         engine.register_operator(op3.clone(), 1000).ok();
 
         let ts = 1000u64;
 
-        engine.submit_price_update(PriceUpdate {
-            source: OracleSource::Chainlink("BTC/USD".to_string()),
-            asset: "BTC/USD".to_string(),
-            price: 45000 * 10u128.pow(8),
-            timestamp: ts,
-            confidence_bps: 100,
-            operator_id: op1,
-            signature: vec![],
-        }).ok();
+        engine
+            .submit_price_update(PriceUpdate {
+                source: OracleSource::Chainlink("BTC/USD".to_string()),
+                asset: "BTC/USD".to_string(),
+                price: 45000 * 10u128.pow(8),
+                timestamp: ts,
+                confidence_bps: 100,
+                operator_id: op1,
+                signature: vec![],
+            })
+            .ok();
 
-        engine.submit_price_update(PriceUpdate {
-            source: OracleSource::Pyth("BTC/USD".to_string()),
-            asset: "BTC/USD".to_string(),
-            price: 45100 * 10u128.pow(8),
-            timestamp: ts,
-            confidence_bps: 100,
-            operator_id: op2,
-            signature: vec![],
-        }).ok();
+        engine
+            .submit_price_update(PriceUpdate {
+                source: OracleSource::Pyth("BTC/USD".to_string()),
+                asset: "BTC/USD".to_string(),
+                price: 45100 * 10u128.pow(8),
+                timestamp: ts,
+                confidence_bps: 100,
+                operator_id: op2,
+                signature: vec![],
+            })
+            .ok();
 
-        engine.submit_price_update(PriceUpdate {
-            source: OracleSource::Custom(vec![99]),
-            asset: "BTC/USD".to_string(),
-            price: 45050 * 10u128.pow(8),
-            timestamp: ts,
-            confidence_bps: 100,
-            operator_id: op3,
-            signature: vec![],
-        }).ok();
+        engine
+            .submit_price_update(PriceUpdate {
+                source: OracleSource::Custom(vec![99]),
+                asset: "BTC/USD".to_string(),
+                price: 45050 * 10u128.pow(8),
+                timestamp: ts,
+                confidence_bps: 100,
+                operator_id: op3,
+                signature: vec![],
+            })
+            .ok();
 
         let agg = match engine.aggregate_prices("BTC/USD", ts, 1000) {
             Ok(agg) => agg,

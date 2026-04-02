@@ -2,8 +2,8 @@
 //!
 //! All PAT engine errors.  Every operation returns `PATResult<T>`.
 
-use thiserror::Error;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PATError {

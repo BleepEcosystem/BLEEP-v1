@@ -3,8 +3,8 @@
 use bleep_crypto::quantum_resistance::{init_falcon, init_kyber, run_keygen_tests};
 use bleep_crypto::zkp_verification::{init_zkp_systems, test_zkp_proofs};
 
+use log::{error, info};
 use std::error::Error;
-use log::{info, error};
 
 fn main() {
     env_logger::init();

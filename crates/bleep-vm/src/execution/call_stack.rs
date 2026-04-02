@@ -9,19 +9,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallFrame {
     /// Caller address.
-    pub caller:     [u8; 32],
+    pub caller: [u8; 32],
     /// Contract being called.
-    pub callee:     [u8; 32],
+    pub callee: [u8; 32],
     /// Value sent.
-    pub value:      u128,
+    pub value: u128,
     /// Gas budget for this frame.
-    pub gas_limit:  u64,
+    pub gas_limit: u64,
     /// Gas consumed so far in this frame.
-    pub gas_used:   u64,
+    pub gas_used: u64,
     /// Depth of this frame (0 = top-level).
-    pub depth:      usize,
+    pub depth: usize,
     /// Whether this is a STATIC call (no state changes allowed).
-    pub is_static:  bool,
+    pub is_static: bool,
     /// Whether this is a DELEGATE call (caller's storage context).
     pub is_delegate: bool,
 }
@@ -29,13 +29,16 @@ pub struct CallFrame {
 /// LIFO call stack with configurable depth limit.
 #[derive(Debug, Default)]
 pub struct CallStack {
-    frames:    Vec<CallFrame>,
+    frames: Vec<CallFrame>,
     max_depth: usize,
 }
 
 impl CallStack {
     pub fn new(max_depth: usize) -> Self {
-        CallStack { frames: Vec::with_capacity(16), max_depth }
+        CallStack {
+            frames: Vec::with_capacity(16),
+            max_depth,
+        }
     }
 
     /// Push a new frame. Returns `Err` if depth limit exceeded.
@@ -53,7 +56,9 @@ impl CallStack {
     }
 
     /// Current depth (number of active frames).
-    pub fn depth(&self) -> usize { self.frames.len() }
+    pub fn depth(&self) -> usize {
+        self.frames.len()
+    }
 
     /// Whether the current execution context is inside a static call.
     pub fn is_in_static_call(&self) -> bool {
@@ -89,13 +94,13 @@ mod tests {
 
     fn frame(depth: usize) -> CallFrame {
         CallFrame {
-            caller:      [0u8; 32],
-            callee:      [1u8; 32],
-            value:       0,
-            gas_limit:   100_000,
-            gas_used:    0,
+            caller: [0u8; 32],
+            callee: [1u8; 32],
+            value: 0,
+            gas_limit: 100_000,
+            gas_used: 0,
             depth,
-            is_static:   false,
+            is_static: false,
             is_delegate: false,
         }
     }

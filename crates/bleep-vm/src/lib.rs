@@ -48,21 +48,21 @@
 //! println!("Gas used: {}", outcome.bleep_gas);
 //! ```
 
-pub mod types;
 pub mod error;
 pub mod intent;
+pub mod types;
 
 pub mod router {
     pub mod vm_router;
-    pub use vm_router::{VmRouter, RouterConfig, Engine, EngineResult, RoutedResult};
+    pub use vm_router::{Engine, EngineResult, RoutedResult, RouterConfig, VmRouter};
 }
 
 pub mod engines {
     pub mod evm_engine;
-    pub mod wasm_engine_adapter;
-    pub mod zk_engine_adapter;
     pub mod wasm_engine;
+    pub mod wasm_engine_adapter;
     pub mod zk_engine;
+    pub mod zk_engine_adapter;
 
     pub use evm_engine::EvmEngine;
     pub use wasm_engine_adapter::WasmEngineAdapter;
@@ -72,42 +72,44 @@ pub mod engines {
 pub mod runtime {
     pub mod gas_model;
     pub mod gas_model_base;
-    pub mod sandbox;
     pub mod memory;
+    pub mod sandbox;
 
     pub use gas_model::GasModel;
-    pub use sandbox::{SandboxValidator, SandboxConfig, SecurityPolicy};
+    pub use sandbox::{SandboxConfig, SandboxValidator, SecurityPolicy};
 }
 
 pub mod execution {
-    pub mod execution_context;
     pub mod call_stack;
-    pub mod state_transition;
+    pub mod execution_context;
     pub mod executor;
+    pub mod state_transition;
 
-    pub use execution_context::ExecutionContext;
     pub use call_stack::CallStack;
+    pub use execution_context::ExecutionContext;
+    pub use executor::{ExecutionOutcome, Executor, ExecutorConfig};
     pub use state_transition::{StateDiff, StateTransition};
-    pub use executor::{Executor, ExecutorConfig, ExecutionOutcome};
 }
 
 pub mod crosschain {
-    pub mod native_bridge;
     pub mod connect_bridge;
+    pub mod native_bridge;
 
+    pub use native_bridge::{decode_from_chain, encode_for_chain};
     pub use native_bridge::{ConnectBridge, CrossChainMessage, MessageStatus};
-    pub use native_bridge::{encode_for_chain, decode_from_chain};
 }
 
 // ── Top-level re-exports ──────────────────────────────────────────────────────
 
-pub use types::{ChainId, ContractFormat, ExecutionResult, GasSchedule};
 pub use error::{VmError, VmResult};
-pub use intent::{Intent, IntentKind, TargetVm, ContractCallBuilder, DeployBuilder};
-pub use intent::{TransferIntent, ContractCallIntent, DeployIntent, CrossChainIntent, ZkVerifyIntent};
-pub use execution::executor::{Executor, ExecutorConfig, ExecutionOutcome};
+pub use execution::executor::{ExecutionOutcome, Executor, ExecutorConfig};
 pub use execution::state_transition::{StateDiff, StateTransition};
-pub use runtime::gas_model::{GasModel, GasEstimator};
+pub use intent::{ContractCallBuilder, DeployBuilder, Intent, IntentKind, TargetVm};
+pub use intent::{
+    ContractCallIntent, CrossChainIntent, DeployIntent, TransferIntent, ZkVerifyIntent,
+};
+pub use runtime::gas_model::{GasEstimator, GasModel};
+pub use types::{ChainId, ContractFormat, ExecutionResult, GasSchedule};
 
 // ── Version ───────────────────────────────────────────────────────────────────
 
@@ -129,17 +131,20 @@ mod integration_tests {
 
     fn executor() -> Executor {
         let mut cfg = ExecutorConfig::default();
-        cfg.router.verify_signatures  = false;
+        cfg.router.verify_signatures = false;
         cfg.router.sandbox_validation = false;
         Executor::production(cfg)
     }
 
     #[tokio::test]
     async fn test_full_transfer_pipeline() {
-        let exec   = executor();
+        let exec = executor();
         let intent = Intent::new_unsigned(
             IntentKind::Transfer(TransferIntent {
-                from: [1u8; 32], to: [2u8; 32], amount: 500, memo: Some("test".into()),
+                from: [1u8; 32],
+                to: [2u8; 32],
+                amount: 500,
+                memo: Some("test".into()),
             }),
             ChainId::Bleep,
         );
@@ -151,15 +156,15 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_full_wasm_call_pipeline() {
-        let exec   = executor();
+        let exec = executor();
         let intent = Intent::new_unsigned(
             IntentKind::ContractCall(ContractCallIntent {
                 target_vm: TargetVm::Wasm,
-                contract:  [0xABu8; 32],
-                calldata:  vec![0xDE, 0xAD, 0xBE, 0xEF],
+                contract: [0xABu8; 32],
+                calldata: vec![0xDE, 0xAD, 0xBE, 0xEF],
                 gas_limit: 500_000,
-                value:     0,
-                hints:     Default::default(),
+                value: 0,
+                hints: Default::default(),
             }),
             ChainId::Bleep,
         );
@@ -169,17 +174,17 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_cross_chain_intent_routes_to_bridge() {
-        let exec   = executor();
+        let exec = executor();
         let intent = Intent::new_unsigned(
             IntentKind::CrossChain(CrossChainIntent {
                 destination_chain: ChainId::Ethereum,
-                contract:          vec![0xABu8; 20],
-                calldata:          vec![1, 2, 3, 4],
-                source_gas_limit:  100_000,
-                dest_gas_limit:    200_000,
-                bridge_value:      0,
-                relay_fee:         500,
-                require_zk_proof:  false,
+                contract: vec![0xABu8; 20],
+                calldata: vec![1, 2, 3, 4],
+                source_gas_limit: 100_000,
+                dest_gas_limit: 200_000,
+                bridge_value: 0,
+                relay_fee: 500,
+                require_zk_proof: false,
             }),
             ChainId::Bleep,
         );
@@ -191,12 +196,12 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_zk_intent_routes_to_zk_engine() {
-        let exec   = executor();
+        let exec = executor();
         let intent = Intent::new_unsigned(
             IntentKind::ZkVerify(ZkVerifyIntent {
-                proof_bytes:      vec![0u8; 10],
-                public_inputs:    vec![vec![0u8; 32]],
-                vk_id:            "test-vk".into(),
+                proof_bytes: vec![0u8; 10],
+                public_inputs: vec![vec![0u8; 32]],
+                vk_id: "test-vk".into(),
                 post_verify_wasm: None,
             }),
             ChainId::Bleep,
@@ -207,9 +212,9 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_auto_vm_detection_wasm() {
-        let exec       = executor();
+        let exec = executor();
         let wasm_magic = b"\x00asm\x01\x00\x00\x00".to_vec();
-        let intent     = Intent::new_unsigned(
+        let intent = Intent::new_unsigned(
             DeployBuilder::new(wasm_magic)
                 .vm(TargetVm::Auto)
                 .gas(1_000_000)
@@ -230,25 +235,33 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_state_diff_has_balance_changes_for_transfer() {
-        let exec  = executor();
-        let from  = [0x01u8; 32];
-        let to    = [0x02u8; 32];
+        let exec = executor();
+        let from = [0x01u8; 32];
+        let to = [0x02u8; 32];
         let intent = Intent::new_unsigned(
-            IntentKind::Transfer(TransferIntent { from, to, amount: 1000, memo: None }),
+            IntentKind::Transfer(TransferIntent {
+                from,
+                to,
+                amount: 1000,
+                memo: None,
+            }),
             ChainId::Bleep,
         );
         let outcome = exec.execute(&intent).await.unwrap();
         let diff = outcome.state_diff();
         assert_eq!(diff.balances[&from].delta, -1000);
-        assert_eq!(diff.balances[&to].delta,    1000);
+        assert_eq!(diff.balances[&to].delta, 1000);
     }
 
     #[tokio::test]
     async fn test_simulate_does_not_apply() {
-        let exec   = executor();
+        let exec = executor();
         let intent = Intent::new_unsigned(
             IntentKind::Transfer(TransferIntent {
-                from: [0u8; 32], to: [1u8; 32], amount: 99, memo: None,
+                from: [0u8; 32],
+                to: [1u8; 32],
+                amount: 99,
+                memo: None,
             }),
             ChainId::Bleep,
         );

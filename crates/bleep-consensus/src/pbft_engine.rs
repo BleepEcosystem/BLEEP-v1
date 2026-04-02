@@ -1,6 +1,6 @@
 // PHASE 1: PBFT FINALITY GADGET CONSENSUS ENGINE
 // Practical Byzantine Fault Tolerance for fast finality
-// 
+//
 // SAFETY CONSTRAINTS:
 // 1. PBFT DOES NOT produce blocks independently
 // 2. PBFT finalizes blocks already produced by PoS
@@ -8,9 +8,9 @@
 // 4. PBFT requires 2/3 + 1 honest validators
 // 5. Finality is Byzantine-fault-tolerant once committed
 
-use crate::epoch::EpochState;
 use crate::engine::{ConsensusEngine, ConsensusError};
-use bleep_core::block::{Block, Transaction, ConsensusMode};
+use crate::epoch::EpochState;
+use bleep_core::block::{Block, ConsensusMode, Transaction};
 use bleep_core::blockchain::BlockchainState;
 use log::{info, warn};
 use std::collections::HashMap;
@@ -20,10 +20,10 @@ use std::collections::HashMap;
 pub enum PbftPhase {
     /// Pre-prepare phase: leader proposes block
     PrePrepare,
-    
+
     /// Prepare phase: validators acknowledge proposal
     Prepare,
-    
+
     /// Commit phase: validators finalize block
     Commit,
 }
@@ -33,10 +33,10 @@ pub enum PbftPhase {
 pub enum PbftBlockState {
     /// Block has been proposed but not yet prepared
     Proposed,
-    
+
     /// 2/3 + 1 validators have prepared
     Prepared,
-    
+
     /// 2/3 + 1 validators have committed (finalized)
     Committed,
 }
@@ -68,12 +68,12 @@ pub enum PbftBlockState {
 /// distinct known-validator senders reaches `quorum_size = 2/3 * n + 1`.
 /// Unknown or duplicate senders are silently ignored.
 pub struct PbftConsensusEngine {
-    validator_id:      String,
-    total_validators:  usize,
-    quorum_size:       usize,
-    finalized_blocks:  HashMap<u64, PbftBlockState>,
+    validator_id: String,
+    total_validators: usize,
+    quorum_size: usize,
+    finalized_blocks: HashMap<u64, PbftBlockState>,
     #[allow(dead_code)]
-    current_view:      u64,
+    current_view: u64,
 
     /// H-02 FIX: per-block prepare-vote accumulators.
     /// Key: block_height. Value: set of validator IDs that sent Prepare.
@@ -102,7 +102,8 @@ impl PbftConsensusEngine {
         }
 
         let quorum_size = (total_validators * 2) / 3 + 1;
-        let known_validators: std::collections::HashSet<String> = validator_ids.into_iter().collect();
+        let known_validators: std::collections::HashSet<String> =
+            validator_ids.into_iter().collect();
 
         Ok(PbftConsensusEngine {
             validator_id,
@@ -111,7 +112,7 @@ impl PbftConsensusEngine {
             finalized_blocks: HashMap::new(),
             current_view: 0,
             prepare_votes: HashMap::new(),
-            commit_votes:  HashMap::new(),
+            commit_votes: HashMap::new(),
             known_validators,
         })
     }
@@ -119,17 +120,19 @@ impl PbftConsensusEngine {
     /// Register a new validator (e.g. after an epoch rotation).
     pub fn add_validator(&mut self, validator_id: String) {
         self.known_validators.insert(validator_id);
-        self.total_validators  = self.known_validators.len();
-        self.quorum_size       = (self.total_validators * 2) / 3 + 1;
+        self.total_validators = self.known_validators.len();
+        self.quorum_size = (self.total_validators * 2) / 3 + 1;
     }
 
     /// Remove a validator (e.g. after slashing or exit).
     pub fn remove_validator(&mut self, validator_id: &str) {
         self.known_validators.remove(validator_id);
-        self.total_validators  = self.known_validators.len();
-        self.quorum_size       = if self.total_validators > 0 {
+        self.total_validators = self.known_validators.len();
+        self.quorum_size = if self.total_validators > 0 {
             (self.total_validators * 2) / 3 + 1
-        } else { 1 };
+        } else {
+            1
+        };
     }
 
     /// Process a pre-prepare message (block proposal from the leader).
@@ -143,7 +146,8 @@ impl PbftConsensusEngine {
             });
         }
 
-        self.finalized_blocks.insert(block_height, PbftBlockState::Proposed);
+        self.finalized_blocks
+            .insert(block_height, PbftBlockState::Proposed);
         self.prepare_votes.entry(block_height).or_default();
         self.commit_votes.entry(block_height).or_default();
 
@@ -163,7 +167,11 @@ impl PbftConsensusEngine {
     /// Unknown validators and duplicate votes are both silently rejected so
     /// that vote stuffing or replay cannot manufacture a false quorum.
     #[allow(dead_code)]
-    fn process_prepare(&mut self, block_height: u64, preparer_id: &str) -> Result<(), ConsensusError> {
+    fn process_prepare(
+        &mut self,
+        block_height: u64,
+        preparer_id: &str,
+    ) -> Result<(), ConsensusError> {
         // Only accept votes for blocks in Proposed state
         if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Proposed) {
             return Ok(()); // silently ignore out-of-order or duplicate messages
@@ -171,7 +179,10 @@ impl PbftConsensusEngine {
 
         // Only count votes from registered validators
         if !self.known_validators.contains(preparer_id) {
-            warn!("PBFT: Ignoring prepare vote from unknown validator {}", preparer_id);
+            warn!(
+                "PBFT: Ignoring prepare vote from unknown validator {}",
+                preparer_id
+            );
             return Ok(());
         }
 
@@ -179,10 +190,16 @@ impl PbftConsensusEngine {
         votes.insert(preparer_id.to_string());
 
         let count = votes.len();
-        log::debug!("PBFT: Block {} prepare votes: {}/{}", block_height, count, self.quorum_size);
+        log::debug!(
+            "PBFT: Block {} prepare votes: {}/{}",
+            block_height,
+            count,
+            self.quorum_size
+        );
 
         if count >= self.quorum_size {
-            self.finalized_blocks.insert(block_height, PbftBlockState::Prepared);
+            self.finalized_blocks
+                .insert(block_height, PbftBlockState::Prepared);
             info!(
                 "PBFT: Block {} reached PREPARED state ({} votes, quorum={})",
                 block_height, count, self.quorum_size
@@ -200,14 +217,21 @@ impl PbftConsensusEngine {
     /// only committed once `|commit_votes| >= quorum_size` distinct known
     /// validators have committed.
     #[allow(dead_code)]
-    fn process_commit(&mut self, block_height: u64, committer_id: &str) -> Result<(), ConsensusError> {
+    fn process_commit(
+        &mut self,
+        block_height: u64,
+        committer_id: &str,
+    ) -> Result<(), ConsensusError> {
         // Only accept commits for blocks that have reached Prepared
         if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Prepared) {
             return Ok(());
         }
 
         if !self.known_validators.contains(committer_id) {
-            warn!("PBFT: Ignoring commit vote from unknown validator {}", committer_id);
+            warn!(
+                "PBFT: Ignoring commit vote from unknown validator {}",
+                committer_id
+            );
             return Ok(());
         }
 
@@ -215,10 +239,16 @@ impl PbftConsensusEngine {
         votes.insert(committer_id.to_string());
 
         let count = votes.len();
-        log::debug!("PBFT: Block {} commit votes: {}/{}", block_height, count, self.quorum_size);
+        log::debug!(
+            "PBFT: Block {} commit votes: {}/{}",
+            block_height,
+            count,
+            self.quorum_size
+        );
 
         if count >= self.quorum_size {
-            self.finalized_blocks.insert(block_height, PbftBlockState::Committed);
+            self.finalized_blocks
+                .insert(block_height, PbftBlockState::Committed);
             // Free vote accumulator memory once committed
             self.prepare_votes.remove(&block_height);
             self.commit_votes.remove(&block_height);
@@ -289,7 +319,7 @@ impl ConsensusEngine for PbftConsensusEngine {
         // 1. Verify the block was produced by PoS consensus
         // 2. Check that we can reach PBFT quorum for this block
         // 3. Verify threshold of prepare/commit signatures
-        
+
         info!(
             "PBFT verification passed for block {} in epoch {}",
             block.index, epoch_state.epoch_id
@@ -309,7 +339,7 @@ impl ConsensusEngine for PbftConsensusEngine {
         // SAFETY: PBFT does NOT produce blocks independently!
         // This should only be called during PoS consensus when PBFT is NOT active.
         // However, we provide a fallback to create properly-marked blocks.
-        
+
         warn!(
             "PBFT propose_block called at height {} - PBFT should not produce blocks!",
             height
@@ -321,9 +351,9 @@ impl ConsensusEngine for PbftConsensusEngine {
             previous_hash,
             epoch_state.epoch_id,
             ConsensusMode::PbftFastFinality,
-            1, // protocol_version
+            1,             // protocol_version
             String::new(), // shard_registry_root
-            0, // shard_id
+            0,             // shard_id
             String::new(), // shard_state_root
         );
 
@@ -371,7 +401,8 @@ mod tests {
         let engine = PbftConsensusEngine::new(
             "validator1".to_string(),
             validators(&["validator1", "v2", "v3"]),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(engine.validator_id, "validator1");
         assert_eq!(engine.total_validators, 3);
         assert_eq!(engine.quorum_size, 3); // 2/3 + 1 of 3 = 3
@@ -379,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_pbft_quorum_size_calculation() {
-        let e3 = PbftConsensusEngine::new("v".to_string(), validators(&["v","v2","v3"])).unwrap();
+        let e3 = PbftConsensusEngine::new("v".to_string(), validators(&["v", "v2", "v3"])).unwrap();
         assert_eq!(e3.quorum_size, 3);
 
         let ids7: Vec<String> = (1..=7).map(|i| format!("v{i}")).collect();
@@ -400,17 +431,18 @@ mod tests {
     #[test]
     fn test_pbft_real_quorum_required() {
         // 3 validators: quorum = 3
-        let mut engine = PbftConsensusEngine::new(
-            "v1".to_string(),
-            validators(&["v1", "v2", "v3"]),
-        ).unwrap();
+        let mut engine =
+            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
         let block = Block::new(100, vec![], "hash99".to_string());
         engine.pre_prepare(100, &block).unwrap();
 
         // After 1 prepare vote — should still be Proposed (not Prepared yet)
         engine.process_prepare(100, "v1").unwrap();
-        assert_eq!(engine.block_state(100), Some(PbftBlockState::Proposed),
-            "H-02: should not advance to Prepared after just 1 of 3 needed votes");
+        assert_eq!(
+            engine.block_state(100),
+            Some(PbftBlockState::Proposed),
+            "H-02: should not advance to Prepared after just 1 of 3 needed votes"
+        );
 
         // After 2nd prepare vote — still Proposed
         engine.process_prepare(100, "v2").unwrap();
@@ -432,26 +464,25 @@ mod tests {
 
     #[test]
     fn test_pbft_unknown_validator_vote_ignored() {
-        let mut engine = PbftConsensusEngine::new(
-            "v1".to_string(),
-            validators(&["v1", "v2", "v3"]),
-        ).unwrap();
+        let mut engine =
+            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
         let block = Block::new(200, vec![], "h200".to_string());
         engine.pre_prepare(200, &block).unwrap();
 
         // Vote from an unknown validator — should be ignored
         engine.process_prepare(200, "attacker").unwrap();
-        assert_eq!(engine.prepare_vote_count(200), 0,
-            "H-02: vote from unknown validator must not be counted");
+        assert_eq!(
+            engine.prepare_vote_count(200),
+            0,
+            "H-02: vote from unknown validator must not be counted"
+        );
         assert_eq!(engine.block_state(200), Some(PbftBlockState::Proposed));
     }
 
     #[test]
     fn test_pbft_duplicate_vote_not_double_counted() {
-        let mut engine = PbftConsensusEngine::new(
-            "v1".to_string(),
-            validators(&["v1", "v2", "v3"]),
-        ).unwrap();
+        let mut engine =
+            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
         let block = Block::new(300, vec![], "h300".to_string());
         engine.pre_prepare(300, &block).unwrap();
 
@@ -459,34 +490,41 @@ mod tests {
         engine.process_prepare(300, "v2").unwrap();
         engine.process_prepare(300, "v2").unwrap();
         engine.process_prepare(300, "v2").unwrap();
-        assert_eq!(engine.prepare_vote_count(300), 1,
-            "H-02: duplicate votes must not manufacture a false quorum");
+        assert_eq!(
+            engine.prepare_vote_count(300),
+            1,
+            "H-02: duplicate votes must not manufacture a false quorum"
+        );
         assert_eq!(engine.block_state(300), Some(PbftBlockState::Proposed));
     }
 
     #[test]
     fn test_pbft_health_status_perfect() {
-        let mut engine = PbftConsensusEngine::new(
-            "v1".to_string(),
-            validators(&["v1", "v2", "v3"]),
-        ).unwrap();
+        let mut engine =
+            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
         let block = Block::new(100, vec![], "hash99".to_string());
         engine.pre_prepare(100, &block).unwrap();
-        for v in &["v1","v2","v3"] { engine.process_prepare(100, v).unwrap(); }
-        for v in &["v1","v2","v3"] { engine.process_commit(100, v).unwrap(); }
+        for v in &["v1", "v2", "v3"] {
+            engine.process_prepare(100, v).unwrap();
+        }
+        for v in &["v1", "v2", "v3"] {
+            engine.process_commit(100, v).unwrap();
+        }
         assert_eq!(engine.health_status(), 1.0);
     }
 
     #[test]
     fn test_pbft_health_status_degraded() {
-        let mut engine = PbftConsensusEngine::new(
-            "v1".to_string(),
-            validators(&["v1", "v2", "v3"]),
-        ).unwrap();
+        let mut engine =
+            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
         let block1 = Block::new(100, vec![], "hash99".to_string());
         engine.pre_prepare(100, &block1).unwrap();
-        for v in &["v1","v2","v3"] { engine.process_prepare(100, v).unwrap(); }
-        for v in &["v1","v2","v3"] { engine.process_commit(100, v).unwrap(); }
+        for v in &["v1", "v2", "v3"] {
+            engine.process_prepare(100, v).unwrap();
+        }
+        for v in &["v1", "v2", "v3"] {
+            engine.process_commit(100, v).unwrap();
+        }
 
         let block2 = Block::new(101, vec![], "hash100".to_string());
         engine.pre_prepare(101, &block2).unwrap();

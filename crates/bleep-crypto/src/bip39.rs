@@ -74,7 +74,11 @@ pub fn validate_mnemonic(mnemonic: &str) -> Result<(), String> {
     }
     for (i, word) in words.iter().enumerate() {
         if !word.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(format!("Word {} '{}' contains non-ASCII characters", i + 1, word));
+            return Err(format!(
+                "Word {} '{}' contains non-ASCII characters",
+                i + 1,
+                word
+            ));
         }
     }
     Ok(())
@@ -120,7 +124,8 @@ mod tests {
 
     #[test]
     fn test_deterministic() {
-        let mnemonic = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let mnemonic =
+            "legal winner thank year wave sausage worth useful legal winner thank yellow";
         let s1 = mnemonic_to_seed(mnemonic, "").unwrap();
         let s2 = mnemonic_to_seed(mnemonic, "").unwrap();
         assert_eq!(s1, s2);
@@ -128,7 +133,8 @@ mod tests {
 
     #[test]
     fn test_passphrase_changes_seed() {
-        let mnemonic = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let mnemonic =
+            "legal winner thank year wave sausage worth useful legal winner thank yellow";
         let s1 = mnemonic_to_seed(mnemonic, "").unwrap();
         let s2 = mnemonic_to_seed(mnemonic, "password").unwrap();
         assert_ne!(s1, s2);

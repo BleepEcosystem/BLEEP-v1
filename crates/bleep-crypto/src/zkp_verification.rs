@@ -1,12 +1,12 @@
-use std::fs;
-use thiserror::Error;
-use sha2::{Sha256, Digest};
-use sha3::Sha3_256;
+use crate::logging::BLEEPLogger;
+use crate::merkletree::MerkleTree;
+use crate::quantum_secure::KyberAESHybrid;
 use ark_bls12_381::Bls12_381;
 use ark_groth16::{Proof, ProvingKey, VerifyingKey};
-use crate::quantum_secure::KyberAESHybrid;
-use crate::merkletree::MerkleTree;
-use crate::logging::BLEEPLogger;
+use sha2::{Digest, Sha256};
+use sha3::Sha3_256;
+use std::fs;
+use thiserror::Error;
 
 /// Initialize the ZKP subsystem for production-safe startup.
 pub fn init_zkp_systems() -> Result<(), Box<dyn std::error::Error>> {
@@ -123,22 +123,25 @@ impl BLEEPZKPModule {
     ///   2. Decrypt with `KyberAESHybrid::decrypt(node_kyber_sk, ciphertext)`.
     ///   3. Deserialise with `ark_serialize::CanonicalDeserialize`.
     ///   4. Verify integrity checksum.
-    pub fn load_keys(
-        proving_key_path: &str,
-        verifying_key_path: &str,
-    ) -> Result<Self, BLEEPError> {
+    pub fn load_keys(proving_key_path: &str, verifying_key_path: &str) -> Result<Self, BLEEPError> {
         // Validate that the key files exist and are non-empty before attempting
         // to deserialise. This gives a clear error message rather than a
         // confusing deserialisation failure.
-        let pk_bytes = fs::read(proving_key_path).map_err(|e| BLEEPError::Generic(
-            format!("Cannot read proving key at '{}': {}. \
-                     Run key generation first.", proving_key_path, e)
-        ))?;
+        let pk_bytes = fs::read(proving_key_path).map_err(|e| {
+            BLEEPError::Generic(format!(
+                "Cannot read proving key at '{}': {}. \
+                     Run key generation first.",
+                proving_key_path, e
+            ))
+        })?;
 
-        let vk_bytes = fs::read(verifying_key_path).map_err(|e| BLEEPError::Generic(
-            format!("Cannot read verifying key at '{}': {}. \
-                     Run key generation first.", verifying_key_path, e)
-        ))?;
+        let vk_bytes = fs::read(verifying_key_path).map_err(|e| {
+            BLEEPError::Generic(format!(
+                "Cannot read verifying key at '{}': {}. \
+                     Run key generation first.",
+                verifying_key_path, e
+            ))
+        })?;
 
         if pk_bytes.is_empty() || vk_bytes.is_empty() {
             return Err(BLEEPError::Generic(
@@ -161,7 +164,8 @@ impl BLEEPZKPModule {
             return Err(BLEEPError::Generic(
                 "Development-only placeholder keys detected. \
                  These MUST NOT be used in production. \
-                 Generate real Groth16 keys and store them encrypted.".to_string()
+                 Generate real Groth16 keys and store them encrypted."
+                    .to_string(),
             ));
         }
 
@@ -171,7 +175,7 @@ impl BLEEPZKPModule {
         Err(BLEEPError::Generic(
             "ZKP key deserialisation not yet implemented for this key format. \
              See load_keys() documentation for the production integration path."
-            .to_string()
+                .to_string(),
         ))
     }
 

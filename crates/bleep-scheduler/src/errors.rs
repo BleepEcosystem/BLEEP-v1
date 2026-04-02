@@ -1,5 +1,5 @@
-use thiserror::Error;
 use crate::task::TaskId;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SchedulerError {

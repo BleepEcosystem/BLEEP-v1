@@ -15,17 +15,16 @@
 #[cfg(test)]
 mod phase5_comprehensive_tests {
     use crate::{
-        protocol_rules::{ProtocolRuleSetFactory, RuleBounds, ProtocolRule},
-        apip::{APIPBuilder, RuleChange, AIModelMetadata, RiskLevel, SafetyBounds},
-        safety_constraints::SafetyConstraintsEngine,
-        protocol_evolution::ProtocolEvolutionOrchestrator,
-        ai_reputation::{ProposalOutcome, AIReputationTracker},
-        governance_voting::{GovernanceVotingEngine, ValidatorVote},
+        ai_reputation::{AIReputationTracker, ProposalOutcome},
+        apip::{AIModelMetadata, APIPBuilder, RiskLevel, RuleChange, SafetyBounds},
         deterministic_activation::DeterministicActivationManager,
+        governance_voting::{GovernanceVotingEngine, ValidatorVote},
         invariant_monitoring::{
-            GlobalInvariantMonitor, InvariantType, InvariantThreshold,
-            InvariantSeverity,
+            GlobalInvariantMonitor, InvariantSeverity, InvariantThreshold, InvariantType,
         },
+        protocol_evolution::ProtocolEvolutionOrchestrator,
+        protocol_rules::{ProtocolRule, ProtocolRuleSetFactory, RuleBounds},
+        safety_constraints::SafetyConstraintsEngine,
     };
     use std::collections::HashMap;
 
@@ -36,14 +35,14 @@ mod phase5_comprehensive_tests {
 
     fn setup_voting_engine() -> GovernanceVotingEngine {
         let mut engine = GovernanceVotingEngine::new();
-        
+
         // Add validators with stake
         let mut validators = HashMap::new();
         validators.insert(vec![1, 2, 3], 1000); // Validator 1
         validators.insert(vec![4, 5, 6], 2000); // Validator 2
         validators.insert(vec![7, 8, 9], 3000); // Validator 3
         engine.update_validators(validators);
-        
+
         engine
     }
 
@@ -60,9 +59,9 @@ mod phase5_comprehensive_tests {
     #[test]
     fn test_e2e_proposal_submission_and_validation() {
         let mut orch = setup_orchestrator();
-        
+
         let model = create_ai_model("ai-model-1");
-        
+
         let proposal = APIPBuilder::new(
             "APIP-E2E-001".to_string(),
             model,
@@ -81,7 +80,10 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .confidence(85)
         .unwrap()
-        .risk(RiskLevel::Low, "Minimal impact, tested on testnet".to_string())
+        .risk(
+            RiskLevel::Low,
+            "Minimal impact, tested on testnet".to_string(),
+        )
         .unwrap()
         .expected_impact("Better shard utilization".to_string())
         .unwrap()
@@ -91,10 +93,10 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .build()
         .unwrap();
-        
+
         // Submit and validate
         let report = orch.submit_proposal(proposal, 1).unwrap();
-        
+
         assert!(report.is_valid);
         assert!(report.passed_count > 0);
         assert_eq!(report.failed_count, 0);
@@ -104,9 +106,9 @@ mod phase5_comprehensive_tests {
     #[test]
     fn test_reject_unsafe_proposal_out_of_bounds() {
         let mut orch = setup_orchestrator();
-        
+
         let model = create_ai_model("ai-model-2");
-        
+
         let proposal = APIPBuilder::new(
             "APIP-UNSAFE-001".to_string(),
             model,
@@ -135,9 +137,9 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .build()
         .unwrap();
-        
+
         let report = orch.submit_proposal(proposal, 1).unwrap();
-        
+
         assert!(!report.is_valid);
         assert!(report.failed_count > 0);
     }
@@ -146,49 +148,53 @@ mod phase5_comprehensive_tests {
     #[test]
     fn test_governance_voting_stake_weighted() {
         let mut voting_engine = setup_voting_engine();
-        
+
         // Create dummy signatures for testing
         let mut sig1_sig2 = vec![1u8, 2u8];
         let mut sig3_sig4 = vec![3u8, 4u8];
         let mut sig5_sig6 = vec![5u8, 6u8];
-        
+
         // Start voting
-        voting_engine.start_voting(
-            "APIP-VOTE-001".to_string(),
-            1,
-            5,
-        ).unwrap();
-        
+        voting_engine
+            .start_voting("APIP-VOTE-001".to_string(), 1, 5)
+            .unwrap();
+
         // Validator 1 votes yes (1000 stake)
-        voting_engine.cast_vote(
-            "APIP-VOTE-001".to_string(),
-            vec![1, 2, 3],
-            true,
-            2,
-            sig1_sig2,
-        ).unwrap();
-        
+        voting_engine
+            .cast_vote(
+                "APIP-VOTE-001".to_string(),
+                vec![1, 2, 3],
+                true,
+                2,
+                sig1_sig2,
+            )
+            .unwrap();
+
         // Validator 2 votes yes (2000 stake)
-        voting_engine.cast_vote(
-            "APIP-VOTE-001".to_string(),
-            vec![4, 5, 6],
-            true,
-            2,
-            sig3_sig4,
-        ).unwrap();
-        
+        voting_engine
+            .cast_vote(
+                "APIP-VOTE-001".to_string(),
+                vec![4, 5, 6],
+                true,
+                2,
+                sig3_sig4,
+            )
+            .unwrap();
+
         // Validator 3 votes no (3000 stake)
-        voting_engine.cast_vote(
-            "APIP-VOTE-001".to_string(),
-            vec![7, 8, 9],
-            false,
-            3,
-            sig5_sig6,
-        ).unwrap();
-        
+        voting_engine
+            .cast_vote(
+                "APIP-VOTE-001".to_string(),
+                vec![7, 8, 9],
+                false,
+                3,
+                sig5_sig6,
+            )
+            .unwrap();
+
         // Finalize voting at epoch 6
         let result = voting_engine.finalize_voting("APIP-VOTE-001", 6).unwrap();
-        
+
         // 3000 for, 3000 against = 50% approval
         assert_eq!(result.stake_for, 3000);
         assert_eq!(result.stake_against, 3000);
@@ -201,9 +207,9 @@ mod phase5_comprehensive_tests {
     fn test_deterministic_activation() {
         let genesis = ProtocolRuleSetFactory::create_genesis().unwrap();
         let mut activation_mgr = DeterministicActivationManager::new(genesis.clone(), 1);
-        
+
         let model = create_ai_model("ai-model-3");
-        
+
         let proposal = APIPBuilder::new(
             "APIP-ACTIVATE-001".to_string(),
             model,
@@ -232,23 +238,27 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .build()
         .unwrap();
-        
+
         // Create activation plan
-        let plan = activation_mgr.create_activation_plan(&proposal, 2, 4).unwrap();
-        
+        let plan = activation_mgr
+            .create_activation_plan(&proposal, 2, 4)
+            .unwrap();
+
         assert_eq!(plan.new_protocol_version, 2);
         assert_eq!(plan.target_epoch, 5);
         assert_eq!(plan.rule_changes.len(), 1);
-        
+
         // Check ready
         assert!(activation_mgr.check_activation_ready("APIP-ACTIVATE-001", 5));
-        
+
         // Activate
-        let records = activation_mgr.activate("APIP-ACTIVATE-001", 5, 500).unwrap();
-        
+        let records = activation_mgr
+            .activate("APIP-ACTIVATE-001", 5, 500)
+            .unwrap();
+
         assert_eq!(records.len(), 1);
         assert_eq!(activation_mgr.protocol_version(), 2);
-        
+
         // Verify rule was updated
         let new_ruleset = activation_mgr.get_ruleset();
         let rule = new_ruleset.get_rule("SHARD_SPLIT_THRESHOLD").unwrap();
@@ -260,9 +270,9 @@ mod phase5_comprehensive_tests {
     fn test_emergency_rollback_on_violation() {
         let genesis = ProtocolRuleSetFactory::create_genesis().unwrap();
         let mut activation_mgr = DeterministicActivationManager::new(genesis, 1);
-        
+
         let model = create_ai_model("ai-model-4");
-        
+
         let proposal = APIPBuilder::new(
             "APIP-ROLLBACK-001".to_string(),
             model,
@@ -291,26 +301,32 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .build()
         .unwrap();
-        
+
         // Create and activate
-        let plan = activation_mgr.create_activation_plan(&proposal, 2, 4).unwrap();
-        activation_mgr.activate("APIP-ROLLBACK-001", 5, 500).unwrap();
-        
+        let plan = activation_mgr
+            .create_activation_plan(&proposal, 2, 4)
+            .unwrap();
+        activation_mgr
+            .activate("APIP-ROLLBACK-001", 5, 500)
+            .unwrap();
+
         // Verify activation
         assert_eq!(activation_mgr.protocol_version(), 2);
-        
+
         // Trigger rollback
-        let rollback_records = activation_mgr.emergency_rollback(
-            "APIP-ROLLBACK-001",
-            6,
-            "Invariant violation detected".to_string(),
-        ).unwrap();
-        
+        let rollback_records = activation_mgr
+            .emergency_rollback(
+                "APIP-ROLLBACK-001",
+                6,
+                "Invariant violation detected".to_string(),
+            )
+            .unwrap();
+
         // Verify rollback
         assert_eq!(rollback_records.len(), 1);
         assert!(rollback_records[0].was_rolled_back);
         assert_eq!(activation_mgr.protocol_version(), 1);
-        
+
         let ruleset = activation_mgr.get_ruleset();
         let rule = ruleset.get_rule("CHECKPOINT_FREQUENCY").unwrap();
         assert_eq!(rule.value, 100); // Restored to original
@@ -320,44 +336,54 @@ mod phase5_comprehensive_tests {
     #[test]
     fn test_ai_reputation_tracking() {
         let mut reputation_tracker = AIReputationTracker::new();
-        
+
         // Register models
-        reputation_tracker.register_model("ai-model-a".to_string()).unwrap();
-        reputation_tracker.register_model("ai-model-b".to_string()).unwrap();
-        
+        reputation_tracker
+            .register_model("ai-model-a".to_string())
+            .unwrap();
+        reputation_tracker
+            .register_model("ai-model-b".to_string())
+            .unwrap();
+
         // Record outcomes
-        reputation_tracker.record_outcome(
-            "APIP-001".to_string(),
-            "ai-model-a".to_string(),
-            ProposalOutcome::Accepted,
-            90,
-            1,
-            5,
-        ).unwrap();
-        
-        reputation_tracker.record_outcome(
-            "APIP-002".to_string(),
-            "ai-model-a".to_string(),
-            ProposalOutcome::Accepted,
-            85,
-            2,
-            6,
-        ).unwrap();
-        
-        reputation_tracker.record_outcome(
-            "APIP-003".to_string(),
-            "ai-model-b".to_string(),
-            ProposalOutcome::RolledBack,
-            50,
-            1,
-            7,
-        ).unwrap();
-        
+        reputation_tracker
+            .record_outcome(
+                "APIP-001".to_string(),
+                "ai-model-a".to_string(),
+                ProposalOutcome::Accepted,
+                90,
+                1,
+                5,
+            )
+            .unwrap();
+
+        reputation_tracker
+            .record_outcome(
+                "APIP-002".to_string(),
+                "ai-model-a".to_string(),
+                ProposalOutcome::Accepted,
+                85,
+                2,
+                6,
+            )
+            .unwrap();
+
+        reputation_tracker
+            .record_outcome(
+                "APIP-003".to_string(),
+                "ai-model-b".to_string(),
+                ProposalOutcome::RolledBack,
+                50,
+                1,
+                7,
+            )
+            .unwrap();
+
         // Check reputation
         let rep_a = reputation_tracker.get_reputation("ai-model-a").unwrap();
         assert_eq!(rep_a.accepted_count, 2);
         assert!(rep_a.acceptance_rate() > 50.0);
-        
+
         let rep_b = reputation_tracker.get_reputation("ai-model-b").unwrap();
         assert_eq!(rep_b.rollback_count, 1);
         assert!(rep_b.score < 500); // Should be negative impact
@@ -370,14 +396,14 @@ mod phase5_comprehensive_tests {
         let genesis = ProtocolRuleSetFactory::create_genesis().unwrap();
         let mut node1 = DeterministicActivationManager::new(genesis.clone(), 1);
         let mut node2 = DeterministicActivationManager::new(genesis.clone(), 1);
-        
+
         // Both nodes should start with same version
         assert_eq!(node1.protocol_version(), 1);
         assert_eq!(node2.protocol_version(), 1);
-        
+
         // Create identical proposal
         let model = create_ai_model("ai-model-sync");
-        
+
         let proposal = APIPBuilder::new(
             "APIP-SYNC-001".to_string(),
             model,
@@ -406,19 +432,25 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .build()
         .unwrap();
-        
+
         // Both nodes activate identically
         node1.create_activation_plan(&proposal, 2, 4).unwrap();
         node2.create_activation_plan(&proposal, 2, 4).unwrap();
-        
+
         node1.activate("APIP-SYNC-001", 5, 500).unwrap();
         node2.activate("APIP-SYNC-001", 5, 500).unwrap();
-        
+
         // Both should have same version and ruleset
         assert_eq!(node1.protocol_version(), node2.protocol_version());
         assert_eq!(
-            node1.get_ruleset().get_rule_value("VALIDATOR_ROTATION_CADENCE").unwrap(),
-            node2.get_ruleset().get_rule_value("VALIDATOR_ROTATION_CADENCE").unwrap()
+            node1
+                .get_ruleset()
+                .get_rule_value("VALIDATOR_ROTATION_CADENCE")
+                .unwrap(),
+            node2
+                .get_ruleset()
+                .get_rule_value("VALIDATOR_ROTATION_CADENCE")
+                .unwrap()
         );
     }
 
@@ -426,7 +458,7 @@ mod phase5_comprehensive_tests {
     #[test]
     fn test_sequential_proposal_activation() {
         let mut orch = setup_orchestrator();
-        
+
         // Submit first proposal
         let model1 = create_ai_model("ai-model-seq-1");
         let proposal1 = APIPBuilder::new(
@@ -457,10 +489,10 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .build()
         .unwrap();
-        
+
         let report1 = orch.submit_proposal(proposal1.clone(), 1).unwrap();
         assert!(report1.is_valid);
-        
+
         // Submit second proposal
         let model2 = create_ai_model("ai-model-seq-2");
         let proposal2 = APIPBuilder::new(
@@ -491,10 +523,10 @@ mod phase5_comprehensive_tests {
         .unwrap()
         .build()
         .unwrap();
-        
+
         let report2 = orch.submit_proposal(proposal2, 1).unwrap();
         assert!(report2.is_valid);
-        
+
         // Both proposals should be stored
         assert!(orch.get_proposal("APIP-SEQ-001").is_some());
         assert!(orch.get_proposal("APIP-SEQ-002").is_some());

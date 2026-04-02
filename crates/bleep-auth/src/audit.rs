@@ -54,13 +54,13 @@ pub enum AuditEventKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
-    pub kind:      AuditEventKind,
-    pub actor_id:  String,
-    pub resource:  String,
-    pub action:    String,
+    pub kind: AuditEventKind,
+    pub actor_id: String,
+    pub resource: String,
+    pub action: String,
     /// "success" | "failure" | "denied"
-    pub outcome:   String,
-    pub details:   String,
+    pub outcome: String,
+    pub details: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -70,13 +70,13 @@ pub struct AuditEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
-    pub index:      u64,
-    pub event:      AuditEvent,
+    pub index: u64,
+    pub event: AuditEvent,
     /// SHA3-256(prev_hash ∥ serialised_event)
     pub entry_hash: String,
     /// Hash of the entry immediately before this one.
     /// For the first entry (index=0) this is 32 zero bytes, hex-encoded.
-    pub prev_hash:  String,
+    pub prev_hash: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ pub struct AuditEntry {
 // ---------------------------------------------------------------------------
 
 pub struct AuditLog {
-    entries:   Vec<AuditEntry>,
+    entries: Vec<AuditEntry>,
     head_hash: String,
 }
 
@@ -94,7 +94,7 @@ impl AuditLog {
 
     pub fn new() -> Self {
         Self {
-            entries:   Vec::new(),
+            entries: Vec::new(),
             head_hash: Self::GENESIS_HASH.to_string(),
         }
     }
@@ -102,7 +102,7 @@ impl AuditLog {
     // ── Append ────────────────────────────────────────────────────────────
 
     pub fn record(&mut self, event: AuditEvent) {
-        let index     = self.entries.len() as u64;
+        let index = self.entries.len() as u64;
         let prev_hash = self.head_hash.clone();
         let serialised = serde_json::to_string(&event).unwrap_or_default();
 
@@ -159,14 +159,24 @@ impl AuditLog {
 
     // ── Queries ───────────────────────────────────────────────────────────
 
-    pub fn len(&self)              -> usize   { self.entries.len() }
-    pub fn is_empty(&self)         -> bool    { self.entries.is_empty() }
-    pub fn head_hash(&self)        -> &str    { &self.head_hash }
-    pub fn entries(&self)          -> &[AuditEntry] { &self.entries }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn head_hash(&self) -> &str {
+        &self.head_hash
+    }
+    pub fn entries(&self) -> &[AuditEntry] {
+        &self.entries
+    }
 
     /// All entries for a specific actor, most recent first.
     pub fn entries_for(&self, actor_id: &str) -> Vec<&AuditEntry> {
-        self.entries.iter().rev()
+        self.entries
+            .iter()
+            .rev()
             .filter(|e| e.event.actor_id == actor_id)
             .collect()
     }
@@ -219,7 +229,9 @@ impl AuditLog {
     pub fn export_range_ndjson(&self, from_seq: usize, to_seq: usize) -> String {
         let mut out = String::new();
         for (seq, entry) in self.entries.iter().enumerate() {
-            if seq < from_seq || seq > to_seq { continue; }
+            if seq < from_seq || seq > to_seq {
+                continue;
+            }
             let line = serde_json::json!({
                 "seq":        seq,
                 "entry_hash": entry.entry_hash,
@@ -245,12 +257,12 @@ mod tests {
 
     fn make_event(actor: &str) -> AuditEvent {
         AuditEvent {
-            kind:      AuditEventKind::Login,
-            actor_id:  actor.to_string(),
-            resource:  "session".into(),
-            action:    "login".into(),
-            outcome:   "success".into(),
-            details:   "test".into(),
+            kind: AuditEventKind::Login,
+            actor_id: actor.to_string(),
+            resource: "session".into(),
+            action: "login".into(),
+            outcome: "success".into(),
+            details: "test".into(),
             timestamp: chrono::Utc::now(),
         }
     }
@@ -270,7 +282,9 @@ mod tests {
     #[test]
     fn multi_entry_chain_valid() {
         let mut log = AuditLog::new();
-        for i in 0..20 { log.record(make_event(&format!("op{i}"))); }
+        for i in 0..20 {
+            log.record(make_event(&format!("op{i}")));
+        }
         assert_eq!(log.len(), 20);
         assert!(log.verify_chain().is_ok());
     }

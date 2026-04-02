@@ -3,9 +3,9 @@
 //! This module provides metrics collection and reporting functionality
 //! for monitoring BLEEP blockchain performance and system health.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::collections::HashMap;
 
 /// Metric counter for collecting numeric values
 #[derive(Debug, Clone)]
@@ -27,21 +27,21 @@ impl MetricCounter {
     pub fn name(&self) -> &str {
         &self.name
     }
-    
+
     /// Increment the counter
     pub fn increment(&self) {
         if let Ok(mut val) = self.value.lock() {
             *val = val.saturating_add(1);
         }
     }
-    
+
     /// Add a value to the counter
     pub fn add(&self, delta: u64) {
         if let Ok(mut val) = self.value.lock() {
             *val = val.saturating_add(delta);
         }
     }
-    
+
     /// Get current counter value
     pub fn get(&self) -> u64 {
         self.value.lock().map(|v| *v).unwrap_or(0)
@@ -68,14 +68,14 @@ impl MetricGauge {
     pub fn name(&self) -> &str {
         &self.name
     }
-    
+
     /// Set the gauge value
     pub fn set(&self, value: i64) {
         if let Ok(mut val) = self.value.lock() {
             *val = value;
         }
     }
-    
+
     /// Get current gauge value
     pub fn get(&self) -> i64 {
         self.value.lock().map(|v| *v).unwrap_or(0)
@@ -97,14 +97,14 @@ impl MetricsRegistry {
             gauges: HashMap::new(),
         }
     }
-    
+
     /// Register a counter metric
     pub fn counter(&mut self, name: &str) -> MetricCounter {
         let counter = MetricCounter::new(name);
         self.counters.insert(name.to_string(), counter.clone());
         counter
     }
-    
+
     /// Register a gauge metric
     pub fn gauge(&mut self, name: &str) -> MetricGauge {
         let gauge = MetricGauge::new(name);

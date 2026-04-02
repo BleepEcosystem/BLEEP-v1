@@ -18,19 +18,17 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use bleep_connect_types::{
-    ChainId, ExecutorProfile, BleepConnectError, BleepConnectResult,
-    InstantIntent, ProposalType, StateCommitment, TransferStatus,
-    UniversalAddress, Vote,
-};
-use bleep_connect_crypto::ClassicalKeyPair;
+use bleep_connect_adapters::AdapterRegistry;
 use bleep_connect_commitment_chain::{CommitmentChain, Validator};
-use bleep_connect_layer1_social::{Layer1Social, RegisteredVoter, ProposalResult};
+use bleep_connect_crypto::ClassicalKeyPair;
+use bleep_connect_layer1_social::{Layer1Social, ProposalResult, RegisteredVoter};
 use bleep_connect_layer2_fullnode::Layer2FullNode;
 use bleep_connect_layer3_zkproof::{Layer3ZKProof, ProofInput};
 use bleep_connect_layer4_instant::Layer4Instant;
-use bleep_connect_adapters::AdapterRegistry;
-
+use bleep_connect_types::{
+    BleepConnectError, BleepConnectResult, ChainId, ExecutorProfile, InstantIntent, ProposalType,
+    StateCommitment, TransferStatus, UniversalAddress, Vote,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION
@@ -131,7 +129,10 @@ impl BleepConnectOrchestrator {
     ///
     /// In production, `validator_keypair` should be loaded from a secure keystore
     /// (e.g., HSM, encrypted file, or environment-based secret manager).
-    pub async fn new(config: BleepConnectConfig, validator_keypair: ClassicalKeyPair) -> BleepConnectResult<Self> {
+    pub async fn new(
+        config: BleepConnectConfig,
+        validator_keypair: ClassicalKeyPair,
+    ) -> BleepConnectResult<Self> {
         std::fs::create_dir_all(&config.data_directory)
             .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?;
 
@@ -139,9 +140,11 @@ impl BleepConnectOrchestrator {
         let validator_pk = validator_keypair.public_key_bytes();
         let initial_validators = vec![Validator::new(validator_pk, 1_000_000_000)];
 
-        let commitment_chain = Arc::new(
-            CommitmentChain::new(&chain_path, validator_keypair, initial_validators)?
-        );
+        let commitment_chain = Arc::new(CommitmentChain::new(
+            &chain_path,
+            validator_keypair,
+            initial_validators,
+        )?);
 
         let layer4 = Arc::new(Layer4Instant::new(commitment_chain.clone()));
         let layer3 = Arc::new(Layer3ZKProof::new(commitment_chain.clone())?);
@@ -198,7 +201,9 @@ impl BleepConnectOrchestrator {
                 tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
                 match cc.produce_block().await {
                     Ok(block) => info!("Commitment block #{} produced", block.block_number),
-                    Err(BleepConnectError::InternalError(msg)) if msg.contains("No commitments") => {
+                    Err(BleepConnectError::InternalError(msg))
+                        if msg.contains("No commitments") =>
+                    {
                         // Normal: nothing to commit this interval
                     }
                     Err(e) => warn!("Block production error: {e}"),
@@ -218,13 +223,15 @@ impl BleepConnectOrchestrator {
     /// Called from BLEEP's RPC handler for `bleep_crossChainTransfer`.
     pub async fn submit_intent(&self, intent: InstantIntent) -> BleepConnectResult<[u8; 32]> {
         if self.layer1.is_paused().await {
-            return Err(BleepConnectError::InternalError("Protocol is paused by governance".into()));
+            return Err(BleepConnectError::InternalError(
+                "Protocol is paused by governance".into(),
+            ));
         }
 
         let requires_l2 = intent.source_amount >= self.config.layer2_threshold;
         if requires_l2 && self.layer2.is_none() {
             return Err(BleepConnectError::InternalError(
-                "Transfer exceeds L2 threshold but Layer 2 is not enabled".into()
+                "Transfer exceeds L2 threshold but Layer 2 is not enabled".into(),
             ));
         }
 
@@ -283,7 +290,10 @@ impl BleepConnectOrchestrator {
     }
 
     /// Submit an execution proof from an executor.
-    pub async fn submit_execution_proof(&self, proof: bleep_connect_layer4_instant::ExecutionProof) -> BleepConnectResult<()> {
+    pub async fn submit_execution_proof(
+        &self,
+        proof: bleep_connect_layer4_instant::ExecutionProof,
+    ) -> BleepConnectResult<()> {
         let intent_id = proof.intent_id;
         self.layer4.submit_execution_proof(proof).await?;
 
@@ -308,7 +318,10 @@ impl BleepConnectOrchestrator {
                 };
                 match l3.prove_transfer(input).await {
                     Ok(p) => info!("ZK proof generated: {}", hex::encode(p.proof_id)),
-                    Err(e) => warn!("ZK proof generation failed for {}: {e}", hex::encode(intent_id)),
+                    Err(e) => warn!(
+                        "ZK proof generation failed for {}: {e}",
+                        hex::encode(intent_id)
+                    ),
                 }
             });
         }
@@ -399,7 +412,10 @@ impl BleepConnectOrchestrator {
         title: String,
         description: String,
     ) -> BleepConnectResult<[u8; 32]> {
-        let id = self.layer1.submit_proposal(proposer, proposal_type, title, description, vec![]).await?;
+        let id = self
+            .layer1
+            .submit_proposal(proposer, proposal_type, title, description, vec![])
+            .await?;
         self.metrics.write().await.total_governance_proposals += 1;
         Ok(id)
     }
@@ -451,7 +467,9 @@ pub struct BleepConnectBuilder {
 
 impl BleepConnectBuilder {
     pub fn new() -> Self {
-        Self { config: BleepConnectConfig::default() }
+        Self {
+            config: BleepConnectConfig::default(),
+        }
     }
 
     /// Create builder with a custom config.
@@ -478,14 +496,19 @@ impl BleepConnectBuilder {
         self
     }
 
-    pub async fn build(self, keypair: ClassicalKeyPair) -> BleepConnectResult<Arc<BleepConnectOrchestrator>> {
+    pub async fn build(
+        self,
+        keypair: ClassicalKeyPair,
+    ) -> BleepConnectResult<Arc<BleepConnectOrchestrator>> {
         let orchestrator = BleepConnectOrchestrator::new(self.config, keypair).await?;
         Ok(Arc::new(orchestrator))
     }
 }
 
 impl Default for BleepConnectBuilder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

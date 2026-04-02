@@ -9,23 +9,24 @@
 //! - **AES-256-GCM**: Authenticated symmetric encryption
 //! - **BLAKE2b / SHA-256 / SHA-3**: Hashing
 
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit},
+    Aes256Gcm, Key, Nonce,
+};
+use blake2::Blake2b512;
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use hkdf::Hkdf;
 use pqcrypto_kyber::kyber1024;
 use pqcrypto_sphincsplus::sphincssha2256ssimple;
-use pqcrypto_traits::kem::{PublicKey as KemPk, SecretKey as KemSk, Ciphertext, SharedSecret};
-use pqcrypto_traits::sign::{
-    PublicKey as SignPk, SecretKey as SignSk, DetachedSignature,
-};
-use ed25519_dalek::{Signer, Verifier, SigningKey, VerifyingKey};
-use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit, AeadCore}};
-use hkdf::Hkdf;
-use sha2::{Sha256, Digest as Sha2Digest};
-use sha3::Sha3_256;
-use blake2::Blake2b512;
+use pqcrypto_traits::kem::{Ciphertext, PublicKey as KemPk, SecretKey as KemSk, SharedSecret};
+use pqcrypto_traits::sign::{DetachedSignature, PublicKey as SignPk, SecretKey as SignSk};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use zeroize::ZeroizeOnDrop;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as Sha2Digest, Sha256};
+use sha3::Sha3_256;
 use thiserror::Error;
-use serde::{Serialize, Deserialize};
+use zeroize::ZeroizeOnDrop;
 
 /// Errors from cryptographic operations.
 #[derive(Debug, Error)]
@@ -90,11 +91,12 @@ impl QuantumKeyPair {
 
     /// Sign a message with SPHINCS+. Returns a detached signature.
     pub fn sign(&self, message: &[u8]) -> CryptoResult<QuantumSignature> {
-        let sk = sphincssha2256ssimple::SecretKey::from_bytes(&self.sign_sk)
-            .map_err(|_| CryptoError::InvalidKeyLength {
+        let sk = sphincssha2256ssimple::SecretKey::from_bytes(&self.sign_sk).map_err(|_| {
+            CryptoError::InvalidKeyLength {
                 expected: sphincssha2256ssimple::secret_key_bytes(),
                 got: self.sign_sk.len(),
-            })?;
+            }
+        })?;
         let sig = sphincssha2256ssimple::detached_sign(message, &sk);
         Ok(QuantumSignature {
             bytes: sig.as_bytes().to_vec(),
@@ -105,11 +107,12 @@ impl QuantumKeyPair {
     /// Returns (ciphertext, kem_ciphertext) where kem_ciphertext is the
     /// Kyber encapsulation needed for decryption.
     pub fn encrypt(&self, plaintext: &[u8]) -> CryptoResult<EncryptedPayload> {
-        let pk = kyber1024::PublicKey::from_bytes(&self.kem_pk)
-            .map_err(|_| CryptoError::InvalidKeyLength {
+        let pk = kyber1024::PublicKey::from_bytes(&self.kem_pk).map_err(|_| {
+            CryptoError::InvalidKeyLength {
                 expected: kyber1024::public_key_bytes(),
                 got: self.kem_pk.len(),
-            })?;
+            }
+        })?;
         let (shared_secret, kem_ciphertext) = kyber1024::encapsulate(&pk);
         let aes_key = derive_aes_key(shared_secret.as_bytes())?;
         let encrypted = aes_gcm_encrypt(&aes_key, plaintext)?;
@@ -121,11 +124,12 @@ impl QuantumKeyPair {
 
     /// Decrypt a payload encrypted with our KEM public key.
     pub fn decrypt(&self, payload: &EncryptedPayload) -> CryptoResult<Vec<u8>> {
-        let sk = kyber1024::SecretKey::from_bytes(&self.kem_sk)
-            .map_err(|_| CryptoError::InvalidKeyLength {
+        let sk = kyber1024::SecretKey::from_bytes(&self.kem_sk).map_err(|_| {
+            CryptoError::InvalidKeyLength {
                 expected: kyber1024::secret_key_bytes(),
                 got: self.kem_sk.len(),
-            })?;
+            }
+        })?;
         let ct = kyber1024::Ciphertext::from_bytes(&payload.kem_ciphertext)
             .map_err(|_| CryptoError::InvalidCiphertext)?;
         let shared_secret = kyber1024::decapsulate(&ct, &sk);
@@ -154,7 +158,9 @@ pub struct QuantumVerifier {
 
 impl QuantumVerifier {
     pub fn new(sign_pk_bytes: &[u8]) -> Self {
-        Self { sign_pk: sign_pk_bytes.to_vec() }
+        Self {
+            sign_pk: sign_pk_bytes.to_vec(),
+        }
     }
 
     /// Verify a SPHINCS+ detached signature over `message`.
@@ -184,11 +190,15 @@ impl ClassicalKeyPair {
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
-        Self { signing_key: SigningKey::from_bytes(&bytes) }
+        Self {
+            signing_key: SigningKey::from_bytes(&bytes),
+        }
     }
 
     pub fn from_bytes(bytes: &[u8; 32]) -> CryptoResult<Self> {
-        Ok(Self { signing_key: SigningKey::from_bytes(bytes) })
+        Ok(Self {
+            signing_key: SigningKey::from_bytes(bytes),
+        })
     }
 
     pub fn public_key_bytes(&self) -> [u8; 32] {
@@ -204,10 +214,18 @@ impl ClassicalKeyPair {
         let vk = VerifyingKey::from_bytes(public_key)
             .map_err(|e| CryptoError::Ed25519Error(e.to_string()))?;
         if signature.len() != 64 {
-            return Err(CryptoError::InvalidKeyLength { expected: 64, got: signature.len() });
+            return Err(CryptoError::InvalidKeyLength {
+                expected: 64,
+                got: signature.len(),
+            });
         }
-        let sig_bytes: [u8; 64] = signature.try_into()
-            .map_err(|_| CryptoError::InvalidKeyLength { expected: 64, got: signature.len() })?;
+        let sig_bytes: [u8; 64] =
+            signature
+                .try_into()
+                .map_err(|_| CryptoError::InvalidKeyLength {
+                    expected: 64,
+                    got: signature.len(),
+                })?;
         let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
         Ok(vk.verify(message, &sig).is_ok())
     }
@@ -260,7 +278,11 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
         let mut i = 0;
         while i < current.len() {
             let left = current[i];
-            let right = if i + 1 < current.len() { current[i + 1] } else { current[i] };
+            let right = if i + 1 < current.len() {
+                current[i + 1]
+            } else {
+                current[i]
+            };
             let mut combined = Vec::with_capacity(64);
             combined.extend_from_slice(&left);
             combined.extend_from_slice(&right);
@@ -303,7 +325,9 @@ fn aes_gcm_decrypt(key: &[u8; 32], data: &[u8]) -> CryptoResult<Vec<u8>> {
     let nonce = Nonce::from_slice(&data[..12]);
     let ciphertext = &data[12..];
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    cipher.decrypt(nonce, ciphertext).map_err(|_| CryptoError::DecryptionFailed)
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| CryptoError::DecryptionFailed)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

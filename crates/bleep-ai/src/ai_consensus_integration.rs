@@ -1,7 +1,7 @@
 /// AI Integration with Consensus and Self-Healing
 ///
 /// This module connects AI proposals to the consensus engine and self-healing system.
-/// 
+///
 /// FLOW:
 /// 1. AI generates proposal + attestation
 /// 2. Constraints validate proposal
@@ -13,7 +13,6 @@
 /// KEY INVARIANT:
 /// AI never directly executes. It only proposes.
 /// Execution requires consensus approval.
-
 use crate::ai_attestation::AIAttestationRecord;
 use crate::ai_proposal_types::AIProposal;
 use crate::deterministic_inference::InferenceRecord;
@@ -255,10 +254,7 @@ pub enum HealingAction {
     RestartHealing { shard_id: u32 },
 
     /// Adjust consensus parameters
-    ParameterAdjustment {
-        parameter: String,
-        new_value: u64,
-    },
+    ParameterAdjustment { parameter: String, new_value: u64 },
 }
 
 /// Track healing execution linked to AI proposal
@@ -327,10 +323,7 @@ impl AIConsensusOrchestrator {
     }
 
     /// Submit AI proposal to consensus
-    pub fn submit_proposal(
-        &mut self,
-        proposal: ConsensusProposal,
-    ) -> IntegrationResult<String> {
+    pub fn submit_proposal(&mut self, proposal: ConsensusProposal) -> IntegrationResult<String> {
         // Verify proposal is properly attested
         if !proposal.attestation.verified {
             return Err(IntegrationError::ProposalNotAttested(
@@ -362,8 +355,7 @@ impl AIConsensusOrchestrator {
         );
 
         self.outcomes.insert(proposal_id.clone(), outcome);
-        self.active_proposals
-            .insert(proposal_id.clone(), proposal);
+        self.active_proposals.insert(proposal_id.clone(), proposal);
 
         Ok(proposal_id)
     }
@@ -376,12 +368,9 @@ impl AIConsensusOrchestrator {
         votes_for: u32,
         votes_against: u32,
     ) -> IntegrationResult<()> {
-        let outcome = self
-            .outcomes
-            .get_mut(proposal_id)
-            .ok_or_else(|| IntegrationError::InvalidState(
-                format!("Proposal not found: {}", proposal_id),
-            ))?;
+        let outcome = self.outcomes.get_mut(proposal_id).ok_or_else(|| {
+            IntegrationError::InvalidState(format!("Proposal not found: {}", proposal_id))
+        })?;
 
         if approved {
             outcome.mark_approved(votes_for, votes_against, self.current_epoch);
@@ -398,12 +387,9 @@ impl AIConsensusOrchestrator {
         proposal_id: &str,
         action: HealingAction,
     ) -> IntegrationResult<()> {
-        let outcome = self
-            .outcomes
-            .get(proposal_id)
-            .ok_or_else(|| IntegrationError::InvalidState(
-                format!("Proposal not found: {}", proposal_id),
-            ))?;
+        let outcome = self.outcomes.get(proposal_id).ok_or_else(|| {
+            IntegrationError::InvalidState(format!("Proposal not found: {}", proposal_id))
+        })?;
 
         if outcome.state != ProposalState::Approved {
             return Err(IntegrationError::HealingNotApplicable(
@@ -438,9 +424,9 @@ impl AIConsensusOrchestrator {
         let execution = self
             .healing_executions
             .get_mut(proposal_id)
-            .ok_or_else(|| IntegrationError::InvalidState(
-                format!("Healing not in progress: {}", proposal_id),
-            ))?;
+            .ok_or_else(|| {
+                IntegrationError::InvalidState(format!("Healing not in progress: {}", proposal_id))
+            })?;
 
         execution.epoch_completed = Some(self.current_epoch);
         execution.status = if success {
@@ -529,11 +515,8 @@ mod tests {
 
     #[test]
     fn test_proposal_outcome_lifecycle() {
-        let mut outcome = ProposalOutcome::new(
-            "prop1".to_string(),
-            "ConsensusModeSwitch".to_string(),
-            10,
-        );
+        let mut outcome =
+            ProposalOutcome::new("prop1".to_string(), "ConsensusModeSwitch".to_string(), 10);
 
         assert_eq!(outcome.state, ProposalState::Proposed);
 

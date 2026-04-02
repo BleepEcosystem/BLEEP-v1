@@ -1,6 +1,6 @@
 // PHASE 1: CONSENSUS ORCHESTRATOR
 // Deterministic consensus mode selection based on on-chain metrics
-// 
+//
 // SAFETY INVARIANTS:
 // 1. Mode selection is fully deterministic (identical on all honest nodes)
 // 2. Uses ONLY on-chain observable metrics (no local heuristics)
@@ -8,25 +8,25 @@
 // 4. All decisions are reproducible and auditable
 // 5. Emergency PoW is time-bounded and auto-exits
 
-use crate::epoch::{EpochConfig, EpochState, ConsensusMode};
 use crate::engine::{ConsensusEngine, ConsensusError, ConsensusMetrics};
+use crate::epoch::{ConsensusMode, EpochConfig, EpochState};
 use bleep_core::block::Block;
 use bleep_core::blockchain::BlockchainState;
+use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use log::{info, warn};
 
 /// State of the emergency PoW mechanism.
-/// 
+///
 /// SAFETY: PoW must NEVER become permanent. It is rate-limited and auto-exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmergencyPoWState {
     /// PoW is not active; chain is operating normally
     Inactive,
-    
+
     /// PoW is active; fault detection in progress
     Active { activated_at_epoch: u64 },
-    
+
     /// PoW has exited; chain returning to normal
     Exited { exited_at_epoch: u64 },
 }
@@ -36,7 +36,7 @@ impl EmergencyPoWState {
     pub fn is_active(&self) -> bool {
         matches!(self, EmergencyPoWState::Active { .. })
     }
-    
+
     /// Get the epoch where PoW was activated (if applicable).
     pub fn activated_epoch(&self) -> Option<u64> {
         match self {
@@ -47,32 +47,32 @@ impl EmergencyPoWState {
 }
 
 /// Consensus orchestrator: selects consensus mode deterministically.
-/// 
+///
 /// SAFETY: This is the ONLY component that selects the consensus mode for an epoch.
 /// All decisions are based on deterministic, on-chain metrics that all honest nodes
 /// can compute identically.
 pub struct ConsensusOrchestrator {
     config: EpochConfig,
-    
+
     /// Consensus engines indexed by mode
     engines: HashMap<ConsensusMode, Arc<dyn ConsensusEngine>>,
-    
+
     /// Emergency PoW state machine
     pow_state: EmergencyPoWState,
-    
+
     /// Maximum epochs PoW can remain active (to prevent permanent activation)
     max_pow_epochs: u64,
-    
+
     /// Participation threshold for declaring emergency (below this → PoW)
     emergency_participation_threshold: f64,
-    
+
     /// Slashing threshold that triggers PoW
     emergency_slashing_threshold: u64,
 }
 
 impl ConsensusOrchestrator {
     /// Create a new orchestrator.
-    /// 
+    ///
     /// # Arguments
     /// * `config` - Immutable epoch configuration
     /// * `engines` - Map of consensus engines indexed by mode
@@ -89,15 +89,15 @@ impl ConsensusOrchestrator {
         if engines.is_empty() {
             return Err("At least one consensus engine is required".to_string());
         }
-        
+
         if !(0.0..=1.0).contains(&emergency_participation_threshold) {
             return Err("emergency_participation_threshold must be between 0 and 1".to_string());
         }
-        
+
         if max_pow_epochs == 0 {
             return Err("max_pow_epochs must be > 0".to_string());
         }
-        
+
         Ok(ConsensusOrchestrator {
             config,
             engines,
@@ -109,20 +109,20 @@ impl ConsensusOrchestrator {
     }
 
     /// Determine the consensus mode for an epoch.
-    /// 
+    ///
     /// SAFETY: This method produces identical results on all honest nodes
     /// given identical metrics. The decision is fully deterministic and
     /// reproducible.
-    /// 
+    ///
     /// # Algorithm
     /// 1. If PoW is active and has exceeded max_pow_epochs, exit PoW
     /// 2. If metrics indicate emergency, activate PoW
     /// 3. Otherwise, return to normal mode (PoS or PBFT)
-    /// 
+    ///
     /// # Inputs (deterministic, on-chain observable)
     /// * `epoch_id` - The epoch to select mode for
     /// * `metrics` - On-chain consensus metrics
-    /// 
+    ///
     /// # Returns
     /// - `ConsensusMode` - The mode to use for this epoch
     pub fn select_mode(&mut self, epoch_id: u64, metrics: &ConsensusMetrics) -> ConsensusMode {
@@ -144,12 +144,13 @@ impl ConsensusOrchestrator {
 
         // SAFETY: Check if emergency conditions are present
         if self.is_emergency_condition(metrics) {
-            warn!("Emergency condition detected at epoch {}: participation={:.2}%, slashing={}",
+            warn!(
+                "Emergency condition detected at epoch {}: participation={:.2}%, slashing={}",
                 epoch_id,
                 metrics.validator_participation * 100.0,
                 metrics.slashing_event_count
             );
-            
+
             if !self.pow_state.is_active() {
                 info!("Activating emergency PoW at epoch {}", epoch_id);
                 self.pow_state = EmergencyPoWState::Active {
@@ -166,20 +167,23 @@ impl ConsensusOrchestrator {
                 exited_at_epoch: epoch_id,
             };
         }
-        
+
         self.select_normal_mode(metrics)
     }
 
     /// Select the normal (non-PoW) consensus mode.
-    /// 
+    ///
     /// SAFETY: This is called when no emergency condition exists.
     /// Chooses between PoS and PBFT based on network conditions.
     fn select_normal_mode(&self, metrics: &ConsensusMetrics) -> ConsensusMode {
         // Decision: Use PoS as primary, switch to PBFT if finality is critically slow
         // SAFETY: All metrics are deterministic and observable on-chain
-        
+
         if metrics.finality_latency_blocks > 10 {
-            info!("High finality latency ({}); using PBFT", metrics.finality_latency_blocks);
+            info!(
+                "High finality latency ({}); using PBFT",
+                metrics.finality_latency_blocks
+            );
             ConsensusMode::PbftFastFinality
         } else {
             ConsensusMode::PosNormal
@@ -187,7 +191,7 @@ impl ConsensusOrchestrator {
     }
 
     /// Check if current conditions require emergency intervention.
-    /// 
+    ///
     /// SAFETY: All thresholds are deterministic and immutable.
     fn is_emergency_condition(&self, metrics: &ConsensusMetrics) -> bool {
         // Condition 1: Insufficient validator participation (< 2/3 + 1)
@@ -204,7 +208,7 @@ impl ConsensusOrchestrator {
     }
 
     /// Verify that a block is valid for the given epoch.
-    /// 
+    ///
     /// SAFETY: Blocks with incorrect consensus mode are rejected unconditionally.
     /// This is the critical fork-safety mechanism.
     pub fn verify_block_consensus(
@@ -228,7 +232,7 @@ impl ConsensusOrchestrator {
             ConsensusMode::PbftFastFinality => bleep_core::block::ConsensusMode::PbftFastFinality,
             ConsensusMode::EmergencyPow => bleep_core::block::ConsensusMode::EmergencyPow,
         };
-        
+
         if block.consensus_mode != expected_mode {
             return Err(ConsensusError::ConsensusModeMismatch {
                 expected: epoch_state.consensus_mode.as_str().to_string(),
@@ -246,16 +250,20 @@ impl ConsensusOrchestrator {
         }
 
         // Delegate to the consensus engine for mode-specific verification
-        let engine = self.get_engine(&epoch_state.consensus_mode)
-            .ok_or_else(|| ConsensusError::Other(
-                format!("No engine available for mode {:?}", epoch_state.consensus_mode)
-            ))?;
+        let engine = self
+            .get_engine(&epoch_state.consensus_mode)
+            .ok_or_else(|| {
+                ConsensusError::Other(format!(
+                    "No engine available for mode {:?}",
+                    epoch_state.consensus_mode
+                ))
+            })?;
 
         engine.verify_block(block, epoch_state, blockchain_state)
     }
 
     /// Propose a block for the current state.
-    /// 
+    ///
     /// SAFETY: The orchestrator ensures only the correct mode proposes blocks.
     pub fn propose_block(
         &self,
@@ -265,19 +273,29 @@ impl ConsensusOrchestrator {
         epoch_state: &EpochState,
         blockchain_state: &BlockchainState,
     ) -> Result<Block, ConsensusError> {
-        let engine = self.get_engine(&epoch_state.consensus_mode)
-            .ok_or_else(|| ConsensusError::Other(
-                format!("No engine available for mode {:?}", epoch_state.consensus_mode)
-            ))?;
+        let engine = self
+            .get_engine(&epoch_state.consensus_mode)
+            .ok_or_else(|| {
+                ConsensusError::Other(format!(
+                    "No engine available for mode {:?}",
+                    epoch_state.consensus_mode
+                ))
+            })?;
 
-        engine.propose_block(height, previous_hash, transactions, epoch_state, blockchain_state)
+        engine.propose_block(
+            height,
+            previous_hash,
+            transactions,
+            epoch_state,
+            blockchain_state,
+        )
     }
 
     /// Execute PBFT pre-prepare phase for a specific block.
-    /// 
+    ///
     /// SAFETY: This method should only be called when consensus mode is PbftFastFinality.
     /// Blocks must already be produced by PoS before this is called.
-    /// 
+    ///
     /// # Arguments
     /// * `block` - The block to pre-prepare
     /// * `epoch_state` - Current epoch state
@@ -296,22 +314,25 @@ impl ConsensusOrchestrator {
         }
 
         // Get the PBFT engine (downcasting would be needed in real impl, using Arc<dyn...>)
-        info!("PBFT orchestrator: Starting pre-prepare for block {}", block.index);
-        
+        info!(
+            "PBFT orchestrator: Starting pre-prepare for block {}",
+            block.index
+        );
+
         // In a real implementation with concrete engine types, we would:
         // let pbft_engine = self.get_pbft_engine_mut()?;
         // pbft_engine.pre_prepare(block.index, block)?;
-        
+
         // For now, log the operation
         info!("Pre-prepare phase initiated for block {}", block.index);
-        
+
         Ok(())
     }
 
     /// Execute PBFT prepare phase for a specific block.
-    /// 
+    ///
     /// SAFETY: Should only be called after pre-prepare has succeeded.
-    /// 
+    ///
     /// # Arguments
     /// * `block_height` - Height of the block being prepared
     /// * `validator_id` - ID of the validator sending prepare message
@@ -334,18 +355,18 @@ impl ConsensusOrchestrator {
             "PBFT orchestrator: Processing prepare from {} for block {}",
             validator_id, block_height
         );
-        
+
         // In a real implementation, this would call:
         // let pbft_engine = self.get_pbft_engine_mut()?;
         // pbft_engine.process_prepare(block_height, validator_id)?;
-        
+
         Ok(())
     }
 
     /// Execute PBFT commit phase for a specific block.
-    /// 
+    ///
     /// SAFETY: Should only be called after prepare phase has reached quorum.
-    /// 
+    ///
     /// # Arguments
     /// * `block_height` - Height of the block being committed
     /// * `validator_id` - ID of the validator sending commit message
@@ -368,11 +389,11 @@ impl ConsensusOrchestrator {
             "PBFT orchestrator: Processing commit from {} for block {}",
             validator_id, block_height
         );
-        
+
         // In a real implementation, this would call:
         // let pbft_engine = self.get_pbft_engine_mut()?;
         // pbft_engine.process_commit(block_height, validator_id)?;
-        
+
         Ok(())
     }
 
@@ -491,7 +512,12 @@ mod tests {
 
         let mode = orchestrator.select_mode(0, &metrics);
         assert_eq!(mode, ConsensusMode::EmergencyPow);
-        assert_eq!(orchestrator.pow_state(), EmergencyPoWState::Active { activated_at_epoch: 0 });
+        assert_eq!(
+            orchestrator.pow_state(),
+            EmergencyPoWState::Active {
+                activated_at_epoch: 0
+            }
+        );
     }
 
     #[test]
@@ -513,7 +539,9 @@ mod tests {
     #[test]
     fn test_pow_auto_exit() {
         let mut orchestrator = create_test_orchestrator();
-        orchestrator.pow_state = EmergencyPoWState::Active { activated_at_epoch: 0 };
+        orchestrator.pow_state = EmergencyPoWState::Active {
+            activated_at_epoch: 0,
+        };
 
         let metrics = ConsensusMetrics {
             validator_participation: 0.90,

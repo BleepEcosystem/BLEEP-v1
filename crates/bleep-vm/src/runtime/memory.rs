@@ -6,8 +6,8 @@
 //! - Bounds-checked read/write helpers that return typed `VmError` on violation.
 //! - Memory zeroing on allocation (no data leaks between executions).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tracing::debug;
@@ -51,16 +51,19 @@ impl MemoryLimit {
         if max_pages > HARD_MAX_PAGES {
             return Err(VmError::MemoryLimitExceeded {
                 requested: max_pages as u64 * WASM_PAGE_SIZE as u64,
-                limit:     HARD_MAX_PAGES as u64 * WASM_PAGE_SIZE as u64,
+                limit: HARD_MAX_PAGES as u64 * WASM_PAGE_SIZE as u64,
             });
         }
         if initial_pages > max_pages {
             return Err(VmError::MemoryLimitExceeded {
                 requested: initial_pages as u64,
-                limit:     max_pages as u64,
+                limit: max_pages as u64,
             });
         }
-        Ok(MemoryLimit { initial_pages, max_pages })
+        Ok(MemoryLimit {
+            initial_pages,
+            max_pages,
+        })
     }
 
     pub fn initial_bytes(&self) -> usize {
@@ -77,8 +80,8 @@ impl MemoryLimit {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct MemoryChunk {
-    data:   Vec<u8>,
-    limit:  MemoryLimit,
+    data: Vec<u8>,
+    limit: MemoryLimit,
 }
 
 impl MemoryChunk {
@@ -91,18 +94,21 @@ impl MemoryChunk {
         }
     }
 
-    pub fn len(&self) -> usize { self.data.len() }
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
 
     /// Grow by `delta_pages`.  Returns `Err` if the new size would exceed the
     /// limit, otherwise extends the buffer with zeroed bytes.
     pub fn grow(&mut self, delta_pages: u32) -> VmResult<u32> {
         let current_pages = (self.data.len() / WASM_PAGE_SIZE) as u32;
-        let new_pages = current_pages.checked_add(delta_pages)
+        let new_pages = current_pages
+            .checked_add(delta_pages)
             .ok_or(VmError::GasOverflow)?;
         if new_pages > self.limit.max_pages {
             return Err(VmError::MemoryLimitExceeded {
                 requested: new_pages as u64 * WASM_PAGE_SIZE as u64,
-                limit:     self.limit.max_bytes() as u64,
+                limit: self.limit.max_bytes() as u64,
             });
         }
         let extra = delta_pages as usize * WASM_PAGE_SIZE;
@@ -113,15 +119,21 @@ impl MemoryChunk {
 
     /// Bounds-checked byte read.
     pub fn read_byte(&self, offset: usize) -> VmResult<u8> {
-        self.data.get(offset).copied().ok_or(VmError::MemoryViolation {
-            offset: offset as u64,
-            size: 1,
-        })
+        self.data
+            .get(offset)
+            .copied()
+            .ok_or(VmError::MemoryViolation {
+                offset: offset as u64,
+                size: 1,
+            })
     }
 
     /// Bounds-checked slice read.
     pub fn read_slice(&self, offset: usize, len: usize) -> VmResult<&[u8]> {
-        let end = offset.checked_add(len).ok_or(VmError::MemoryViolation { offset: offset as u64, size: len as u64 })?;
+        let end = offset.checked_add(len).ok_or(VmError::MemoryViolation {
+            offset: offset as u64,
+            size: len as u64,
+        })?;
         self.data.get(offset..end).ok_or(VmError::MemoryViolation {
             offset: offset as u64,
             size: len as u64,
@@ -130,10 +142,19 @@ impl MemoryChunk {
 
     /// Bounds-checked write of `src` at `offset`.
     pub fn write_slice(&mut self, offset: usize, src: &[u8]) -> VmResult<()> {
-        let end = offset.checked_add(src.len())
-            .ok_or(VmError::MemoryViolation { offset: offset as u64, size: src.len() as u64 })?;
-        let dst = self.data.get_mut(offset..end)
-            .ok_or(VmError::MemoryViolation { offset: offset as u64, size: src.len() as u64 })?;
+        let end = offset
+            .checked_add(src.len())
+            .ok_or(VmError::MemoryViolation {
+                offset: offset as u64,
+                size: src.len() as u64,
+            })?;
+        let dst = self
+            .data
+            .get_mut(offset..end)
+            .ok_or(VmError::MemoryViolation {
+                offset: offset as u64,
+                size: src.len() as u64,
+            })?;
         dst.copy_from_slice(src);
         Ok(())
     }
@@ -165,8 +186,12 @@ impl MemoryChunk {
         self.data.fill(0);
     }
 
-    pub fn as_slice(&self) -> &[u8] { &self.data }
-    pub fn as_mut_slice(&mut self) -> &mut [u8] { &mut self.data }
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -175,9 +200,9 @@ impl MemoryChunk {
 
 /// Tracks peak memory usage and enforces limits for one execution.
 pub struct MemoryManager {
-    limit:        MemoryLimit,
+    limit: MemoryLimit,
     current_bytes: AtomicUsize,
-    peak_bytes:   AtomicUsize,
+    peak_bytes: AtomicUsize,
 }
 
 impl MemoryManager {
@@ -185,7 +210,7 @@ impl MemoryManager {
         MemoryManager {
             limit,
             current_bytes: AtomicUsize::new(limit.initial_bytes()),
-            peak_bytes:    AtomicUsize::new(limit.initial_bytes()),
+            peak_bytes: AtomicUsize::new(limit.initial_bytes()),
         }
     }
 
@@ -195,13 +220,16 @@ impl MemoryManager {
         if current > self.limit.max_bytes() {
             return Err(VmError::MemoryLimitExceeded {
                 requested: current as u64,
-                limit:     self.limit.max_bytes() as u64,
+                limit: self.limit.max_bytes() as u64,
             });
         }
         let mut peak = self.peak_bytes.load(Ordering::Relaxed);
         while current > peak {
             match self.peak_bytes.compare_exchange_weak(
-                peak, current, Ordering::Relaxed, Ordering::Relaxed,
+                peak,
+                current,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(p) => peak = p,
@@ -212,12 +240,21 @@ impl MemoryManager {
 
     /// Record a deallocation.
     pub fn record_free(&self, bytes: usize) {
-        self.current_bytes.fetch_sub(bytes.min(self.current_bytes.load(Ordering::Relaxed)), Ordering::Relaxed);
+        self.current_bytes.fetch_sub(
+            bytes.min(self.current_bytes.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
     }
 
-    pub fn current_bytes(&self) -> usize { self.current_bytes.load(Ordering::Relaxed) }
-    pub fn peak_usage(&self)    -> usize { self.peak_bytes.load(Ordering::Relaxed) }
-    pub fn limit(&self) -> &MemoryLimit  { &self.limit }
+    pub fn current_bytes(&self) -> usize {
+        self.current_bytes.load(Ordering::Relaxed)
+    }
+    pub fn peak_usage(&self) -> usize {
+        self.peak_bytes.load(Ordering::Relaxed)
+    }
+    pub fn limit(&self) -> &MemoryLimit {
+        &self.limit
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,16 +264,14 @@ impl MemoryManager {
 /// A lock-based pool of pre-allocated, zeroed `MemoryChunk`s.
 /// Chunks are zeroed on return so the next execution starts clean.
 pub struct SharedMemoryPool {
-    limit:    MemoryLimit,
-    pool:     Mutex<Vec<MemoryChunk>>,
+    limit: MemoryLimit,
+    pool: Mutex<Vec<MemoryChunk>>,
     capacity: usize,
 }
 
 impl SharedMemoryPool {
     pub fn new(capacity: usize, limit: MemoryLimit) -> Arc<Self> {
-        let chunks: Vec<MemoryChunk> = (0..capacity)
-            .map(|_| MemoryChunk::new(limit))
-            .collect();
+        let chunks: Vec<MemoryChunk> = (0..capacity).map(|_| MemoryChunk::new(limit)).collect();
         Arc::new(SharedMemoryPool {
             limit,
             pool: Mutex::new(chunks),
@@ -262,14 +297,18 @@ impl SharedMemoryPool {
         // If pool is full, chunk is simply dropped and freed.
     }
 
-    pub fn available(&self) -> usize { self.pool.lock().len() }
+    pub fn available(&self) -> usize {
+        self.pool.lock().len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn default_limit() -> MemoryLimit { MemoryLimit::default() }
+    fn default_limit() -> MemoryLimit {
+        MemoryLimit::default()
+    }
 
     #[test]
     fn test_memory_limit_validation() {

@@ -33,24 +33,30 @@ pub enum ChaosScenario {
 
 #[derive(Debug, Clone)]
 pub struct ChaosOutcome {
-    pub scenario:         ChaosScenario,
-    pub passed:           bool,
-    pub duration_ms:      u64,
+    pub scenario: ChaosScenario,
+    pub passed: bool,
+    pub duration_ms: u64,
     pub chain_height_before: u64,
-    pub chain_height_after:  u64,
-    pub final_consensus:  bool,
-    pub invariants_held:  Vec<String>,
-    pub violations:       Vec<String>,
-    pub notes:            String,
+    pub chain_height_after: u64,
+    pub final_consensus: bool,
+    pub invariants_held: Vec<String>,
+    pub violations: Vec<String>,
+    pub notes: String,
 }
 
 impl ChaosOutcome {
-    fn pass(scenario: ChaosScenario, start: Instant, h_before: u64, h_after: u64, notes: &str) -> Self {
+    fn pass(
+        scenario: ChaosScenario,
+        start: Instant,
+        h_before: u64,
+        h_after: u64,
+        notes: &str,
+    ) -> Self {
         Self {
             passed: true,
             duration_ms: start.elapsed().as_millis() as u64,
             chain_height_before: h_before,
-            chain_height_after:  h_after,
+            chain_height_after: h_after,
             final_consensus: true,
             invariants_held: vec![
                 "I-CON1: finality threshold maintained".into(),
@@ -68,7 +74,7 @@ impl ChaosOutcome {
             passed: false,
             duration_ms: start.elapsed().as_millis() as u64,
             chain_height_before: h_before,
-            chain_height_after:  h_before,
+            chain_height_after: h_before,
             final_consensus: false,
             invariants_held: vec![],
             violations: vec![violation.into()],
@@ -95,10 +101,10 @@ pub struct ChaosConfig {
 impl Default for ChaosConfig {
     fn default() -> Self {
         Self {
-            max_crash_fraction:          0.33,
-            min_blocks_under_partition:  5,
-            recovery_window_ms:          3_000,
-            stress_repetitions:          3,
+            max_crash_fraction: 0.33,
+            min_blocks_under_partition: 5,
+            recovery_window_ms: 3_000,
+            stress_repetitions: 3,
         }
     }
 }
@@ -106,9 +112,9 @@ impl Default for ChaosConfig {
 // ── ChaosEngine ───────────────────────────────────────────────────────────────
 
 pub struct ChaosEngine {
-    config:          ChaosConfig,
+    config: ChaosConfig,
     validator_count: usize,
-    outcomes:        Vec<ChaosOutcome>,
+    outcomes: Vec<ChaosOutcome>,
 }
 
 impl ChaosEngine {
@@ -134,7 +140,9 @@ impl ChaosEngine {
         for scenario in scenarios {
             let outcome = self.run_scenario(scenario, height);
             height = outcome.chain_height_after;
-            if !outcome.passed { all_pass = false; }
+            if !outcome.passed {
+                all_pass = false;
+            }
             self.outcomes.push(outcome);
         }
         all_pass
@@ -145,18 +153,41 @@ impl ChaosEngine {
         vec![
             ChaosScenario::ValidatorCrash { count: 1 },
             ChaosScenario::ValidatorCrash { count: crash_max },
-            ChaosScenario::NetworkPartition { group_a: 4, group_b: 3 },
-            ChaosScenario::NetworkPartition { group_a: 5, group_b: 2 },
+            ChaosScenario::NetworkPartition {
+                group_a: 4,
+                group_b: 3,
+            },
+            ChaosScenario::NetworkPartition {
+                group_a: 5,
+                group_b: 2,
+            },
             ChaosScenario::LongRangeReorg { fork_depth: 10 },
             ChaosScenario::LongRangeReorg { fork_depth: 50 },
-            ChaosScenario::DoubleSign { validator_id: "validator-0".into() },
-            ChaosScenario::DoubleSign { validator_id: "validator-3".into() },
-            ChaosScenario::TxReplay { tx_id: "replay-test-tx-0001".into() },
-            ChaosScenario::EclipseAttack { target_validator: "validator-6".into() },
+            ChaosScenario::DoubleSign {
+                validator_id: "validator-0".into(),
+            },
+            ChaosScenario::DoubleSign {
+                validator_id: "validator-3".into(),
+            },
+            ChaosScenario::TxReplay {
+                tx_id: "replay-test-tx-0001".into(),
+            },
+            ChaosScenario::EclipseAttack {
+                target_validator: "validator-6".into(),
+            },
             ChaosScenario::InvalidBlockFlood { count: 1_000 },
-            ChaosScenario::LoadStress { tps: 1_000,  duration_secs: 60 },
-            ChaosScenario::LoadStress { tps: 5_000,  duration_secs: 60 },
-            ChaosScenario::LoadStress { tps: 10_000, duration_secs: 60 },
+            ChaosScenario::LoadStress {
+                tps: 1_000,
+                duration_secs: 60,
+            },
+            ChaosScenario::LoadStress {
+                tps: 5_000,
+                duration_secs: 60,
+            },
+            ChaosScenario::LoadStress {
+                tps: 10_000,
+                duration_secs: 60,
+            },
         ]
     }
 
@@ -164,9 +195,15 @@ impl ChaosEngine {
         let start = Instant::now();
         match scenario {
             ChaosScenario::ValidatorCrash { count } => {
-                let max_safe = (self.validator_count as f64 * self.config.max_crash_fraction) as usize;
+                let max_safe =
+                    (self.validator_count as f64 * self.config.max_crash_fraction) as usize;
                 if count > max_safe {
-                    ChaosOutcome::fail(ChaosScenario::ValidatorCrash { count }, start, height, "crash count exceeds BFT safety bound (f < n/3)")
+                    ChaosOutcome::fail(
+                        ChaosScenario::ValidatorCrash { count },
+                        start,
+                        height,
+                        "crash count exceeds BFT safety bound (f < n/3)",
+                    )
                 } else {
                     // Simulate: crash `count` validators, wait recovery_window, verify consensus resumes.
                     let remaining = self.validator_count - count;
@@ -175,7 +212,12 @@ impl ChaosEngine {
                         ChaosOutcome::pass(ChaosScenario::ValidatorCrash { count }, start, height, height + 5,
                             &format!("{} validators crashed; {} remaining ≥ quorum {}; consensus resumed in recovery window", count, remaining, quorum))
                     } else {
-                        ChaosOutcome::fail(ChaosScenario::ValidatorCrash { count }, start, height, "remaining validators below 2/3 quorum")
+                        ChaosOutcome::fail(
+                            ChaosScenario::ValidatorCrash { count },
+                            start,
+                            height,
+                            "remaining validators below 2/3 quorum",
+                        )
                     }
                 }
             }
@@ -207,17 +249,35 @@ impl ChaosEngine {
             ChaosScenario::DoubleSign { validator_id } => {
                 // SlashingEngine detects equivocation; 33% stake burned; evidence committed on-chain.
                 let msg = format!("double-sign by {} detected: SlashingEngine applied 33% penalty, evidence committed on-chain, validator tombstoned (idempotent, invariant I-C3)", validator_id);
-                ChaosOutcome::pass(ChaosScenario::DoubleSign { validator_id }, start, height, height + 1, &msg)
+                ChaosOutcome::pass(
+                    ChaosScenario::DoubleSign { validator_id },
+                    start,
+                    height,
+                    height + 1,
+                    &msg,
+                )
             }
             ChaosScenario::TxReplay { tx_id } => {
                 // Nonce monotonicity invariant (I-S5) rejects replayed transactions.
                 let msg = format!("tx {} replay rejected by nonce check (I-S5: nonce must be current_nonce + 1); mempool dedup also blocks broadcast", tx_id);
-                ChaosOutcome::pass(ChaosScenario::TxReplay { tx_id }, start, height, height, &msg)
+                ChaosOutcome::pass(
+                    ChaosScenario::TxReplay { tx_id },
+                    start,
+                    height,
+                    height,
+                    &msg,
+                )
             }
             ChaosScenario::EclipseAttack { target_validator } => {
                 // Kademlia k=20 prevents full eclipse; validator maintains ≥1 honest peer from seed list.
                 let msg = format!("eclipse of {} mitigated: Kademlia k=20 routing diversity; DNS seeds provide re-entry; onion routing prevents IP mapping", target_validator);
-                ChaosOutcome::pass(ChaosScenario::EclipseAttack { target_validator }, start, height, height, &msg)
+                ChaosOutcome::pass(
+                    ChaosScenario::EclipseAttack { target_validator },
+                    start,
+                    height,
+                    height,
+                    &msg,
+                )
             }
             ChaosScenario::InvalidBlockFlood { count } => {
                 // SPHINCS+ signature validation rejects all unsigned/malformed blocks in O(1) per block.
@@ -237,41 +297,58 @@ impl ChaosEngine {
                             txs_per_block * expected_blocks,
                             (txs_per_block * 100) / 4096))
                 } else {
-                    ChaosOutcome::fail(ChaosScenario::LoadStress { tps, duration_secs }, start, height, &format!("TPS target {} not reached (effective: {})", tps, effective_tps))
+                    ChaosOutcome::fail(
+                        ChaosScenario::LoadStress { tps, duration_secs },
+                        start,
+                        height,
+                        &format!(
+                            "TPS target {} not reached (effective: {})",
+                            tps, effective_tps
+                        ),
+                    )
                 }
             }
         }
     }
 
-    pub fn outcomes(&self) -> &[ChaosOutcome] { &self.outcomes }
+    pub fn outcomes(&self) -> &[ChaosOutcome] {
+        &self.outcomes
+    }
 
     pub fn summary(&self) -> ChaosSummary {
-        let total  = self.outcomes.len();
+        let total = self.outcomes.len();
         let passed = self.outcomes.iter().filter(|o| o.passed).count();
-        ChaosSummary { total, passed, failed: total - passed,
+        ChaosSummary {
+            total,
+            passed,
+            failed: total - passed,
             all_passed: passed == total,
-            pass_rate_pct: if total == 0 { 0.0 } else { (passed as f64 / total as f64) * 100.0 },
+            pass_rate_pct: if total == 0 {
+                0.0
+            } else {
+                (passed as f64 / total as f64) * 100.0
+            },
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ChaosSummary {
-    pub total:          usize,
-    pub passed:         usize,
-    pub failed:         usize,
-    pub all_passed:     bool,
-    pub pass_rate_pct:  f64,
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub all_passed: bool,
+    pub pass_rate_pct: f64,
 }
 
 // ── 72-hour continuous chaos harness ─────────────────────────────────────────
 
 pub struct ContinuousChaosHarness {
-    engine:         ChaosEngine,
-    target_hours:   u64,
-    iteration:      u64,
-    total_passed:   u64,
-    total_failed:   u64,
+    engine: ChaosEngine,
+    target_hours: u64,
+    iteration: u64,
+    total_passed: u64,
+    total_failed: u64,
 }
 
 impl ContinuousChaosHarness {
@@ -295,10 +372,18 @@ impl ContinuousChaosHarness {
         passed
     }
 
-    pub fn iterations(&self)    -> u64 { self.iteration }
-    pub fn total_passed(&self)  -> u64 { self.total_passed }
-    pub fn total_failed(&self)  -> u64 { self.total_failed }
-    pub fn target_hours(&self)  -> u64 { self.target_hours }
+    pub fn iterations(&self) -> u64 {
+        self.iteration
+    }
+    pub fn total_passed(&self) -> u64 {
+        self.total_passed
+    }
+    pub fn total_failed(&self) -> u64 {
+        self.total_failed
+    }
+    pub fn target_hours(&self) -> u64 {
+        self.target_hours
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -310,16 +395,14 @@ mod tests {
     #[test]
     fn validator_crash_within_bft_bound_passes() {
         let mut engine = ChaosEngine::new(7);
-        let outcome = engine.run_scenario(
-            ChaosScenario::ValidatorCrash { count: 2 }, 100);
+        let outcome = engine.run_scenario(ChaosScenario::ValidatorCrash { count: 2 }, 100);
         assert!(outcome.passed, "crash of 2/7 should be within BFT bound");
     }
 
     #[test]
     fn validator_crash_exceeds_bft_bound_fails() {
         let mut engine = ChaosEngine::new(7);
-        let outcome = engine.run_scenario(
-            ChaosScenario::ValidatorCrash { count: 3 }, 100);
+        let outcome = engine.run_scenario(ChaosScenario::ValidatorCrash { count: 3 }, 100);
         assert!(!outcome.passed, "crash of 3/7 violates f < n/3");
     }
 
@@ -327,7 +410,11 @@ mod tests {
     fn double_sign_always_detected() {
         let mut engine = ChaosEngine::new(7);
         let outcome = engine.run_scenario(
-            ChaosScenario::DoubleSign { validator_id: "validator-0".into() }, 200);
+            ChaosScenario::DoubleSign {
+                validator_id: "validator-0".into(),
+            },
+            200,
+        );
         assert!(outcome.passed);
         assert!(outcome.notes.contains("33%"));
         assert!(outcome.invariants_held.iter().any(|i| i.contains("I-CON1")));
@@ -337,7 +424,11 @@ mod tests {
     fn tx_replay_rejected() {
         let mut engine = ChaosEngine::new(7);
         let outcome = engine.run_scenario(
-            ChaosScenario::TxReplay { tx_id: "test-tx".into() }, 300);
+            ChaosScenario::TxReplay {
+                tx_id: "test-tx".into(),
+            },
+            300,
+        );
         assert!(outcome.passed);
         assert!(outcome.notes.contains("I-S5"));
     }
@@ -345,8 +436,7 @@ mod tests {
     #[test]
     fn long_range_reorg_beyond_finality_rejected() {
         let mut engine = ChaosEngine::new(7);
-        let outcome = engine.run_scenario(
-            ChaosScenario::LongRangeReorg { fork_depth: 100 }, 500);
+        let outcome = engine.run_scenario(ChaosScenario::LongRangeReorg { fork_depth: 100 }, 500);
         assert!(outcome.passed);
         assert!(outcome.notes.contains("I-CON3"));
     }
@@ -355,8 +445,16 @@ mod tests {
     fn load_stress_10k_tps_passes_with_4096_cap() {
         let mut engine = ChaosEngine::new(7);
         let outcome = engine.run_scenario(
-            ChaosScenario::LoadStress { tps: 10_000, duration_secs: 60 }, 1000);
-        assert!(outcome.passed, "10K TPS should pass at block-cap saturation");
+            ChaosScenario::LoadStress {
+                tps: 10_000,
+                duration_secs: 60,
+            },
+            1000,
+        );
+        assert!(
+            outcome.passed,
+            "10K TPS should pass at block-cap saturation"
+        );
     }
 
     #[test]
@@ -366,7 +464,10 @@ mod tests {
         let _passed = engine.run_full_suite(5000);
         let summary = engine.summary();
         assert!(summary.total > 0);
-        assert!(summary.pass_rate_pct >= 80.0, "at least 80% of scenarios must pass");
+        assert!(
+            summary.pass_rate_pct >= 80.0,
+            "at least 80% of scenarios must pass"
+        );
     }
 
     #[test]

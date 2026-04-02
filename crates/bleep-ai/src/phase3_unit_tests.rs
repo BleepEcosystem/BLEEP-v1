@@ -4,10 +4,7 @@
 #[cfg(test)]
 mod phase3_unit_tests {
     use crate::{
-        ai_attestation::*,
-        ai_constraint_validator::*,
-        ai_feedback_loop::*,
-        ai_proposal_types::*,
+        ai_attestation::*, ai_constraint_validator::*, ai_feedback_loop::*, ai_proposal_types::*,
         deterministic_inference::*,
     };
 
@@ -306,7 +303,8 @@ mod phase3_unit_tests {
             cooldown_epochs: 2,
         });
 
-        let commitment1 = AIOutputCommitment::new(proposal.clone(), 10, vec![1, 2, 3], None).unwrap();
+        let commitment1 =
+            AIOutputCommitment::new(proposal.clone(), 10, vec![1, 2, 3], None).unwrap();
         let record1 = AIAttestationRecord::new(commitment1.clone());
 
         assert!(manager.record_attestation(record1).is_ok());
@@ -431,7 +429,8 @@ mod phase3_unit_tests {
         assert!(proposal.validate().is_ok());
 
         // Create attestation
-        let commitment = AIOutputCommitment::new(proposal.clone(), 50, vec![1, 2, 3], None).unwrap();
+        let commitment =
+            AIOutputCommitment::new(proposal.clone(), 50, vec![1, 2, 3], None).unwrap();
         let record = AIAttestationRecord::new(commitment);
 
         assert!(!record.attestation_id.is_empty());

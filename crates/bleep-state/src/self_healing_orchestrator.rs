@@ -11,14 +11,16 @@
 // 7. No healing proceeds without VALIDATOR QUORUM SIGNATURE
 // 8. Healing cannot FORK the chain (deterministic across network)
 
-use crate::snapshot_engine::{SnapshotEngine, SnapshotId, SnapshotConfig};
+use crate::advanced_fault_detector::{
+    AdvancedFaultDetector, FaultDetectionConfig, FaultEvidence, FaultSeverity, RecoveryAction,
+};
 use crate::rollback_engine::{RollbackEngine, RollbackEvidence};
-use crate::advanced_fault_detector::{AdvancedFaultDetector, FaultEvidence, FaultSeverity, FaultDetectionConfig, RecoveryAction};
-use crate::shard_registry::{ShardId, EpochId};
-use serde::{Serialize, Deserialize};
-use log::{info, warn, error};
-use std::collections::HashMap;
+use crate::shard_registry::{EpochId, ShardId};
+use crate::snapshot_engine::{SnapshotConfig, SnapshotEngine, SnapshotId};
+use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 /// Self-healing orchestration mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,10 +77,7 @@ pub struct HealingOperation {
 
 impl HealingOperation {
     /// Create new healing operation
-    pub fn new(
-        shard_id: ShardId,
-        fault_evidence: FaultEvidence,
-    ) -> Self {
+    pub fn new(shard_id: ShardId, fault_evidence: FaultEvidence) -> Self {
         let requires_consensus = matches!(
             fault_evidence.severity,
             FaultSeverity::High | FaultSeverity::Critical
@@ -338,7 +337,10 @@ impl SelfHealingOrchestrator {
 
             RecoveryAction::IncreaseMonitoring => {
                 // Increase monitoring frequency
-                info!("Increased monitoring frequency for shard {}", shard_id.as_u64());
+                info!(
+                    "Increased monitoring frequency for shard {}",
+                    shard_id.as_u64()
+                );
             }
 
             RecoveryAction::IsolateShard => {
@@ -397,20 +399,16 @@ impl SelfHealingOrchestrator {
         final_op.mode = HealingMode::Completed;
         final_op.succeeded = true;
 
-        self.statistics.successful_operations = self
-            .statistics
-            .successful_operations
-            .saturating_add(1);
-        self.statistics.active_operations = self
-            .statistics
-            .active_operations
-            .saturating_sub(1);
+        self.statistics.successful_operations =
+            self.statistics.successful_operations.saturating_add(1);
+        self.statistics.active_operations = self.statistics.active_operations.saturating_sub(1);
 
         self.operation_history.push(final_op.clone());
 
         info!(
             "Completed healing operation {} for shard {}",
-            operation_id, shard_id.as_u64()
+            operation_id,
+            shard_id.as_u64()
         );
 
         Ok(final_op)
@@ -427,10 +425,7 @@ impl SelfHealingOrchestrator {
         operation.succeeded = false;
 
         self.statistics.failed_operations = self.statistics.failed_operations.saturating_add(1);
-        self.statistics.active_operations = self
-            .statistics
-            .active_operations
-            .saturating_sub(1);
+        self.statistics.active_operations = self.statistics.active_operations.saturating_sub(1);
 
         self.operation_history.push(operation);
 
@@ -546,11 +541,14 @@ mod tests {
             investigation_status: crate::advanced_fault_detector::InvestigationStatus::Confirmed,
         };
 
-        let op = orchestrator.on_fault_detected(ShardId(0), fault_evidence).unwrap();
+        let op = orchestrator
+            .on_fault_detected(ShardId(0), fault_evidence)
+            .unwrap();
         assert!(op.requires_consensus);
 
         let signatures = vec![vec![1u8], vec![2u8], vec![3u8]];
-        let approval_result = orchestrator.approve_from_consensus(op.operation_id.clone(), signatures);
+        let approval_result =
+            orchestrator.approve_from_consensus(op.operation_id.clone(), signatures);
         assert!(approval_result.is_ok());
 
         let approved_op = orchestrator.get_operation(&op.operation_id).unwrap();

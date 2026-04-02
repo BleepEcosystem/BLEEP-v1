@@ -30,7 +30,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmGasParams {
     /// Name of the VM (for debugging).
-    pub name:           &'static str,
+    pub name: &'static str,
     /// Native gas per BLEEP gas unit.
     /// A factor of 2.5 means 1 BLEEP gas = 2.5 WASM gas.
     pub native_per_bleep: f64,
@@ -70,52 +70,70 @@ impl Default for GasModel {
         let mut params = HashMap::new();
 
         // EVM is the baseline: 1 EVM gas = 1 BLEEP gas
-        params.insert("evm".into(), VmGasParams {
-            name:             "EVM (revm)",
-            native_per_bleep: 1.0,
-            minimum_charge:   21_000,
-            max_refund_pct:   0.20,
-        });
+        params.insert(
+            "evm".into(),
+            VmGasParams {
+                name: "EVM (revm)",
+                native_per_bleep: 1.0,
+                minimum_charge: 21_000,
+                max_refund_pct: 0.20,
+            },
+        );
 
         // WASM is ~2.5× cheaper per instruction than EVM
-        params.insert("wasm".into(), VmGasParams {
-            name:             "WASM",
-            native_per_bleep: 2.5,
-            minimum_charge:   5_000,
-            max_refund_pct:   0.10,
-        });
+        params.insert(
+            "wasm".into(),
+            VmGasParams {
+                name: "WASM",
+                native_per_bleep: 2.5,
+                minimum_charge: 5_000,
+                max_refund_pct: 0.10,
+            },
+        );
 
         // Solana SBF is very cheap per instruction
-        params.insert("sbf".into(), VmGasParams {
-            name:             "Solana SBF",
-            native_per_bleep: 3.0,
-            minimum_charge:   5_000,
-            max_refund_pct:   0.05,
-        });
+        params.insert(
+            "sbf".into(),
+            VmGasParams {
+                name: "Solana SBF",
+                native_per_bleep: 3.0,
+                minimum_charge: 5_000,
+                max_refund_pct: 0.05,
+            },
+        );
 
         // Move gas schedule is different but comparable to EVM
-        params.insert("move".into(), VmGasParams {
-            name:             "Move VM",
-            native_per_bleep: 2.0,
-            minimum_charge:   5_000,
-            max_refund_pct:   0.10,
-        });
+        params.insert(
+            "move".into(),
+            VmGasParams {
+                name: "Move VM",
+                native_per_bleep: 2.0,
+                minimum_charge: 5_000,
+                max_refund_pct: 0.10,
+            },
+        );
 
         // ZK proofs are extremely expensive
-        params.insert("zk".into(), VmGasParams {
-            name:             "ZK Engine",
-            native_per_bleep: 0.1,
-            minimum_charge:   100_000,
-            max_refund_pct:   0.0,
-        });
+        params.insert(
+            "zk".into(),
+            VmGasParams {
+                name: "ZK Engine",
+                native_per_bleep: 0.1,
+                minimum_charge: 100_000,
+                max_refund_pct: 0.0,
+            },
+        );
 
         // CosmWasm (treated same as WASM)
-        params.insert("cosmwasm".into(), VmGasParams {
-            name:             "CosmWasm",
-            native_per_bleep: 2.5,
-            minimum_charge:   5_000,
-            max_refund_pct:   0.10,
-        });
+        params.insert(
+            "cosmwasm".into(),
+            VmGasParams {
+                name: "CosmWasm",
+                native_per_bleep: 2.5,
+                minimum_charge: 5_000,
+                max_refund_pct: 0.10,
+            },
+        );
 
         GasModel {
             params,
@@ -160,28 +178,52 @@ impl GasModel {
     }
 
     /// Gas schedule for storage operations (EVM-aligned).
-    pub fn storage_write_gas(&self) -> u64 { 20_000 }
-    pub fn storage_read_gas(&self) -> u64  {  2_100 } // EIP-2929 cold read
-    pub fn event_base_gas(&self) -> u64    {    375 }
-    pub fn event_per_topic(&self) -> u64   {    375 }
-    pub fn event_per_byte(&self) -> u64    {      8 }
-    pub fn keccak256_base(&self) -> u64    {     30 }
-    pub fn keccak256_per_word(&self) -> u64 {     6 }
-    pub fn sha256_base(&self) -> u64       {     60 }
-    pub fn sha256_per_word(&self) -> u64   {     12 }
-    pub fn cross_call_base(&self) -> u64   {  2_000 }
-    pub fn cross_chain_base(&self) -> u64  { 50_000 }
-    pub fn zk_verify_base(&self) -> u64    {100_000 }
+    pub fn storage_write_gas(&self) -> u64 {
+        20_000
+    }
+    pub fn storage_read_gas(&self) -> u64 {
+        2_100
+    } // EIP-2929 cold read
+    pub fn event_base_gas(&self) -> u64 {
+        375
+    }
+    pub fn event_per_topic(&self) -> u64 {
+        375
+    }
+    pub fn event_per_byte(&self) -> u64 {
+        8
+    }
+    pub fn keccak256_base(&self) -> u64 {
+        30
+    }
+    pub fn keccak256_per_word(&self) -> u64 {
+        6
+    }
+    pub fn sha256_base(&self) -> u64 {
+        60
+    }
+    pub fn sha256_per_word(&self) -> u64 {
+        12
+    }
+    pub fn cross_call_base(&self) -> u64 {
+        2_000
+    }
+    pub fn cross_chain_base(&self) -> u64 {
+        50_000
+    }
+    pub fn zk_verify_base(&self) -> u64 {
+        100_000
+    }
 }
 
 fn vm_to_key(vm: &TargetVm) -> &'static str {
     match vm {
-        TargetVm::Evm       => "evm",
-        TargetVm::Wasm      => "wasm",
+        TargetVm::Evm => "evm",
+        TargetVm::Wasm => "wasm",
         TargetVm::SolanaSbf => "sbf",
-        TargetVm::Move      => "move",
-        TargetVm::Zk        => "zk",
-        TargetVm::Auto      => "wasm",
+        TargetVm::Move => "move",
+        TargetVm::Zk => "zk",
+        TargetVm::Auto => "wasm",
     }
 }
 
@@ -195,7 +237,9 @@ pub struct GasEstimator<'a> {
 }
 
 impl<'a> GasEstimator<'a> {
-    pub fn new(model: &'a GasModel) -> Self { Self { model } }
+    pub fn new(model: &'a GasModel) -> Self {
+        Self { model }
+    }
 
     /// Estimate gas for a contract call based on calldata size.
     /// This is a conservative upper bound; actual usage may be lower.
@@ -205,12 +249,10 @@ impl<'a> GasEstimator<'a> {
             TargetVm::Wasm | TargetVm::Auto => 5_000,
             TargetVm::SolanaSbf => 5_000,
             TargetVm::Move => 5_000,
-            TargetVm::Zk   => 100_000,
+            TargetVm::Zk => 100_000,
         };
         // 4 gas per zero byte, 16 gas per non-zero byte (EIP-2028)
-        let calldata_cost: u64 = calldata.iter().map(|&b| {
-            if b == 0 { 4 } else { 16 }
-        }).sum();
+        let calldata_cost: u64 = calldata.iter().map(|&b| if b == 0 { 4 } else { 16 }).sum();
         self.model.normalise(base + calldata_cost, vm)
     }
 
@@ -222,7 +264,9 @@ impl<'a> GasEstimator<'a> {
     }
 
     /// Estimate gas for a value transfer.
-    pub fn estimate_transfer(&self) -> u64 { 21_000 }
+    pub fn estimate_transfer(&self) -> u64 {
+        21_000
+    }
 
     /// Estimate gas for ZK proof verification.
     pub fn estimate_zk_verify(&self, proof_len: usize) -> u64 {
@@ -291,7 +335,7 @@ mod tests {
         let model = GasModel::default();
         let used = 100_000u64;
         let refund = 30_000u64; // 30% refund requested
-        // Max refund is 20% of used = 20_000
+                                // Max refund is 20% of used = 20_000
         let after_refund = model.apply_refund(used, refund, &TargetVm::Evm);
         assert_eq!(after_refund, 80_000); // 100_000 - 20_000
     }
@@ -328,7 +372,7 @@ mod tests {
     fn test_storage_gas_constants() {
         let model = GasModel::default();
         assert_eq!(model.storage_write_gas(), 20_000);
-        assert_eq!(model.storage_read_gas(),   2_100);
-        assert_eq!(model.cross_chain_base(),  50_000);
+        assert_eq!(model.storage_read_gas(), 2_100);
+        assert_eq!(model.cross_chain_base(), 50_000);
     }
 }

@@ -1,3 +1,4 @@
+use bincode;
 /// AI Decision Types and Proposal Schemas
 ///
 /// This module defines the complete set of AI proposal types that BLEEP can generate.
@@ -15,10 +16,8 @@
 /// 3. Security & Validator Management
 /// 4. Tokenomics & Fee Tuning
 /// 5. Governance & Proposal Prioritization
-
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use bincode;
 use std::fmt;
 
 // ==================== ERROR TYPES ====================
@@ -118,7 +117,9 @@ impl EvidenceType {
     /// Validate evidence meets constraints
     pub fn validate(&self) -> AIProposalResult<()> {
         match self {
-            EvidenceType::Metric { value, threshold, .. } => {
+            EvidenceType::Metric {
+                value, threshold, ..
+            } => {
                 if value.is_nan() || value.is_infinite() {
                     return Err(AIProposalError::SchemaValidationFailed(
                         "Metric value is NaN or infinite".to_string(),

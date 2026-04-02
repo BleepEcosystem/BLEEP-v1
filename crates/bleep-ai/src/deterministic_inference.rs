@@ -1,7 +1,7 @@
 /// Deterministic ONNX Inference Engine
 ///
 /// This module provides fully deterministic, replayable, cross-platform AI inference.
-/// 
+///
 /// CORE PRINCIPLES:
 /// - Fixed model hashing (SHA3-256)
 /// - Deterministic input normalization
@@ -16,12 +16,11 @@
 /// - Models must be governance-approved before use
 /// - No model auto-updates or dynamic loading
 /// - Failed inference produces explicit error, not degradation
-
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::fmt;
+use std::sync::Arc;
 
 // ==================== ERROR TYPES ====================
 
@@ -42,7 +41,11 @@ impl fmt::Display for DeterministicInferenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ModelNotFound(msg) => write!(f, "Model not found: {}", msg),
-            Self::ModelHashMismatch { expected, actual } => write!(f, "Model hash mismatch: expected {}, got {}", expected, actual),
+            Self::ModelHashMismatch { expected, actual } => write!(
+                f,
+                "Model hash mismatch: expected {}, got {}",
+                expected, actual
+            ),
             Self::ModelNotApproved(msg) => write!(f, "Model not approved: {}", msg),
             Self::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
             Self::InferenceFailed(msg) => write!(f, "Inference failed: {}", msg),
@@ -165,13 +168,11 @@ impl NormalizationConfig {
         // Apply mean subtraction (if configured)
         if !self.mean.is_empty() {
             if self.mean.len() != normalized.len() {
-                return Err(DeterministicInferenceError::NormalizationError(
-                    format!(
-                        "Mean dimension mismatch: expected {}, got {}",
-                        self.mean.len(),
-                        normalized.len()
-                    ),
-                ));
+                return Err(DeterministicInferenceError::NormalizationError(format!(
+                    "Mean dimension mismatch: expected {}, got {}",
+                    self.mean.len(),
+                    normalized.len()
+                )));
             }
             for (val, &mean) in normalized.iter_mut().zip(self.mean.iter()) {
                 *val = (*val - mean).to_bits() as f32;
@@ -182,13 +183,11 @@ impl NormalizationConfig {
         // Apply std dev scaling (if configured)
         if !self.std_dev.is_empty() {
             if self.std_dev.len() != normalized.len() {
-                return Err(DeterministicInferenceError::NormalizationError(
-                    format!(
-                        "Std dev dimension mismatch: expected {}, got {}",
-                        self.std_dev.len(),
-                        normalized.len()
-                    ),
-                ));
+                return Err(DeterministicInferenceError::NormalizationError(format!(
+                    "Std dev dimension mismatch: expected {}, got {}",
+                    self.std_dev.len(),
+                    normalized.len()
+                )));
             }
             for (val, &std) in normalized.iter_mut().zip(self.std_dev.iter()) {
                 if std == 0.0 {
@@ -332,22 +331,22 @@ impl InferenceRecord {
     /// Compute deterministic hash of this record
     pub fn compute_hash(&self) -> String {
         let mut hasher = Sha3_256::new();
-        
+
         // Hash all components deterministically
         hasher.update(self.inference_id.as_bytes());
         hasher.update(self.model_id.as_bytes());
         hasher.update(self.model_hash.as_bytes());
         hasher.update(self.input_hash.as_bytes());
-        
+
         for &val in &self.final_outputs {
             hasher.update(val.to_bits().to_le_bytes());
         }
-        
+
         hasher.update(self.timestamp.to_le_bytes());
         hasher.update(self.epoch_id.to_le_bytes());
         hasher.update(&self.nonce);
         hasher.update(self.confidence.to_bits().to_le_bytes());
-        
+
         format!("{:x}", hasher.finalize())
     }
 }
@@ -406,10 +405,7 @@ impl DeterministicInferenceEngine {
         let model_key = format!("{}:{}", metadata.model_id, metadata.version);
         let model_hash = metadata.model_hash.clone();
         self.approved_models.insert(model_key.clone(), metadata);
-        self.model_binaries.insert(
-            model_hash,
-            model_binary,
-        );
+        self.model_binaries.insert(model_hash, model_binary);
 
         // Set default normalization if not provided
         if !self.normalizations.contains_key(&model_key) {
@@ -419,10 +415,8 @@ impl DeterministicInferenceEngine {
 
         // Set default rounding if not provided
         if !self.rounding_configs.contains_key(&model_key) {
-            self.rounding_configs.insert(
-                model_key,
-                OutputRoundingConfig::precise(6),
-            );
+            self.rounding_configs
+                .insert(model_key, OutputRoundingConfig::precise(6));
         }
 
         Ok(())
@@ -440,12 +434,7 @@ impl DeterministicInferenceEngine {
     }
 
     /// Set rounding config for a model
-    pub fn set_rounding(
-        &mut self,
-        model_id: &str,
-        version: &str,
-        config: OutputRoundingConfig,
-    ) {
+    pub fn set_rounding(&mut self, model_id: &str, version: &str, config: OutputRoundingConfig) {
         let key = format!("{}:{}", model_id, version);
         self.rounding_configs.insert(key, config);
     }
@@ -469,9 +458,10 @@ impl DeterministicInferenceEngine {
         let model_key = format!("{}:{}", model_id, version);
 
         // Verify model is registered and approved
-        let metadata = self.approved_models.get(&model_key).ok_or_else(|| {
-            DeterministicInferenceError::ModelNotFound(model_key.clone())
-        })?;
+        let metadata = self
+            .approved_models
+            .get(&model_key)
+            .ok_or_else(|| DeterministicInferenceError::ModelNotFound(model_key.clone()))?;
 
         if metadata.is_deprecated {
             return Err(DeterministicInferenceError::ModelDeprecated(
@@ -481,16 +471,12 @@ impl DeterministicInferenceEngine {
 
         // Get normalization config
         let norm_config = self.normalizations.get(&model_key).ok_or_else(|| {
-            DeterministicInferenceError::NormalizationError(
-                "No normalization config".to_string(),
-            )
+            DeterministicInferenceError::NormalizationError("No normalization config".to_string())
         })?;
 
         // Get rounding config
         let rounding_config = self.rounding_configs.get(&model_key).ok_or_else(|| {
-            DeterministicInferenceError::RoundingError(
-                "No rounding config".to_string(),
-            )
+            DeterministicInferenceError::RoundingError("No rounding config".to_string())
         })?;
 
         // Compute input hash
@@ -502,7 +488,7 @@ impl DeterministicInferenceEngine {
         // Perform inference (deterministic mock for now)
         // In production, this would use ONNX runtime
         let mut outputs = vec![0.0f32; metadata.output_size];
-        
+
         // Simple deterministic inference:
         // Hash inputs and use hash bits to seed output computation
         let seed = self.compute_inference_seed(&normalized_inputs, &metadata.model_hash);
@@ -549,12 +535,12 @@ impl DeterministicInferenceEngine {
     /// Compute deterministic seed for inference
     fn compute_inference_seed(&self, inputs: &[f32], model_hash: &str) -> u64 {
         let mut hasher = Sha3_256::new();
-        
+
         for &val in inputs {
             hasher.update(val.to_bits().to_le_bytes());
         }
         hasher.update(model_hash.as_bytes());
-        
+
         let hash = hasher.finalize();
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&hash[0..8]);
@@ -632,10 +618,10 @@ mod tests {
     fn test_normalization_deterministic() {
         let config = NormalizationConfig::identity();
         let input = vec![1.0, 2.0, 3.0];
-        
+
         let result1 = config.normalize(&input).unwrap();
         let result2 = config.normalize(&input).unwrap();
-        
+
         assert_eq!(result1, result2);
     }
 
@@ -643,10 +629,10 @@ mod tests {
     fn test_output_rounding_deterministic() {
         let config = OutputRoundingConfig::precise(2);
         let output = vec![1.234567, 2.987654];
-        
+
         let result1 = config.round(&output).unwrap();
         let result2 = config.round(&output).unwrap();
-        
+
         assert_eq!(result1, result2);
         assert_eq!(result1[0].round(), 1.23 * 100.0); // 2 decimal places
     }
@@ -654,7 +640,7 @@ mod tests {
     #[test]
     fn test_model_registration() {
         let mut engine = DeterministicInferenceEngine::new(0);
-        
+
         let metadata = ModelMetadata::new(
             "test_model".to_string(),
             "1.0.0".to_string(),
@@ -664,11 +650,11 @@ mod tests {
             10,
             5,
         );
-        
+
         // Create mock binary
         let mut binary = vec![0u8; 100];
         binary[0] = 42; // Unique value
-        
+
         let result = engine.register_model(metadata.clone(), binary.clone());
         // Will fail because hash doesn't match - that's expected
         assert!(result.is_err());
@@ -677,7 +663,7 @@ mod tests {
     #[test]
     fn test_inference_deterministic() {
         let mut engine = DeterministicInferenceEngine::new(0);
-        
+
         let metadata = ModelMetadata::new(
             "test".to_string(),
             "1.0".to_string(),
@@ -687,14 +673,14 @@ mod tests {
             3,
             2,
         );
-        
+
         // Use a dummy binary that matches the hash
         let binary = vec![0u8; 50];
-        
+
         // This will fail because the hash doesn't match, which is correct
         // In a real test, we'd compute the actual hash first
         let _ = engine.register_model(metadata, binary);
-        
+
         // The registration will fail, demonstrating hash verification works
     }
 
@@ -719,10 +705,10 @@ mod tests {
             success: true,
             error: None,
         };
-        
+
         let hash1 = record.compute_hash();
         let hash2 = record.compute_hash();
-        
+
         // Hashes must be deterministic
         assert_eq!(hash1, hash2);
     }

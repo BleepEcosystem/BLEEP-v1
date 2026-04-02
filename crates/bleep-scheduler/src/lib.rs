@@ -38,16 +38,16 @@ pub use metrics::{MetricsStore, SchedulerMetrics, TaskMetrics};
 pub use registry::{RegisteredTask, TaskContext, TaskRegistry};
 pub use task::{ExecutionOutcome, TaskId, TaskKind, TaskRunRecord, TaskStatus, Trigger};
 
+use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{interval as tokio_interval, Duration};
-use log::{info, warn, error};
 
 /// Chain clock signal. Emit from the consensus layer on every finalised block.
 #[derive(Debug, Clone)]
 pub struct BlockTick {
-    pub height:    u64,
-    pub epoch:     u64,
+    pub height: u64,
+    pub epoch: u64,
     pub timestamp: u64,
 }
 
@@ -56,8 +56,8 @@ pub struct BlockTick {
 // ---------------------------------------------------------------------------
 
 pub struct Scheduler {
-    pub registry:   Arc<TaskRegistry>,
-    pub metrics:    Arc<MetricsStore>,
+    pub registry: Arc<TaskRegistry>,
+    pub metrics: Arc<MetricsStore>,
     block_tick_tx: broadcast::Sender<BlockTick>,
 }
 
@@ -65,8 +65,8 @@ impl Scheduler {
     pub fn new() -> Self {
         let (block_tick_tx, _) = broadcast::channel(256);
         Self {
-            registry:      Arc::new(TaskRegistry::new()),
-            metrics:       Arc::new(MetricsStore::new()),
+            registry: Arc::new(TaskRegistry::new()),
+            metrics: Arc::new(MetricsStore::new()),
             block_tick_tx,
         }
     }
@@ -74,7 +74,10 @@ impl Scheduler {
     /// Register all 20 built-in maintenance tasks. Call once at startup.
     pub fn register_built_in_tasks(&self) {
         built_in::register_all(&self.registry);
-        info!("[Scheduler] {} built-in tasks registered", self.registry.len());
+        info!(
+            "[Scheduler] {} built-in tasks registered",
+            self.registry.len()
+        );
     }
 
     pub fn register(&self, task: RegisteredTask) {
@@ -93,7 +96,7 @@ impl Scheduler {
 
     fn spawn_interval_loop(&self) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(&self.registry);
-        let metrics  = Arc::clone(&self.metrics);
+        let metrics = Arc::clone(&self.metrics);
 
         tokio::spawn(async move {
             info!("[Scheduler] Interval loop started");
@@ -103,11 +106,18 @@ impl Scheduler {
                 let now = chrono::Utc::now();
                 for task in registry.due_interval(now) {
                     registry.mark_run(&task.id, now, false);
-                    let (m, ctx) = (Arc::clone(&metrics), TaskContext {
-                        block_height: 0, epoch: 0, dispatched_at: now,
-                    });
+                    let (m, ctx) = (
+                        Arc::clone(&metrics),
+                        TaskContext {
+                            block_height: 0,
+                            epoch: 0,
+                            dispatched_at: now,
+                        },
+                    );
                     let timeout = task.timeout_secs;
-                    tokio::spawn(async move { run_task(task, ctx, timeout, m).await; });
+                    tokio::spawn(async move {
+                        run_task(task, ctx, timeout, m).await;
+                    });
                 }
             }
         })
@@ -115,8 +125,8 @@ impl Scheduler {
 
     fn spawn_block_loop(&self) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(&self.registry);
-        let metrics  = Arc::clone(&self.metrics);
-        let mut rx   = self.block_tick_tx.subscribe();
+        let metrics = Arc::clone(&self.metrics);
+        let mut rx = self.block_tick_tx.subscribe();
 
         tokio::spawn(async move {
             info!("[Scheduler] Block loop started");
@@ -135,11 +145,18 @@ impl Scheduler {
                 let now = chrono::Utc::now();
                 for task in registry.due_block(tick.height) {
                     registry.mark_run(&task.id, now, false);
-                    let (m, ctx) = (Arc::clone(&metrics), TaskContext {
-                        block_height: tick.height, epoch: tick.epoch, dispatched_at: now,
-                    });
+                    let (m, ctx) = (
+                        Arc::clone(&metrics),
+                        TaskContext {
+                            block_height: tick.height,
+                            epoch: tick.epoch,
+                            dispatched_at: now,
+                        },
+                    );
                     let timeout = task.timeout_secs;
-                    tokio::spawn(async move { run_task(task, ctx, timeout, m).await; });
+                    tokio::spawn(async move {
+                        run_task(task, ctx, timeout, m).await;
+                    });
                 }
             }
         })
@@ -147,12 +164,18 @@ impl Scheduler {
 
     /// Manually trigger a task by ID (for testing / emergency operations).
     pub async fn trigger_task(&self, task_id: &TaskId) -> SchedulerResult<ExecutionOutcome> {
-        let task = self.registry.get(task_id)
+        let task = self
+            .registry
+            .get(task_id)
             .ok_or_else(|| SchedulerError::TaskNotFound(task_id.clone()))?;
 
-        let start   = std::time::Instant::now();
+        let start = std::time::Instant::now();
         let timeout = task.timeout_secs;
-        let ctx     = TaskContext { block_height: 0, epoch: 0, dispatched_at: chrono::Utc::now() };
+        let ctx = TaskContext {
+            block_height: 0,
+            epoch: 0,
+            dispatched_at: chrono::Utc::now(),
+        };
 
         match tokio::time::timeout(Duration::from_secs(timeout), (task.task_fn)(ctx)).await {
             Ok(Ok(())) => {
@@ -162,7 +185,9 @@ impl Scheduler {
             }
             Ok(Err(e)) => {
                 self.metrics.record_failure(task_id);
-                Ok(ExecutionOutcome::Failed { error: e.to_string() })
+                Ok(ExecutionOutcome::Failed {
+                    error: e.to_string(),
+                })
             }
             Err(_) => {
                 self.metrics.record_timeout(task_id);
@@ -171,21 +196,36 @@ impl Scheduler {
         }
     }
 
-    pub fn metrics_snapshot(&self) -> SchedulerMetrics { self.metrics.snapshot() }
-    pub fn task_metrics(&self, id: &TaskId) -> Option<TaskMetrics> { self.metrics.task_snapshot(id) }
+    pub fn metrics_snapshot(&self) -> SchedulerMetrics {
+        self.metrics.snapshot()
+    }
+    pub fn task_metrics(&self, id: &TaskId) -> Option<TaskMetrics> {
+        self.metrics.task_snapshot(id)
+    }
 }
 
-async fn run_task(task: RegisteredTask, ctx: TaskContext, timeout: u64, metrics: Arc<MetricsStore>) {
+async fn run_task(
+    task: RegisteredTask,
+    ctx: TaskContext,
+    timeout: u64,
+    metrics: Arc<MetricsStore>,
+) {
     let start = std::time::Instant::now();
-    let id    = task.id.clone();
+    let id = task.id.clone();
     match tokio::time::timeout(Duration::from_secs(timeout), (task.task_fn)(ctx)).await {
         Ok(Ok(())) => {
             let ms = start.elapsed().as_millis() as u64;
             info!("[Scheduler] Task {id} ✓ ({ms}ms)");
             metrics.record_success(&id, ms);
         }
-        Ok(Err(e)) => { error!("[Scheduler] Task {id} ✗ {e}"); metrics.record_failure(&id); }
-        Err(_)     => { warn!("[Scheduler] Task {id} timeout"); metrics.record_timeout(&id); }
+        Ok(Err(e)) => {
+            error!("[Scheduler] Task {id} ✗ {e}");
+            metrics.record_failure(&id);
+        }
+        Err(_) => {
+            warn!("[Scheduler] Task {id} timeout");
+            metrics.record_timeout(&id);
+        }
     }
 }
 
@@ -207,28 +247,57 @@ mod tests {
 
     #[tokio::test]
     async fn manual_trigger_success() {
-        let s       = Scheduler::new();
+        let s = Scheduler::new();
         let counter = Arc::new(AtomicU64::new(0));
-        let c2      = Arc::clone(&counter);
-        s.register(RegisteredTask::interval("t1", TaskKind::Maintenance, "test", 3600, 5,
-            move |_| { let c = Arc::clone(&c2); async move { c.fetch_add(1, Ordering::SeqCst); Ok(()) } }
+        let c2 = Arc::clone(&counter);
+        s.register(RegisteredTask::interval(
+            "t1",
+            TaskKind::Maintenance,
+            "test",
+            3600,
+            5,
+            move |_| {
+                let c = Arc::clone(&c2);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
         ));
         let id = TaskId::new("t1");
-        assert!(matches!(s.trigger_task(&id).await.unwrap(), ExecutionOutcome::Success { .. }));
+        assert!(matches!(
+            s.trigger_task(&id).await.unwrap(),
+            ExecutionOutcome::Success { .. }
+        ));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(s.task_metrics(&id).unwrap().success_count, 1);
     }
 
     #[tokio::test]
     async fn block_tick_fires_task() {
-        let s       = Arc::new(Scheduler::new());
+        let s = Arc::new(Scheduler::new());
         let counter = Arc::new(AtomicU64::new(0));
-        let c2      = Arc::clone(&counter);
-        s.register(RegisteredTask::every_n_blocks("bt", TaskKind::Consensus, "test", 10, 5,
-            move |_| { let c = Arc::clone(&c2); async move { c.fetch_add(1, Ordering::SeqCst); Ok(()) } }
+        let c2 = Arc::clone(&counter);
+        s.register(RegisteredTask::every_n_blocks(
+            "bt",
+            TaskKind::Consensus,
+            "test",
+            10,
+            5,
+            move |_| {
+                let c = Arc::clone(&c2);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
         ));
         let (_, bh) = s.start();
-        s.on_new_block(BlockTick { height: 10, epoch: 0, timestamp: 50 });
+        s.on_new_block(BlockTick {
+            height: 10,
+            epoch: 0,
+            timestamp: 50,
+        });
         sleep(Duration::from_millis(100)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         bh.abort();
@@ -236,11 +305,22 @@ mod tests {
 
     #[tokio::test]
     async fn interval_loop_fires_tasks() {
-        let s       = Arc::new(Scheduler::new());
+        let s = Arc::new(Scheduler::new());
         let counter = Arc::new(AtomicU64::new(0));
-        let c2      = Arc::clone(&counter);
-        s.register(RegisteredTask::interval("il", TaskKind::Maintenance, "test 1s", 1, 5,
-            move |_| { let c = Arc::clone(&c2); async move { c.fetch_add(1, Ordering::SeqCst); Ok(()) } }
+        let c2 = Arc::clone(&counter);
+        s.register(RegisteredTask::interval(
+            "il",
+            TaskKind::Maintenance,
+            "test 1s",
+            1,
+            5,
+            move |_| {
+                let c = Arc::clone(&c2);
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
         ));
         let (ih, _) = s.start();
         sleep(Duration::from_millis(2500)).await;
@@ -251,16 +331,30 @@ mod tests {
     #[tokio::test]
     async fn timeout_enforced() {
         let s = Scheduler::new();
-        s.register(RegisteredTask::interval("slow", TaskKind::Maintenance, "hangs", 3600, 1,
-            |_| async move { sleep(Duration::from_secs(10)).await; Ok(()) }
+        s.register(RegisteredTask::interval(
+            "slow",
+            TaskKind::Maintenance,
+            "hangs",
+            3600,
+            1,
+            |_| async move {
+                sleep(Duration::from_secs(10)).await;
+                Ok(())
+            },
         ));
         let id = TaskId::new("slow");
-        assert!(matches!(s.trigger_task(&id).await.unwrap(), ExecutionOutcome::TimedOut));
+        assert!(matches!(
+            s.trigger_task(&id).await.unwrap(),
+            ExecutionOutcome::TimedOut
+        ));
         assert_eq!(s.task_metrics(&id).unwrap().timeout_count, 1);
     }
 
     #[tokio::test]
     async fn not_found_returns_error() {
-        assert!(Scheduler::new().trigger_task(&TaskId::new("missing")).await.is_err());
+        assert!(Scheduler::new()
+            .trigger_task(&TaskId::new("missing"))
+            .await
+            .is_err());
     }
 }

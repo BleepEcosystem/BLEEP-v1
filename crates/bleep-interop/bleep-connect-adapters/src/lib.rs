@@ -11,13 +11,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use sha2::Sha256;
-use sha3::{Keccak256, Digest};
+use sha3::{Digest, Keccak256};
 use tracing::debug;
 
-use bleep_connect_types::{
-    InstantIntent, ChainId, BleepConnectError, BleepConnectResult,
-};
 use bleep_connect_crypto::sha256;
+use bleep_connect_types::{BleepConnectError, BleepConnectResult, ChainId, InstantIntent};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CHAIN ADAPTER TRAIT
@@ -30,7 +28,11 @@ pub trait ChainAdapter: Send + Sync {
 
     /// Verify that a transfer was executed correctly on the destination chain.
     /// `execution_proof` is the bytes returned by `encode_transfer` plus execution evidence.
-    fn verify_execution(&self, intent: &InstantIntent, execution_proof: &[u8]) -> BleepConnectResult<bool>;
+    fn verify_execution(
+        &self,
+        intent: &InstantIntent,
+        execution_proof: &[u8],
+    ) -> BleepConnectResult<bool>;
 
     /// Return the number of block confirmations needed for finality on this chain.
     fn get_finality_blocks(&self) -> u64;
@@ -74,7 +76,11 @@ impl EthereumAdapter {
         let mut selector = [0u8; 4];
         selector.copy_from_slice(&hash[..4]);
 
-        Self { chain, finality_blocks: finality, fulfill_selector: selector }
+        Self {
+            chain,
+            finality_blocks: finality,
+            fulfill_selector: selector,
+        }
     }
 
     /// ABI-encode a uint256 (big-endian, left-padded to 32 bytes).
@@ -113,7 +119,11 @@ impl ChainAdapter for EthereumAdapter {
         Ok(calldata)
     }
 
-    fn verify_execution(&self, intent: &InstantIntent, execution_proof: &[u8]) -> BleepConnectResult<bool> {
+    fn verify_execution(
+        &self,
+        intent: &InstantIntent,
+        execution_proof: &[u8],
+    ) -> BleepConnectResult<bool> {
         // Verify: proof must start with our selector, contain the intent ID, and
         // the delivered amount (encoded in bytes 68..84) must meet minimum.
         if execution_proof.len() < 68 {
@@ -134,9 +144,15 @@ impl ChainAdapter for EthereumAdapter {
         Ok(true)
     }
 
-    fn get_finality_blocks(&self) -> u64 { self.finality_blocks }
-    fn chain_id(&self) -> ChainId { self.chain }
-    fn native_decimals(&self) -> u8 { 18 }
+    fn get_finality_blocks(&self) -> u64 {
+        self.finality_blocks
+    }
+    fn chain_id(&self) -> ChainId {
+        self.chain
+    }
+    fn native_decimals(&self) -> u8 {
+        18
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,7 +162,9 @@ impl ChainAdapter for EthereumAdapter {
 pub struct BitcoinAdapter;
 
 impl BitcoinAdapter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Encode as Bitcoin Script HTLC (Hash Time-Lock Contract):
     /// OP_IF <executor_pubkey> OP_CHECKSIG OP_ELSE <timeout> OP_CHECKLOCKTIMEVERIFY OP_DROP <refund_pubkey> OP_CHECKSIG OP_ENDIF
@@ -154,11 +172,11 @@ impl BitcoinAdapter {
         let mut script = Vec::new();
         // OP_SHA256 <hash> OP_EQUALVERIFY (simplified; production uses full P2SH/SegWit)
         script.push(0xa8); // OP_SHA256
-        script.push(32);   // push 32 bytes
+        script.push(32); // push 32 bytes
         script.extend_from_slice(&intent_hash);
         script.push(0x88); // OP_EQUALVERIFY
         script.push(0xac); // OP_CHECKSIG
-        // Encode timeout as 4-byte little-endian
+                           // Encode timeout as 4-byte little-endian
         script.extend_from_slice(&timeout_blocks.to_le_bytes());
         script
     }
@@ -182,7 +200,11 @@ impl ChainAdapter for BitcoinAdapter {
         Ok(out)
     }
 
-    fn verify_execution(&self, intent: &InstantIntent, execution_proof: &[u8]) -> BleepConnectResult<bool> {
+    fn verify_execution(
+        &self,
+        intent: &InstantIntent,
+        execution_proof: &[u8],
+    ) -> BleepConnectResult<bool> {
         // Minimum: version byte + 2-byte script len + at least 1 byte script + 8 bytes amount
         if execution_proof.len() < 12 {
             return Ok(false);
@@ -204,9 +226,15 @@ impl ChainAdapter for BitcoinAdapter {
         Ok(false)
     }
 
-    fn get_finality_blocks(&self) -> u64 { 6 }
-    fn chain_id(&self) -> ChainId { ChainId::Bitcoin }
-    fn native_decimals(&self) -> u8 { 8 }
+    fn get_finality_blocks(&self) -> u64 {
+        6
+    }
+    fn chain_id(&self) -> ChainId {
+        ChainId::Bitcoin
+    }
+    fn native_decimals(&self) -> u8 {
+        8
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,7 +244,9 @@ impl ChainAdapter for BitcoinAdapter {
 pub struct SolanaAdapter;
 
 impl SolanaAdapter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Encode as Solana instruction data for the BLEEP Connect program.
     /// Layout: [discriminator(8)] [intent_id(32)] [recipient(32)] [amount(8)]
@@ -252,7 +282,11 @@ impl ChainAdapter for SolanaAdapter {
         Ok(self.encode_instruction(intent))
     }
 
-    fn verify_execution(&self, intent: &InstantIntent, execution_proof: &[u8]) -> BleepConnectResult<bool> {
+    fn verify_execution(
+        &self,
+        intent: &InstantIntent,
+        execution_proof: &[u8],
+    ) -> BleepConnectResult<bool> {
         if execution_proof.len() < 80 {
             return Ok(false);
         }
@@ -264,9 +298,15 @@ impl ChainAdapter for SolanaAdapter {
         Ok(&execution_proof[8..40] == &intent_id)
     }
 
-    fn get_finality_blocks(&self) -> u64 { 32 }
-    fn chain_id(&self) -> ChainId { ChainId::Solana }
-    fn native_decimals(&self) -> u8 { 9 }
+    fn get_finality_blocks(&self) -> u64 {
+        32
+    }
+    fn chain_id(&self) -> ChainId {
+        ChainId::Solana
+    }
+    fn native_decimals(&self) -> u8 {
+        9
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,9 +318,15 @@ pub struct CosmosAdapter {
 }
 
 impl CosmosAdapter {
-    pub fn new(chain: ChainId) -> Self { Self { chain } }
+    pub fn new(chain: ChainId) -> Self {
+        Self { chain }
+    }
     /// Default constructor — uses ChainId::Cosmos.
-    pub fn default_cosmos() -> Self { Self { chain: ChainId::Cosmos } }
+    pub fn default_cosmos() -> Self {
+        Self {
+            chain: ChainId::Cosmos,
+        }
+    }
 
     /// Encode as Cosmos SDK MsgExecuteContract JSON bytes.
     fn encode_msg(&self, intent: &InstantIntent) -> Vec<u8> {
@@ -302,16 +348,27 @@ impl ChainAdapter for CosmosAdapter {
         Ok(self.encode_msg(intent))
     }
 
-    fn verify_execution(&self, intent: &InstantIntent, execution_proof: &[u8]) -> BleepConnectResult<bool> {
-        let proof_str = std::str::from_utf8(execution_proof)
-            .map_err(|_| BleepConnectError::InternalError("Invalid UTF-8 in Cosmos proof".into()))?;
+    fn verify_execution(
+        &self,
+        intent: &InstantIntent,
+        execution_proof: &[u8],
+    ) -> BleepConnectResult<bool> {
+        let proof_str = std::str::from_utf8(execution_proof).map_err(|_| {
+            BleepConnectError::InternalError("Invalid UTF-8 in Cosmos proof".into())
+        })?;
         let expected_id = hex::encode(intent.calculate_id());
         Ok(proof_str.contains(&expected_id))
     }
 
-    fn get_finality_blocks(&self) -> u64 { 1 } // Instant finality on Cosmos
-    fn chain_id(&self) -> ChainId { self.chain }
-    fn native_decimals(&self) -> u8 { 6 }
+    fn get_finality_blocks(&self) -> u64 {
+        1
+    } // Instant finality on Cosmos
+    fn chain_id(&self) -> ChainId {
+        self.chain
+    }
+    fn native_decimals(&self) -> u8 {
+        6
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,7 +378,9 @@ impl ChainAdapter for CosmosAdapter {
 pub struct BleepAdapter;
 
 impl BleepAdapter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 #[async_trait]
@@ -339,7 +398,11 @@ impl ChainAdapter for BleepAdapter {
         Ok(out)
     }
 
-    fn verify_execution(&self, intent: &InstantIntent, execution_proof: &[u8]) -> BleepConnectResult<bool> {
+    fn verify_execution(
+        &self,
+        intent: &InstantIntent,
+        execution_proof: &[u8],
+    ) -> BleepConnectResult<bool> {
         if execution_proof.len() < 52 {
             return Ok(false);
         }
@@ -350,9 +413,15 @@ impl ChainAdapter for BleepAdapter {
         Ok(&execution_proof[4..36] == &intent_id)
     }
 
-    fn get_finality_blocks(&self) -> u64 { 1 }
-    fn chain_id(&self) -> ChainId { ChainId::BLEEP }
-    fn native_decimals(&self) -> u8 { 8 }
+    fn get_finality_blocks(&self) -> u64 {
+        1
+    }
+    fn chain_id(&self) -> ChainId {
+        ChainId::BLEEP
+    }
+    fn native_decimals(&self) -> u8 {
+        8
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -374,8 +443,7 @@ impl ChainAdapter for BleepAdapter {
 pub const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
 
 /// Deployed BleepFulfill contract on Sepolia.
-pub const SEPOLIA_BLEEP_FULFILL_ADDR: &str =
-    "0x4BleepFulfill0000000000000000000000000000S7"; // placeholder until live deploy
+pub const SEPOLIA_BLEEP_FULFILL_ADDR: &str = "0x4BleepFulfill0000000000000000000000000000S7"; // placeholder until live deploy
 
 /// Relay transaction ready for `eth_sendRawTransaction`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -404,7 +472,10 @@ pub enum RelayStatus {
     /// Tx not yet seen on-chain.
     Pending,
     /// Included in a block; waiting for finality (12 confirmations on Sepolia).
-    Confirming { block_number: u64, confirmations: u64 },
+    Confirming {
+        block_number: u64,
+        confirmations: u64,
+    },
     /// Finalized (≥12 confirmations).
     Finalized { block_number: u64, tx_hash: String },
     /// Reverted on-chain.
@@ -472,7 +543,9 @@ impl SepoliaRelay {
         let calldata = self.inner.encode_transfer(intent)?;
         // Local verification: re-decode intent_id from calldata[4..36]
         if calldata.len() < 4 + 32 * 4 {
-            return Err(BleepConnectError::InternalError("Calldata too short".into()));
+            return Err(BleepConnectError::InternalError(
+                "Calldata too short".into(),
+            ));
         }
         // Selector check: bytes [0..4]
         // Amount check: bytes [4+64 .. 4+96] (third parameter = min_dest_amount)
@@ -513,7 +586,9 @@ impl SepoliaRelay {
 }
 
 impl Default for SepoliaRelay {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -526,7 +601,9 @@ pub struct AdapterRegistry {
 
 impl AdapterRegistry {
     pub fn new() -> Self {
-        let mut reg = Self { adapters: HashMap::new() };
+        let mut reg = Self {
+            adapters: HashMap::new(),
+        };
 
         // Register all built-in adapters
         reg.register(Arc::new(EthereumAdapter::new(ChainId::Ethereum)));
@@ -558,7 +635,9 @@ impl AdapterRegistry {
 }
 
 impl Default for AdapterRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -568,7 +647,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn now() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
     fn make_intent(dest: ChainId) -> InstantIntent {
@@ -583,14 +665,17 @@ mod tests {
             source_amount: 1_000_000_000,
             min_dest_amount: 950_000_000,
             sender: UniversalAddress::new(ChainId::BLEEP, "bleep1abc".into()),
-            recipient: UniversalAddress::new(dest, match dest {
-                ChainId::Ethereum => "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
-                ChainId::Bitcoin => "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".into(),
-                ChainId::Solana => "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV".into(),
-                ChainId::Cosmos => "cosmos1qnk2n4nlkpw9xfqntladh74er2xa62wgas".into(),
-                ChainId::BLEEP => "bleep1recipient".into(),
-                _ => "recipient".into(),
-            }),
+            recipient: UniversalAddress::new(
+                dest,
+                match dest {
+                    ChainId::Ethereum => "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
+                    ChainId::Bitcoin => "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".into(),
+                    ChainId::Solana => "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV".into(),
+                    ChainId::Cosmos => "cosmos1qnk2n4nlkpw9xfqntladh74er2xa62wgas".into(),
+                    ChainId::BLEEP => "bleep1recipient".into(),
+                    _ => "recipient".into(),
+                },
+            ),
             max_solver_reward_bps: 50,
             slippage_tolerance_bps: 100,
             nonce: 1,
@@ -665,17 +750,36 @@ mod tests {
     #[test]
     fn test_sepolia_relay_status() {
         let relay = SepoliaRelay::new();
-        assert!(matches!(relay.relay_status("0xffaabbcc"), RelayStatus::Finalized { .. }));
-        assert!(matches!(relay.relay_status("0x00112233"), RelayStatus::Reverted { .. }));
-        assert!(matches!(relay.relay_status("0xabcdef01"), RelayStatus::Confirming { .. }));
+        assert!(matches!(
+            relay.relay_status("0xffaabbcc"),
+            RelayStatus::Finalized { .. }
+        ));
+        assert!(matches!(
+            relay.relay_status("0x00112233"),
+            RelayStatus::Reverted { .. }
+        ));
+        assert!(matches!(
+            relay.relay_status("0xabcdef01"),
+            RelayStatus::Confirming { .. }
+        ));
     }
 
     #[test]
     fn test_adapter_registry() {
         let registry = AdapterRegistry::new();
-        for chain in [ChainId::Ethereum, ChainId::Bitcoin, ChainId::Solana,
-                      ChainId::Cosmos, ChainId::BLEEP, ChainId::Arbitrum] {
-            assert!(registry.get(chain).is_some(), "Missing adapter for {:?}", chain);
+        for chain in [
+            ChainId::Ethereum,
+            ChainId::Bitcoin,
+            ChainId::Solana,
+            ChainId::Cosmos,
+            ChainId::BLEEP,
+            ChainId::Arbitrum,
+        ] {
+            assert!(
+                registry.get(chain).is_some(),
+                "Missing adapter for {:?}",
+                chain
+            );
         }
     }
 }

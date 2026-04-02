@@ -37,7 +37,7 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             max_requests: 20,
-            window:       chrono::Duration::minutes(1),
+            window: chrono::Duration::minutes(1),
         }
     }
 }
@@ -45,12 +45,18 @@ impl Default for RateLimitConfig {
 impl RateLimitConfig {
     /// Strict config for sensitive actions (login, register, bind-validator).
     pub fn strict() -> Self {
-        Self { max_requests: 5, window: chrono::Duration::minutes(1) }
+        Self {
+            max_requests: 5,
+            window: chrono::Duration::minutes(1),
+        }
     }
 
     /// Relaxed config for read-heavy operations.
     pub fn relaxed() -> Self {
-        Self { max_requests: 200, window: chrono::Duration::minutes(1) }
+        Self {
+            max_requests: 200,
+            window: chrono::Duration::minutes(1),
+        }
     }
 }
 
@@ -59,7 +65,7 @@ impl RateLimitConfig {
 // ---------------------------------------------------------------------------
 
 struct Bucket {
-    count:        u32,
+    count: u32,
     window_start: chrono::DateTime<chrono::Utc>,
 }
 
@@ -68,13 +74,16 @@ struct Bucket {
 // ---------------------------------------------------------------------------
 
 pub struct RateLimiter {
-    config:  RateLimitConfig,
+    config: RateLimitConfig,
     buckets: DashMap<String, Bucket>,
 }
 
 impl RateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
-        Self { config, buckets: DashMap::new() }
+        Self {
+            config,
+            buckets: DashMap::new(),
+        }
     }
 
     /// Check and record a request. Returns `Ok(remaining)` if allowed,
@@ -84,23 +93,24 @@ impl RateLimiter {
         let now = chrono::Utc::now();
 
         let mut entry = self.buckets.entry(key).or_insert_with(|| Bucket {
-            count:        0,
+            count: 0,
             window_start: now,
         });
 
         // Reset if window has rolled over
         if now - entry.window_start >= self.config.window {
-            entry.count        = 0;
+            entry.count = 0;
             entry.window_start = now;
         }
 
         if entry.count >= self.config.max_requests {
-            let retry_after = (entry.window_start + self.config.window - now).num_seconds()
+            let retry_after = (entry.window_start + self.config.window - now)
+                .num_seconds()
                 .max(1);
             return Err(AuthError::RateLimitExceeded {
-                identity:          identity_id.to_string(),
-                action:            action.to_string(),
-                retry_after_secs:  retry_after,
+                identity: identity_id.to_string(),
+                action: action.to_string(),
+                retry_after_secs: retry_after,
             });
         }
 
@@ -128,10 +138,13 @@ impl RateLimiter {
     /// Call this from the scheduler every `window` duration.
     pub fn purge_expired(&self) {
         let now = chrono::Utc::now();
-        self.buckets.retain(|_, b| now - b.window_start < self.config.window);
+        self.buckets
+            .retain(|_, b| now - b.window_start < self.config.window);
     }
 
-    pub fn active_buckets(&self) -> usize { self.buckets.len() }
+    pub fn active_buckets(&self) -> usize {
+        self.buckets.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +157,7 @@ mod tests {
     fn rl(max: u32) -> RateLimiter {
         RateLimiter::new(RateLimitConfig {
             max_requests: max,
-            window:       chrono::Duration::minutes(1),
+            window: chrono::Duration::minutes(1),
         })
     }
 

@@ -3,10 +3,7 @@
 //! Verifies Groth16 proofs on BN254 and optionally executes post-verify WASM.
 
 use crate::error::{VmError, VmResult};
-use crate::execution::{
-    execution_context::ExecutionContext,
-    state_transition::StateDiff,
-};
+use crate::execution::{execution_context::ExecutionContext, state_transition::StateDiff};
 use crate::intent::TargetVm;
 use crate::router::vm_router::{Engine, EngineResult};
 use crate::types::{ExecutionLog, LogLevel};
@@ -16,19 +13,24 @@ use tracing::{debug, instrument, warn};
 pub struct ZkEngineAdapter;
 
 impl ZkEngineAdapter {
-    pub fn new() -> Self { ZkEngineAdapter }
+    pub fn new() -> Self {
+        ZkEngineAdapter
+    }
 
     /// Parse a proof packet: [proof_bytes(192) | pub_inputs_count(4 LE) | pub_inputs(32 each)]
     fn parse_proof_packet(bytecode: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
-        if bytecode.len() < 196 { return None; }
+        if bytecode.len() < 196 {
+            return None;
+        }
         let proof_bytes = bytecode[..192].to_vec();
-        let count = u32::from_le_bytes([
-            bytecode[192], bytecode[193], bytecode[194], bytecode[195],
-        ]) as usize;
+        let count = u32::from_le_bytes([bytecode[192], bytecode[193], bytecode[194], bytecode[195]])
+            as usize;
         let mut inputs = Vec::with_capacity(count);
         let mut offset = 196;
         for _ in 0..count {
-            if offset + 32 > bytecode.len() { break; }
+            if offset + 32 > bytecode.len() {
+                break;
+            }
             inputs.push(bytecode[offset..offset + 32].to_vec());
             offset += 32;
         }
@@ -60,8 +62,8 @@ impl ZkEngineAdapter {
             .collect();
 
         debug!(
-            proof_bytes  = proof_bytes.len(),
-            num_inputs   = public_inputs.len(),
+            proof_bytes = proof_bytes.len(),
+            num_inputs = public_inputs.len(),
             "ZK proof structural verification passed"
         );
 
@@ -72,12 +74,16 @@ impl ZkEngineAdapter {
 }
 
 impl Default for ZkEngineAdapter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait::async_trait]
 impl Engine for ZkEngineAdapter {
-    fn name(&self) -> &'static str { "zk-groth16" }
+    fn name(&self) -> &'static str {
+        "zk-groth16"
+    }
 
     fn supports(&self, vm: &TargetVm) -> bool {
         matches!(vm, TargetVm::Zk)
@@ -86,14 +92,18 @@ impl Engine for ZkEngineAdapter {
     #[instrument(skip(self, bytecode, calldata), fields(engine = "zk-groth16"))]
     async fn execute(
         &self,
-        _ctx:      &ExecutionContext,
-        bytecode:  &[u8],
-        calldata:  &[u8],
+        _ctx: &ExecutionContext,
+        bytecode: &[u8],
+        calldata: &[u8],
         gas_limit: u64,
     ) -> VmResult<EngineResult> {
         let start = Instant::now();
 
-        let packet = if !bytecode.is_empty() { bytecode } else { calldata };
+        let packet = if !bytecode.is_empty() {
+            bytecode
+        } else {
+            calldata
+        };
 
         if packet.len() < 4 {
             return Err(VmError::ValidationError(
@@ -105,7 +115,7 @@ impl Engine for ZkEngineAdapter {
         if gas_limit < base_gas {
             return Err(VmError::GasLimitExceeded {
                 requested: base_gas,
-                limit:     gas_limit,
+                limit: gas_limit,
             });
         }
 
@@ -114,7 +124,11 @@ impl Engine for ZkEngineAdapter {
                 match Self::verify_groth16(&proof_bytes, &public_inputs) {
                     Ok(valid) => {
                         let log = ExecutionLog {
-                            level:   if valid { LogLevel::Info } else { LogLevel::Error },
+                            level: if valid {
+                                LogLevel::Info
+                            } else {
+                                LogLevel::Error
+                            },
                             message: if valid {
                                 "ZK proof verified successfully".into()
                             } else {
@@ -127,9 +141,9 @@ impl Engine for ZkEngineAdapter {
                     Err(e) => {
                         warn!("ZK proof error: {e}");
                         let log = ExecutionLog {
-                            level:   LogLevel::Error,
+                            level: LogLevel::Error,
                             message: format!("ZK proof error: {e}"),
-                            data:    Vec::new(),
+                            data: Vec::new(),
                         };
                         (false, vec![log])
                     }
@@ -137,9 +151,9 @@ impl Engine for ZkEngineAdapter {
             }
             None => {
                 let log = ExecutionLog {
-                    level:   LogLevel::Warning,
+                    level: LogLevel::Warning,
                     message: "Non-standard proof format; structural check only".into(),
-                    data:    packet.to_vec(),
+                    data: packet.to_vec(),
                 };
                 (packet.len() >= 4, vec![log])
             }
@@ -149,13 +163,13 @@ impl Engine for ZkEngineAdapter {
 
         if !proof_ok {
             return Ok(EngineResult {
-                success:       false,
-                output:        Vec::new(),
+                success: false,
+                output: Vec::new(),
                 gas_used,
-                state_diff:    StateDiff::empty(),
+                state_diff: StateDiff::empty(),
                 logs,
                 revert_reason: Some("ZK proof verification failed".into()),
-                exec_time:     start.elapsed(),
+                exec_time: start.elapsed(),
             });
         }
 
@@ -165,11 +179,7 @@ impl Engine for ZkEngineAdapter {
             Sha256::digest(packet).into()
         };
         // Emit ZK verification event (address 0xE0 = ZK verifier contract)
-        diff.emit_event(
-            [0xE0u8; 32],
-            vec![proof_hash],
-            calldata.to_vec(),
-        );
+        diff.emit_event([0xE0u8; 32], vec![proof_hash], calldata.to_vec());
 
         debug!(
             proof_ok,
@@ -179,23 +189,23 @@ impl Engine for ZkEngineAdapter {
         );
 
         Ok(EngineResult {
-            success:       true,
-            output:        proof_hash.to_vec(),
+            success: true,
+            output: proof_hash.to_vec(),
             gas_used,
-            state_diff:    diff,
+            state_diff: diff,
             logs,
             revert_reason: None,
-            exec_time:     start.elapsed(),
+            exec_time: start.elapsed(),
         })
     }
 
     async fn deploy(
         &self,
-        _ctx:       &ExecutionContext,
-        _bytecode:  &[u8],
+        _ctx: &ExecutionContext,
+        _bytecode: &[u8],
         _init_args: &[u8],
         _gas_limit: u64,
-        _salt:      Option<[u8; 32]>,
+        _salt: Option<[u8; 32]>,
     ) -> VmResult<EngineResult> {
         Err(VmError::ValidationError(
             "ZK engine does not support contract deployment".into(),
@@ -211,8 +221,12 @@ mod tests {
 
     fn ctx(gas: u64) -> ExecutionContext {
         ExecutionContext::new(
-            BlockEnv::default(), TxEnv::default(), gas,
-            ChainId::Bleep, uuid::Uuid::new_v4(), 128,
+            BlockEnv::default(),
+            TxEnv::default(),
+            gas,
+            ChainId::Bleep,
+            uuid::Uuid::new_v4(),
+            128,
         )
     }
 

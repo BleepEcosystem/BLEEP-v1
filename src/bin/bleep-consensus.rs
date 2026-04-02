@@ -1,6 +1,6 @@
 // src/bin/bleep_consensus.rs
 
-use log::{info, error};
+use log::{error, info};
 
 fn main() {
     env_logger::init();

@@ -1,12 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EmissionType, BurnType, TokenomicsError,
-    ShardCongestion, FeeMarketError,
-    ValidatorError, RewardRecord,
-    PriceUpdate, OracleError,
-    integration::BleepEconomics,
-    distribution::FeeDistribution, validator_incentives::ValidatorMetrics,
+    distribution::FeeDistribution, integration::BleepEconomics,
+    validator_incentives::ValidatorMetrics, BurnType, EmissionType, FeeMarketError, OracleError,
+    PriceUpdate, RewardRecord, ShardCongestion, TokenomicsError, ValidatorError,
 };
 
 pub use crate::integration::BleepEconomics as EconomicState;
@@ -61,23 +58,39 @@ impl BleepEconomicsRuntime {
             epoch_history: std::collections::VecDeque::with_capacity(100),
         };
 
-        runtime.state.fee_market.record_shard_congestion(ShardCongestion {
-            shard_id: 0,
-            pending_txns: 0,
-            utilization_bps: 5000,
-            avg_tx_size_bytes: 250, // static default
-        }).expect("fee market genesis congestion record failed");
+        runtime
+            .state
+            .fee_market
+            .record_shard_congestion(ShardCongestion {
+                shard_id: 0,
+                pending_txns: 0,
+                utilization_bps: 5000,
+                avg_tx_size_bytes: 250, // static default
+            })
+            .expect("fee market genesis congestion record failed");
 
         runtime
     }
 
-    pub fn register_validator(&mut self, validator_id: Vec<u8>, stake: u128) -> Result<(), RuntimeError> {
-        self.state.validators.register_validator(validator_id, stake)?;
+    pub fn register_validator(
+        &mut self,
+        validator_id: Vec<u8>,
+        stake: u128,
+    ) -> Result<(), RuntimeError> {
+        self.state
+            .validators
+            .register_validator(validator_id, stake)?;
         Ok(())
     }
 
-    pub fn register_oracle_operator(&mut self, operator_id: Vec<u8>, slashing_balance: u128) -> Result<(), RuntimeError> {
-        self.state.oracle_bridge.register_operator(operator_id, slashing_balance)?;
+    pub fn register_oracle_operator(
+        &mut self,
+        operator_id: Vec<u8>,
+        slashing_balance: u128,
+    ) -> Result<(), RuntimeError> {
+        self.state
+            .oracle_bridge
+            .register_operator(operator_id, slashing_balance)?;
         Ok(())
     }
 
@@ -89,19 +102,23 @@ impl BleepEconomicsRuntime {
     pub fn process_epoch(&mut self, input: EpochInput) -> Result<EpochOutput, RuntimeError> {
         let epoch = input.epoch;
 
-        let new_base_fee = self.state.fee_market
+        let new_base_fee = self
+            .state
+            .fee_market
             .update_base_fee(epoch, input.avg_utilisation_bps)?;
 
-        self.state.fee_market.record_shard_congestion(ShardCongestion {
-            shard_id: 0,
-            pending_txns: (input.block_count * 100) as u32,
-            utilization_bps: input.avg_utilisation_bps,
-            avg_tx_size_bytes: if input.block_count > 0 {
-                (input.fee_revenue / input.block_count as u128) as u32
-            } else {
-                0
-            },
-        })?;
+        self.state
+            .fee_market
+            .record_shard_congestion(ShardCongestion {
+                shard_id: 0,
+                pending_txns: (input.block_count * 100) as u32,
+                utilization_bps: input.avg_utilisation_bps,
+                avg_tx_size_bytes: if input.block_count > 0 {
+                    (input.fee_revenue / input.block_count as u128) as u32
+                } else {
+                    0
+                },
+            })?;
 
         for update in &input.oracle_updates {
             let _ = self.state.oracle_bridge.submit_price_update(update.clone());
@@ -112,19 +129,23 @@ impl BleepEconomicsRuntime {
             .unwrap_or_default()
             .as_secs();
 
-        let bleep_usd_price = self.state.oracle_bridge
+        let bleep_usd_price = self
+            .state
+            .oracle_bridge
             .aggregate_prices("BLEEP/USD", ts, 300)
             .ok()
             .map(|agg| agg.median_price);
 
         for metrics in &input.validator_metrics {
-            let _ = self.state.validators.record_metrics(
-                metrics.validator_id.clone(),
-                metrics.clone(),
-            );
+            let _ = self
+                .state
+                .validators
+                .record_metrics(metrics.validator_id.clone(), metrics.clone());
         }
 
-        let reward_records = self.state.validators
+        let reward_records = self
+            .state
+            .validators
             .compute_epoch_rewards(epoch)
             .unwrap_or_default();
 
@@ -141,11 +162,9 @@ impl BleepEconomicsRuntime {
         let fee_dist = FeeDistribution::compute(input.fee_revenue);
 
         let total_burned = if fee_dist.burned > 0 {
-            self.state.tokenomics.record_burn(
-                epoch,
-                BurnType::TransactionFee,
-                fee_dist.burned
-            )?;
+            self.state
+                .tokenomics
+                .record_burn(epoch, BurnType::TransactionFee, fee_dist.burned)?;
             fee_dist.burned
         } else {
             0
@@ -155,16 +174,15 @@ impl BleepEconomicsRuntime {
             let _ = self.state.tokenomics.record_emission(
                 epoch,
                 EmissionType::BlockProposal,
-                fee_dist.validator_reward
+                fee_dist.validator_reward,
             );
         }
 
         if fee_dist.treasury > 0 {
-            let _ = self.state.tokenomics.record_burn(
-                epoch,
-                BurnType::ProposalRejection,
-                0
-            );
+            let _ = self
+                .state
+                .tokenomics
+                .record_burn(epoch, BurnType::ProposalRejection, 0);
         }
 
         let supply_state_hash = self.state.tokenomics.finalize_epoch(epoch)?;
@@ -213,6 +231,9 @@ impl BleepEconomicsRuntime {
     }
 
     pub fn get_epoch_output(&self, epoch: u64) -> Option<EpochOutput> {
-        self.epoch_history.iter().find(|entry| entry.epoch == epoch).cloned()
+        self.epoch_history
+            .iter()
+            .find(|entry| entry.epoch == epoch)
+            .cloned()
     }
 }

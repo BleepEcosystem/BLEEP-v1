@@ -17,11 +17,14 @@ use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{info, warn};
 
-use crate::ai_security::{AnomalyDetector, PeerScoring, SybilDetector, TRUST_HEALTHY_THRESHOLD, TRUST_SUSPICIOUS_THRESHOLD};
+use crate::ai_security::{
+    AnomalyDetector, PeerScoring, SybilDetector, TRUST_HEALTHY_THRESHOLD,
+    TRUST_SUSPICIOUS_THRESHOLD,
+};
 use crate::error::{P2PError, P2PResult};
 use crate::kademlia_dht::KademliaDht;
 use crate::quantum_crypto::sphincs_verify;
-use crate::types::{NodeId, PeerInfo, PeerStatus, unix_now};
+use crate::types::{unix_now, NodeId, PeerInfo, PeerStatus};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PEER EVENTS
@@ -81,7 +84,10 @@ pub struct PeerManager {
 
 impl PeerManager {
     /// Construct a new PeerManager.
-    pub fn new(local_id: NodeId, config: PeerManagerConfig) -> (Arc<Self>, broadcast::Receiver<PeerEvent>) {
+    pub fn new(
+        local_id: NodeId,
+        config: PeerManagerConfig,
+    ) -> (Arc<Self>, broadcast::Receiver<PeerEvent>) {
         let (tx, rx) = broadcast::channel(1024);
         let dht = Arc::new(KademliaDht::new(local_id));
         let pm = Arc::new(PeerManager {
@@ -118,7 +124,9 @@ impl PeerManager {
     ) -> P2PResult<()> {
         // 1. Banned check
         if self.banned.contains_key(&id) {
-            return Err(P2PError::PeerBanned { peer_id: id.to_string() });
+            return Err(P2PError::PeerBanned {
+                peer_id: id.to_string(),
+            });
         }
 
         // 2. Max peers guard
@@ -129,12 +137,20 @@ impl PeerManager {
 
         // 3. Sybil check
         if self.sybil.register(&id, &addr) {
-            return Err(P2PError::SybilDetected { peer_id: id.to_string() });
+            return Err(P2PError::SybilDetected {
+                peer_id: id.to_string(),
+            });
         }
 
         // 4. SPHINCS+ identity proof
-        sphincs_verify(identity_proof_challenge, identity_proof_signature, &sphincs_pubkey)
-            .map_err(|_| P2PError::QuantumIdentityFailed { peer_id: id.to_string() })?;
+        sphincs_verify(
+            identity_proof_challenge,
+            identity_proof_signature,
+            &sphincs_pubkey,
+        )
+        .map_err(|_| P2PError::QuantumIdentityFailed {
+            peer_id: id.to_string(),
+        })?;
 
         // 5. Build PeerInfo and score
         let mut peer = PeerInfo::new(id.clone(), addr, ed25519_pubkey, sphincs_pubkey);
@@ -207,7 +223,12 @@ impl PeerManager {
         self.scoring.record_latency(id, latency_ms);
     }
 
-    pub fn check_message_anomaly(&self, _id: &NodeId, payload: &[u8], hop_count: u8) -> Option<String> {
+    pub fn check_message_anomaly(
+        &self,
+        _id: &NodeId,
+        payload: &[u8],
+        hop_count: u8,
+    ) -> Option<String> {
         self.anomaly.check_message(payload, hop_count)
     }
 
@@ -289,7 +310,9 @@ impl PeerManager {
                     PeerStatus::Malicious
                 };
                 if p.status != old_status {
-                    let _ = self.event_tx.send(PeerEvent::StatusChanged(id.clone(), p.status.clone()));
+                    let _ = self
+                        .event_tx
+                        .send(PeerEvent::StatusChanged(id.clone(), p.status.clone()));
                 }
                 if score < self.config.min_trust_score {
                     to_ban.push(id);
@@ -341,7 +364,7 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quantum_crypto::{SphincsKeypair, sphincs_sign, Ed25519Keypair};
+    use crate::quantum_crypto::{sphincs_sign, Ed25519Keypair, SphincsKeypair};
 
     fn make_test_pm() -> (Arc<PeerManager>, broadcast::Receiver<PeerEvent>) {
         let local_id = NodeId::random();
@@ -397,12 +420,16 @@ mod tests {
         let addr: SocketAddr = "10.0.0.3:9001".parse().unwrap();
         let challenge = b"re-admit-context";
         let sig = sphincs_sign(challenge, &sphincs_kp.secret_key.0).unwrap();
-        let result = pm.add_peer(
-            id.clone(), addr,
-            ed_kp.public_key_bytes(),
-            sphincs_kp.public_key.0.clone(),
-            challenge, &sig,
-        ).await;
+        let result = pm
+            .add_peer(
+                id.clone(),
+                addr,
+                ed_kp.public_key_bytes(),
+                sphincs_kp.public_key.0.clone(),
+                challenge,
+                &sig,
+            )
+            .await;
         assert!(matches!(result, Err(P2PError::PeerBanned { .. })));
     }
 
@@ -415,8 +442,20 @@ mod tests {
         let addr: SocketAddr = "10.0.0.99:9000".parse().unwrap();
         let challenge = b"some-context";
         let bad_sig = vec![0u8; 64]; // invalid signature
-        let result = pm.add_peer(id, addr, ed_kp.public_key_bytes(), sphincs_kp.public_key.0, challenge, &bad_sig).await;
-        assert!(matches!(result, Err(P2PError::QuantumIdentityFailed { .. })));
+        let result = pm
+            .add_peer(
+                id,
+                addr,
+                ed_kp.public_key_bytes(),
+                sphincs_kp.public_key.0,
+                challenge,
+                &bad_sig,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(P2PError::QuantumIdentityFailed { .. })
+        ));
     }
 
     #[tokio::test]

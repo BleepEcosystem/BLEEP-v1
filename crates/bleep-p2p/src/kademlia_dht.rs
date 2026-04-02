@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tokio::time::interval;
 use tracing::{debug, info};
 
-use crate::types::{NodeId, PeerInfo, unix_now};
+use crate::types::{unix_now, NodeId, PeerInfo};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -326,7 +326,10 @@ impl KademliaDht {
             self.evict_expired_values();
             let stale = self.routing_table.read().await.stale_bucket_indices();
             if !stale.is_empty() {
-                debug!(stale_buckets = stale.len(), "Kademlia: refreshing stale buckets");
+                debug!(
+                    stale_buckets = stale.len(),
+                    "Kademlia: refreshing stale buckets"
+                );
                 // In a networked deployment, we would perform FIND_NODE RPCs here.
                 // The routing table self-updates when responses arrive via add_peer().
             }
@@ -337,8 +340,8 @@ impl KademliaDht {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
     use crate::types::PeerStatus;
+    use std::net::SocketAddr;
 
     fn make_peer(seed: u8) -> PeerInfo {
         let mut id_bytes = [0u8; 32];

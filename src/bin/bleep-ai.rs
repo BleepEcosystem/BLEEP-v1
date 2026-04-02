@@ -3,8 +3,8 @@
 // use bleep_ai::ai_assistant::AIAssistant;
 // use bleep_ai::smart_contracts::SmartContractAdvisor;
 // use bleep_ai::decision_engine::run_decision_loop;
+use log::{error, info};
 use std::error::Error;
-use log::{info, error};
 
 fn main() {
     env_logger::init();
@@ -19,11 +19,11 @@ fn main() {
 fn run_ai_services() -> Result<(), Box<dyn Error>> {
     // Initialize AI services with proper logging
     info!("Initializing AI decision module...");
-    
+
     // Create a simple AI service state
     let ai_state = AIServiceState::new();
     info!("AI decision module initialized: {:?}", ai_state);
-    
+
     // Log system readiness
     info!("AI engine ready for consensus decisions");
     Ok(())

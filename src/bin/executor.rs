@@ -28,25 +28,25 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{info, warn, debug};
-use tokio::time::sleep;
-use serde::Deserialize;
 use hex;
 use reqwest;
+use serde::Deserialize;
 use tempfile;
+use tokio::time::sleep;
+use tracing::{debug, info, warn};
 
-use bleep_interop::executor::{ExecutorNode, ExecutionStrategy, RiskTolerance};
-use bleep_interop::types::{
-    ChainId, UniversalAddress, ExecutorTier, InstantIntent, AssetId, AssetType,
-};
 use bleep_interop::commitment_chain::CommitmentChain;
-use bleep_interop::layer4::Layer4Instant;
 use bleep_interop::crypto::ClassicalKeyPair;
+use bleep_interop::executor::{ExecutionStrategy, ExecutorNode, RiskTolerance};
+use bleep_interop::layer4::Layer4Instant;
+use bleep_interop::types::{
+    AssetId, AssetType, ChainId, ExecutorTier, InstantIntent, UniversalAddress,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const DEFAULT_CAPITAL_BLEEP: u128 = 10_000_000;                   // 0.1 BLEEP
-const DEFAULT_CAPITAL_ETH:   u128 = 5_000_000_000_000_000_000;   // 5 ETH in wei
-const DEFAULT_POLL_MS:       u64  = 500;
+const DEFAULT_CAPITAL_BLEEP: u128 = 10_000_000; // 0.1 BLEEP
+const DEFAULT_CAPITAL_ETH: u128 = 5_000_000_000_000_000_000; // 5 ETH in wei
+const DEFAULT_POLL_MS: u64 = 500;
 
 #[tokio::main]
 async fn main() {
@@ -70,29 +70,33 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ── Config ────────────────────────────────────────────────────────────────
-    let rpc_base = std::env::var("BLEEP_RPC")
-        .unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
+    let rpc_base =
+        std::env::var("BLEEP_RPC").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
     let capital_bleep: u128 = std::env::var("BLEEP_EXECUTOR_CAPITAL_BLEEP")
-        .ok().and_then(|v| v.parse().ok())
+        .ok()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_CAPITAL_BLEEP);
     let capital_eth: u128 = std::env::var("BLEEP_EXECUTOR_CAPITAL_ETH")
-        .ok().and_then(|v| v.parse().ok())
+        .ok()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_CAPITAL_ETH);
     let poll_ms: u64 = std::env::var("BLEEP_EXECUTOR_POLL_MS")
-        .ok().and_then(|v| v.parse().ok())
+        .ok()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_POLL_MS);
     let risk = match std::env::var("BLEEP_EXECUTOR_RISK")
-        .unwrap_or_default().to_lowercase().as_str()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
     {
         "conservative" => RiskTolerance::Conservative,
-        "aggressive"   => RiskTolerance::Aggressive,
-        _              => RiskTolerance::Medium,
+        "aggressive" => RiskTolerance::Aggressive,
+        _ => RiskTolerance::Medium,
     };
 
     // ── Keypair ───────────────────────────────────────────────────────────────
     let keypair = if let Ok(hex_seed) = std::env::var("BLEEP_EXECUTOR_KEY") {
-        let bytes = hex::decode(&hex_seed)
-            .map_err(|_| "BLEEP_EXECUTOR_KEY must be 64-char hex")?;
+        let bytes = hex::decode(&hex_seed).map_err(|_| "BLEEP_EXECUTOR_KEY must be 64-char hex")?;
         if bytes.len() != 32 {
             return Err("BLEEP_EXECUTOR_KEY must be exactly 32 bytes".into());
         }
@@ -115,7 +119,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let chain_keypair = ClassicalKeyPair::generate();
     let commitment_chain = Arc::new(
         CommitmentChain::new(tmp_dir.path(), chain_keypair, vec![])
-            .map_err(|e| format!("CommitmentChain init: {}", e))?
+            .map_err(|e| format!("CommitmentChain init: {}", e))?,
     );
     let layer4 = Arc::new(Layer4Instant::new(commitment_chain));
 
@@ -129,9 +133,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // Deposit capital
-    executor.deposit_capital(ChainId::BLEEP,    capital_bleep).await;
-    executor.deposit_capital(ChainId::Ethereum, capital_eth).await;
-    info!("💰 Capital: {} µBLEEP + {} wei ETH deposited", capital_bleep, capital_eth);
+    executor
+        .deposit_capital(ChainId::BLEEP, capital_bleep)
+        .await;
+    executor
+        .deposit_capital(ChainId::Ethereum, capital_eth)
+        .await;
+    info!(
+        "💰 Capital: {} µBLEEP + {} wei ETH deposited",
+        capital_bleep, capital_eth
+    );
 
     // ── Metrics state ─────────────────────────────────────────────────────────
     let mut total_bids = 0u64;
@@ -166,7 +177,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         for raw in pending.intents {
             let intent = match build_intent(&raw) {
                 Ok(i) => i,
-                Err(e) => { debug!("Intent parse error: {}", e); continue; }
+                Err(e) => {
+                    debug!("Intent parse error: {}", e);
+                    continue;
+                }
             };
 
             match executor.evaluate_and_bid(&intent, &layer4).await {
@@ -174,11 +188,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     total_bids += 1;
                     info!("📋 Bid → intent {}", hex::encode(&intent.intent_id[..4]));
                     match executor.execute(&intent, &layer4).await {
-                        Ok(_)  => {
+                        Ok(_) => {
                             total_executions += 1;
-                            info!("✅ Executed {} → {}",
-                                  intent.source_chain.canonical_name(),
-                                  intent.dest_chain.canonical_name());
+                            info!(
+                                "✅ Executed {} → {}",
+                                intent.source_chain.canonical_name(),
+                                intent.dest_chain.canonical_name()
+                            );
                         }
                         Err(e) => warn!("❌ Execute failed: {}", e),
                     }
@@ -191,8 +207,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // 3. Metrics every 60 s
         if last_metrics.elapsed() > Duration::from_secs(60) {
             let total_cap = executor.total_capital().await;
-            info!("📊 bids={} executions={} capital={} µBLEEP",
-                  total_bids, total_executions, total_cap);
+            info!(
+                "📊 bids={} executions={} capital={} µBLEEP",
+                total_bids, total_executions, total_cap
+            );
             last_metrics = std::time::Instant::now();
         }
 
@@ -224,18 +242,43 @@ fn build_intent(raw: &serde_json::Value) -> Result<InstantIntent, Box<dyn std::e
         .as_secs();
 
     Ok(InstantIntent {
-        intent_id:             id,
-        created_at:            now,
-        expires_at:            raw["expires_at"].as_u64().unwrap_or(now + 300),
-        source_chain:          src,
-        dest_chain:            dst,
-        source_asset:  AssetId { chain: src, contract_address: None, token_id: None, asset_type: AssetType::Native },
-        dest_asset:    AssetId { chain: dst, contract_address: None, token_id: None, asset_type: AssetType::Native },
-        source_amount:         raw["source_amount"].as_u64().map(|v| v as u128).unwrap_or(0),
-        min_dest_amount:       raw["min_dest_amount"].as_u64().map(|v| v as u128).unwrap_or(0),
-        sender:    UniversalAddress::new(src, raw["sender_address"].as_str().unwrap_or("").to_string()),
-        recipient: UniversalAddress::new(dst, raw["recipient_address"].as_str().unwrap_or("").to_string()),
-        max_solver_reward_bps: raw["max_solver_reward_bps"].as_u64().map(|v| v as u16).unwrap_or(50),
+        intent_id: id,
+        created_at: now,
+        expires_at: raw["expires_at"].as_u64().unwrap_or(now + 300),
+        source_chain: src,
+        dest_chain: dst,
+        source_asset: AssetId {
+            chain: src,
+            contract_address: None,
+            token_id: None,
+            asset_type: AssetType::Native,
+        },
+        dest_asset: AssetId {
+            chain: dst,
+            contract_address: None,
+            token_id: None,
+            asset_type: AssetType::Native,
+        },
+        source_amount: raw["source_amount"]
+            .as_u64()
+            .map(|v| v as u128)
+            .unwrap_or(0),
+        min_dest_amount: raw["min_dest_amount"]
+            .as_u64()
+            .map(|v| v as u128)
+            .unwrap_or(0),
+        sender: UniversalAddress::new(
+            src,
+            raw["sender_address"].as_str().unwrap_or("").to_string(),
+        ),
+        recipient: UniversalAddress::new(
+            dst,
+            raw["recipient_address"].as_str().unwrap_or("").to_string(),
+        ),
+        max_solver_reward_bps: raw["max_solver_reward_bps"]
+            .as_u64()
+            .map(|v| v as u16)
+            .unwrap_or(50),
         slippage_tolerance_bps: 100,
         nonce: 0,
         signature: vec![],

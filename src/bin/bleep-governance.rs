@@ -1,11 +1,11 @@
 // src/bin/bleep_governance.rs
 
 use bleep_governance::{
-    GovernanceEngine, Proposal, ProposalType, VotingWindow, Vote, GovernancePayload,
+    GovernanceEngine, GovernancePayload, Proposal, ProposalType, Vote, VotingWindow,
 };
-use std::error::Error;
+use log::{error, info};
 use std::env;
-use log::{info, error};
+use std::error::Error;
 
 fn main() {
     env_logger::init();
@@ -24,7 +24,10 @@ fn run_governance_module() -> Result<(), Box<dyn Error>> {
         .unwrap_or(1_000_000_000u128);
 
     let mut engine = GovernanceEngine::new(total_network_stake);
-    info!("✅ Governance engine loaded (stake = {}).", total_network_stake);
+    info!(
+        "✅ Governance engine loaded (stake = {}).",
+        total_network_stake
+    );
 
     let voting_window = VotingWindow::new(1, 3)?;
     let proposal_id = "proposal-001".to_string();

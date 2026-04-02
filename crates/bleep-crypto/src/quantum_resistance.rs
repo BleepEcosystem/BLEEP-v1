@@ -1,13 +1,12 @@
-
-use serde::{Serialize, Deserialize};
-use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 use log::info;
-use tokio::sync::RwLock;
-use sha3::{Digest, Sha3_256};
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
-use pqcrypto_traits::sign::{PublicKey as _, DetachedSignature as _, SecretKey};
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey};
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 
 // --- BLEEP Quantum Resistance API ---
 pub fn generate_falcon_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
@@ -25,14 +24,13 @@ pub fn sign_transaction<T: std::fmt::Debug>(_tx: &mut T) -> Result<(), Box<dyn s
     Ok(())
 }
 
-
 /// Initialize cryptography module logging
-/// 
+///
 /// This function idempotently sets up the logging system for the crypto module.
 /// It is safe to call multiple times from different threads and initialization paths.
-/// 
+///
 /// # Returns
-/// 
+///
 /// This function always succeeds (logging failures are non-fatal).
 pub fn init_crypto_logging() {
     // Idempotent logging initialization: env_logger ignores multiple init calls
@@ -77,8 +75,18 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    pub fn new(id: u64, from: &str, to: &str, amount: u64, sk: &sphincsshake256fsimple::SecretKey, pk: &sphincsshake256fsimple::PublicKey) -> Self {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    pub fn new(
+        id: u64,
+        from: &str,
+        to: &str,
+        amount: u64,
+        sk: &sphincsshake256fsimple::SecretKey,
+        pk: &sphincsshake256fsimple::PublicKey,
+    ) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let mut tx = Transaction {
             id,
             from: from.to_string(),
@@ -149,7 +157,11 @@ impl Block {
         }
     }
 
-    pub fn calculate_hash(transactions: &[Transaction], previous_hash: &str, timestamp: u64) -> String {
+    pub fn calculate_hash(
+        transactions: &[Transaction],
+        previous_hash: &str,
+        timestamp: u64,
+    ) -> String {
         let mut hasher = Sha3_256::new();
         hasher.update(previous_hash.as_bytes());
         hasher.update(&timestamp.to_be_bytes());
@@ -218,10 +230,10 @@ impl AdaptiveConsensus {
 }
 
 /// Run self-tests and validation for the cryptographic module
-/// 
+///
 /// This is a demonstration/testing function showing how to initialize and use
 /// the quantum-resistant cryptography components.
-/// 
+///
 /// # Example
 ///
 /// This function is intended for internal testing and integration verification.

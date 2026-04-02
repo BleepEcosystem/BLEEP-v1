@@ -27,31 +27,31 @@ use crate::intent::{PATIntent, PATIntentKind};
 use crate::state_diff::{PATEvent, PATOutcome, PATStateDiff, TokenMutation};
 use crate::token::{AllowanceTable, PATToken, TokenLedger};
 use std::collections::{BTreeMap, HashSet};
-use tracing::{info,};
+use tracing::info;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PAT REGISTRY
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct PATRegistry {
-    pub tokens:      BTreeMap<String, PATToken>,
-    pub ledgers:     BTreeMap<String, TokenLedger>,
-    pub allowances:  BTreeMap<String, AllowanceTable>,
-    pub events:      Vec<PATEvent>,
+    pub tokens: BTreeMap<String, PATToken>,
+    pub ledgers: BTreeMap<String, TokenLedger>,
+    pub allowances: BTreeMap<String, AllowanceTable>,
+    pub events: Vec<PATEvent>,
     /// Set of executed intent hashes — prevents replay within this session.
-    seen_intents:    HashSet<[u8; 32]>,
-    engine:          PATEngine,
+    seen_intents: HashSet<[u8; 32]>,
+    engine: PATEngine,
 }
 
 impl PATRegistry {
     pub fn new() -> Self {
         PATRegistry {
-            tokens:       BTreeMap::new(),
-            ledgers:      BTreeMap::new(),
-            allowances:   BTreeMap::new(),
-            events:       Vec::new(),
+            tokens: BTreeMap::new(),
+            ledgers: BTreeMap::new(),
+            allowances: BTreeMap::new(),
+            events: Vec::new(),
             seen_intents: HashSet::new(),
-            engine:       PATEngine::new(),
+            engine: PATEngine::new(),
         }
     }
 
@@ -93,8 +93,8 @@ impl PATRegistry {
 
         // ── Pure execution ────────────────────────────────────────────────────
         let view = RegistryView {
-            tokens:     &self.tokens,
-            ledgers:    &self.ledgers,
+            tokens: &self.tokens,
+            ledgers: &self.ledgers,
             allowances: &self.allowances,
         };
 
@@ -118,8 +118,10 @@ impl PATRegistry {
                     .as_secs(),
             )?;
             self.tokens.insert(i.symbol.clone(), token);
-            self.ledgers.insert(i.symbol.clone(), TokenLedger::default());
-            self.allowances.insert(i.symbol.clone(), AllowanceTable::default());
+            self.ledgers
+                .insert(i.symbol.clone(), TokenLedger::default());
+            self.allowances
+                .insert(i.symbol.clone(), AllowanceTable::default());
         }
 
         self.apply_diff(&outcome.diff)?;
@@ -144,7 +146,9 @@ impl PATRegistry {
     fn apply_diff(&mut self, diff: &PATStateDiff) -> PATResult<()> {
         // ── 1. Balance deltas ─────────────────────────────────────────────────
         for delta in &diff.balance_deltas {
-            let ledger = self.ledgers.get_mut(&delta.symbol)
+            let ledger = self
+                .ledgers
+                .get_mut(&delta.symbol)
                 .ok_or_else(|| PATError::TokenNotFound(delta.symbol.clone()))?;
             if delta.delta >= 0 {
                 ledger.credit(&delta.address, delta.delta as u128)?;
@@ -155,17 +159,22 @@ impl PATRegistry {
 
         // ── 2. Supply deltas ──────────────────────────────────────────────────
         for sd in &diff.supply_deltas {
-            let token = self.tokens.get_mut(&sd.symbol)
+            let token = self
+                .tokens
+                .get_mut(&sd.symbol)
                 .ok_or_else(|| PATError::TokenNotFound(sd.symbol.clone()))?;
             if sd.supply_delta >= 0 {
-                token.current_supply = token.current_supply
+                token.current_supply = token
+                    .current_supply
                     .checked_add(sd.supply_delta as u128)
                     .ok_or_else(|| PATError::BalanceOverflow(sd.symbol.clone()))?;
             } else {
-                token.current_supply = token.current_supply
+                token.current_supply = token
+                    .current_supply
                     .saturating_sub((-sd.supply_delta) as u128);
             }
-            token.total_burned = token.total_burned
+            token.total_burned = token
+                .total_burned
                 .checked_add(sd.burned_add)
                 .ok_or_else(|| PATError::BalanceOverflow(sd.symbol.clone()))?;
             token.recompute_hash();
@@ -173,7 +182,9 @@ impl PATRegistry {
 
         // ── 3. Allowance updates ──────────────────────────────────────────────
         for au in &diff.allowance_updates {
-            let table = self.allowances.get_mut(&au.symbol)
+            let table = self
+                .allowances
+                .get_mut(&au.symbol)
                 .ok_or_else(|| PATError::TokenNotFound(au.symbol.clone()))?;
             table.set(&au.owner, &au.spender, au.new_value);
         }
@@ -214,7 +225,8 @@ impl PATRegistry {
     // ── Query API ─────────────────────────────────────────────────────────────
 
     pub fn balance_of(&self, symbol: &str, address: &crate::intent::Address) -> u128 {
-        self.ledgers.get(symbol)
+        self.ledgers
+            .get(symbol)
             .map(|l| l.balance_of(address))
             .unwrap_or(0)
     }
@@ -225,7 +237,8 @@ impl PATRegistry {
         owner: &crate::intent::Address,
         spender: &crate::intent::Address,
     ) -> u128 {
-        self.allowances.get(symbol)
+        self.allowances
+            .get(symbol)
             .map(|t| t.get(owner, spender))
             .unwrap_or(0)
     }
@@ -251,19 +264,21 @@ impl PATRegistry {
 
     fn intent_symbol<'a>(&self, kind: &'a PATIntentKind) -> &'a str {
         match kind {
-            PATIntentKind::CreateToken(i)       => &i.symbol,
-            PATIntentKind::Mint(i)              => &i.symbol,
-            PATIntentKind::Burn(i)              => &i.symbol,
-            PATIntentKind::Transfer(i)          => &i.symbol,
-            PATIntentKind::Approve(i)           => &i.symbol,
-            PATIntentKind::TransferFrom(i)      => &i.symbol,
-            PATIntentKind::Freeze(i)            => &i.symbol,
-            PATIntentKind::UpdateBurnRate(i)    => &i.symbol,
+            PATIntentKind::CreateToken(i) => &i.symbol,
+            PATIntentKind::Mint(i) => &i.symbol,
+            PATIntentKind::Burn(i) => &i.symbol,
+            PATIntentKind::Transfer(i) => &i.symbol,
+            PATIntentKind::Approve(i) => &i.symbol,
+            PATIntentKind::TransferFrom(i) => &i.symbol,
+            PATIntentKind::Freeze(i) => &i.symbol,
+            PATIntentKind::UpdateBurnRate(i) => &i.symbol,
             PATIntentKind::TransferOwnership(i) => &i.symbol,
         }
     }
 }
 
 impl Default for PATRegistry {
-    fn default() -> Self { Self::new() }
-  } 
+    fn default() -> Self {
+        Self::new()
+    }
+}

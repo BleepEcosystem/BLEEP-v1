@@ -18,11 +18,11 @@
 // ============================================================================
 
 use crate::errors::{AuthError, AuthResult};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use zeroize::Zeroizing;
-use rand::RngCore;
 use std::collections::HashMap;
+use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,15 +36,15 @@ pub enum CredentialKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
-    pub identity_id:     String,
-    pub kind:            CredentialKind,
+    pub identity_id: String,
+    pub kind: CredentialKind,
     /// 32-byte CSPRNG salt, hex-encoded
-    pub salt:            String,
+    pub salt: String,
     /// SHA3-256(salt ∥ secret), hex-encoded
-    pub hash:            String,
-    pub created_at:      chrono::DateTime<chrono::Utc>,
-    pub last_verified:   Option<chrono::DateTime<chrono::Utc>>,
-    pub active:          bool,
+    pub hash: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_verified: Option<chrono::DateTime<chrono::Utc>>,
+    pub active: bool,
 }
 
 impl Credential {
@@ -154,7 +154,11 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    pub fn new() -> Self { Self { inner: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Write
@@ -165,7 +169,9 @@ impl CredentialStore {
         let cred = Credential::new_password(identity_id.to_string(), password)?;
         let bucket = self.inner.entry(identity_id.to_string()).or_default();
         for c in bucket.iter_mut() {
-            if c.kind == CredentialKind::PasswordHash { c.active = false; }
+            if c.kind == CredentialKind::PasswordHash {
+                c.active = false;
+            }
         }
         bucket.push(cred);
         Ok(())
@@ -177,14 +183,19 @@ impl CredentialStore {
         rand::thread_rng().fill_bytes(&mut raw);
         let raw_hex = hex::encode(raw);
         let cred = Credential::new_api_key(identity_id.to_string(), raw_hex.as_bytes())?;
-        self.inner.entry(identity_id.to_string()).or_default().push(cred);
+        self.inner
+            .entry(identity_id.to_string())
+            .or_default()
+            .push(cred);
         Ok(raw_hex)
     }
 
     /// Revoke all credentials for an identity.
     pub fn revoke_all(&mut self, identity_id: &str) {
         if let Some(bucket) = self.inner.get_mut(identity_id) {
-            for c in bucket.iter_mut() { c.active = false; }
+            for c in bucket.iter_mut() {
+                c.active = false;
+            }
         }
     }
 
@@ -193,24 +204,36 @@ impl CredentialStore {
     // -----------------------------------------------------------------------
 
     pub fn verify_password(&mut self, identity_id: &str, password: &str) -> AuthResult<()> {
-        let bucket = self.inner.get_mut(identity_id)
+        let bucket = self
+            .inner
+            .get_mut(identity_id)
             .ok_or_else(|| AuthError::IdentityNotFound(identity_id.to_string()))?;
-        let cred = bucket.iter_mut()
+        let cred = bucket
+            .iter_mut()
             .find(|c| c.kind == CredentialKind::PasswordHash && c.active)
             .ok_or(AuthError::InvalidCredentials)?;
         cred.verify_password(password)
     }
 
     pub fn verify_api_key(&mut self, identity_id: &str, raw_key: &str) -> AuthResult<()> {
-        let bucket = self.inner.get_mut(identity_id)
+        let bucket = self
+            .inner
+            .get_mut(identity_id)
             .ok_or_else(|| AuthError::IdentityNotFound(identity_id.to_string()))?;
-        for cred in bucket.iter_mut().filter(|c| c.kind == CredentialKind::ApiKeyHash && c.active) {
-            if cred.verify_secret(raw_key.as_bytes()).is_ok() { return Ok(()); }
+        for cred in bucket
+            .iter_mut()
+            .filter(|c| c.kind == CredentialKind::ApiKeyHash && c.active)
+        {
+            if cred.verify_secret(raw_key.as_bytes()).is_ok() {
+                return Ok(());
+            }
         }
         Err(AuthError::InvalidCredentials)
     }
 
-    pub fn credential_count(&self) -> usize { self.inner.values().map(|v| v.len()).sum() }
+    pub fn credential_count(&self) -> usize {
+        self.inner.values().map(|v| v.len()).sum()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,8 +266,12 @@ mod tests {
     #[test]
     fn store_and_verify() {
         let mut store = CredentialStore::new();
-        store.store_password("op1", "strong-passphrase-123".into()).unwrap();
-        assert!(store.verify_password("op1", "strong-passphrase-123").is_ok());
+        store
+            .store_password("op1", "strong-passphrase-123".into())
+            .unwrap();
+        assert!(store
+            .verify_password("op1", "strong-passphrase-123")
+            .is_ok());
         assert!(store.verify_password("op1", "wrong").is_err());
     }
 
@@ -259,9 +286,16 @@ mod tests {
     #[test]
     fn password_rotation_deactivates_old() {
         let mut store = CredentialStore::new();
-        store.store_password("op2", "first-password-here".into()).unwrap();
-        store.store_password("op2", "second-password-here".into()).unwrap();
-        assert!(store.verify_password("op2", "first-password-here").is_err(), "old password must be rejected");
+        store
+            .store_password("op2", "first-password-here".into())
+            .unwrap();
+        store
+            .store_password("op2", "second-password-here".into())
+            .unwrap();
+        assert!(
+            store.verify_password("op2", "first-password-here").is_err(),
+            "old password must be rejected"
+        );
         assert!(store.verify_password("op2", "second-password-here").is_ok());
     }
 }

@@ -10,10 +10,10 @@
 // 6. Snapshots enable deterministic rollback without re-execution
 // 7. All nodes independently derive identical snapshots
 
-use crate::shard_registry::{ShardId, EpochId, ShardStateRoot};
+use crate::shard_registry::{EpochId, ShardId, ShardStateRoot};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use log::{info, warn};
 use std::collections::{BTreeMap, VecDeque};
 
 /// Snapshot ID - unique identifier for a snapshot
@@ -505,17 +505,14 @@ impl SnapshotEngine {
     pub fn get_latest_finalized_snapshot(&self, shard_id: ShardId) -> Option<&StateSnapshot> {
         let snapshot_ids = self.snapshots_per_shard.get(&shard_id)?;
 
-        snapshot_ids
-            .iter()
-            .rev()
-            .find_map(|&id| {
-                let snapshot = self.snapshots.get(&id)?;
-                if snapshot.status == SnapshotStatus::Finalized {
-                    Some(snapshot)
-                } else {
-                    None
-                }
-            })
+        snapshot_ids.iter().rev().find_map(|&id| {
+            let snapshot = self.snapshots.get(&id)?;
+            if snapshot.status == SnapshotStatus::Finalized {
+                Some(snapshot)
+            } else {
+                None
+            }
+        })
     }
 
     /// Get all snapshots for a shard
@@ -540,7 +537,11 @@ impl SnapshotEngine {
     }
 
     /// Check if snapshot can be used for rollback
-    pub fn can_rollback_to(&self, snapshot_id: SnapshotId, current_height: u64) -> Result<(), String> {
+    pub fn can_rollback_to(
+        &self,
+        snapshot_id: SnapshotId,
+        current_height: u64,
+    ) -> Result<(), String> {
         let snapshot = self
             .snapshots
             .get(&snapshot_id)
@@ -703,13 +704,7 @@ mod tests {
         };
 
         let snapshot_id = engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(10),
-                100,
-                root,
-                "merkle".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(10), 100, root, "merkle".to_string())
             .unwrap();
 
         assert!(engine.can_rollback_to(snapshot_id, 200).is_err());
@@ -757,13 +752,7 @@ mod tests {
             .unwrap();
 
         let _id4 = engine
-            .create_snapshot(
-                ShardId(0),
-                EpochId(40),
-                400,
-                root,
-                "merkle4".to_string(),
-            )
+            .create_snapshot(ShardId(0), EpochId(40), 400, root, "merkle4".to_string())
             .unwrap();
 
         let pruned = engine.prune_old_snapshots().unwrap();

@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 /// P2P networking module for distributed shard communication
 use std::collections::HashSet;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct P2PNode {
@@ -23,18 +23,18 @@ impl P2PNode {
             active_peers: HashSet::new(),
         }
     }
-    
+
     /// Get the node ID
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
-    
+
     /// Broadcast a message to all connected peers
     pub fn broadcast(&mut self, msg: P2PMessage) -> Result<(), Box<dyn std::error::Error>> {
         if self.active_peers.is_empty() {
             return Ok(()); // No peers to broadcast to
         }
-        
+
         // Serialize message for broadcast
         let _msg_bytes = serde_json::to_vec(&msg)?;
         Ok(())

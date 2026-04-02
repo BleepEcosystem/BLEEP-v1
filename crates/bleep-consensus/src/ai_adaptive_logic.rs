@@ -1,17 +1,17 @@
+use crate::consensus::ConsensusMode;
 use log::{info, warn};
 use std::collections::HashMap;
-use crate::consensus::ConsensusMode;
 
 /// **Validator Struct**
 #[derive(Debug, Clone)]
 pub struct Validator {
-    pub reputation: f64,  // Performance Score
-    pub latency: u64,      // Network Latency in ms
-    pub stake: f64,        // Staked Amount for PoS
+    pub reputation: f64, // Performance Score
+    pub latency: u64,    // Network Latency in ms
+    pub stake: f64,      // Staked Amount for PoS
 }
 
 /// **AI-Powered Adaptive Consensus System**
-/// 
+///
 /// This system analyzes network metrics deterministically to recommend
 /// the most suitable consensus mode. All calculations are deterministic
 /// and reproducible across nodes.
@@ -19,16 +19,14 @@ pub struct AIAdaptiveConsensus {
     consensus_mode: ConsensusMode,
     validators: HashMap<String, Validator>,
     metrics_history: Vec<(u64, u64, f64)>, // (load, latency, reliability)
-    
+
     /// Weighting factor for recent observations (multiplicative per epoch back)
     recency_weight_factor: f64,
 }
 
-
-
 impl AIAdaptiveConsensus {
     /// **Initialize AI Consensus System**
-    /// 
+    ///
     /// # Arguments
     /// * `validators` - Map of validator IDs to validator stakes
     pub fn new(validators: HashMap<String, Validator>) -> Self {
@@ -41,7 +39,7 @@ impl AIAdaptiveConsensus {
     }
 
     /// **Collect Real-time Blockchain Metrics**
-    /// 
+    ///
     /// Stores metrics for analysis. All metrics are deterministic on-chain values.
     /// # Arguments
     /// * `load` - Network load percentage (0-100)
@@ -56,14 +54,14 @@ impl AIAdaptiveConsensus {
     }
 
     /// **Deterministic Consensus Mode Prediction**
-    /// 
+    ///
     /// Uses weighted averaging with recency bias to compute a predicted reliability score.
     /// This is a deterministic alternative to ML model fitting, ensuring all nodes
     /// compute the same recommendation given the same historical metrics.
-    /// 
+    ///
     /// SAFETY: This method is fully deterministic. Given identical metrics_history,
     /// all honest nodes will select the same consensus mode.
-    /// 
+    ///
     /// # Algorithm
     /// 1. If history is empty, default to PoS
     /// 2. Weight recent observations more heavily
@@ -73,9 +71,10 @@ impl AIAdaptiveConsensus {
         if self.metrics_history.is_empty() {
             return ConsensusMode::PoS;
         }
-        
+
         // Extract reliability scores from metrics history
-        let reliabilities: Vec<f64> = self.metrics_history
+        let reliabilities: Vec<f64> = self
+            .metrics_history
             .iter()
             .map(|(_, _, reliability)| *reliability)
             .collect();
@@ -83,31 +82,44 @@ impl AIAdaptiveConsensus {
         // Compute deterministic weighted average with recency bias
         let predicted_reliability = self.compute_weighted_reliability(&reliabilities);
 
-        info!("AI Prediction: Reliability={:.2} based on {} metrics", predicted_reliability, reliabilities.len());
+        info!(
+            "AI Prediction: Reliability={:.2} based on {} metrics",
+            predicted_reliability,
+            reliabilities.len()
+        );
 
         // Determine consensus mode based on predicted reliability
         // SAFETY: This decision is deterministic and based solely on reliability score
         match predicted_reliability {
             r if r < 0.6 => {
-                warn!("Low reliability prediction ({:.2}); switching to PoW for security", r);
+                warn!(
+                    "Low reliability prediction ({:.2}); switching to PoW for security",
+                    r
+                );
                 ConsensusMode::PoW
-            },
+            }
             r if r < 0.8 => {
-                info!("Medium reliability prediction ({:.2}); using PBFT for balance", r);
+                info!(
+                    "Medium reliability prediction ({:.2}); using PBFT for balance",
+                    r
+                );
                 ConsensusMode::PBFT
-            },
+            }
             r => {
-                info!("High reliability prediction ({:.2}); using PoS for efficiency", r);
+                info!(
+                    "High reliability prediction ({:.2}); using PoS for efficiency",
+                    r
+                );
                 ConsensusMode::PoS
-            },
+            }
         }
     }
 
     /// **Compute Weighted Reliability Score**
-    /// 
+    ///
     /// Uses exponential weighting where more recent observations have higher weight.
     /// This is a deterministic calculation that replaces ML model fitting.
-    /// 
+    ///
     /// # Safety
     /// - Deterministic: Same input always produces same output
     /// - Observable: All inputs are on-chain metrics
@@ -137,16 +149,23 @@ impl AIAdaptiveConsensus {
     /// **AI-powered Validator Adjustment & Auto-Penalty**
     pub fn adjust_validators(&mut self) {
         for (id, validator) in self.validators.iter_mut() {
-            let score = (validator.reputation * 0.8) - (validator.latency as f64 * 0.2) + (validator.stake * 0.05);
+            let score = (validator.reputation * 0.8) - (validator.latency as f64 * 0.2)
+                + (validator.stake * 0.05);
 
             if score < 0.5 {
                 validator.reputation *= 0.85; // Penalize bad validators
-                validator.stake *= 0.95;      // Reduce stake as penalty
-                warn!("Validator {} penalized. New Reputation: {:.2}, New Stake: {:.2}", id, validator.reputation, validator.stake);
+                validator.stake *= 0.95; // Reduce stake as penalty
+                warn!(
+                    "Validator {} penalized. New Reputation: {:.2}, New Stake: {:.2}",
+                    id, validator.reputation, validator.stake
+                );
             } else {
                 validator.reputation *= 1.1; // Reward good validators
-                validator.stake *= 1.05;     // Increase stake as reward
-                info!("Validator {} rewarded. New Reputation: {:.2}, New Stake: {:.2}", id, validator.reputation, validator.stake);
+                validator.stake *= 1.05; // Increase stake as reward
+                info!(
+                    "Validator {} rewarded. New Reputation: {:.2}, New Stake: {:.2}",
+                    id, validator.reputation, validator.stake
+                );
             }
         }
     }
@@ -157,7 +176,10 @@ impl AIAdaptiveConsensus {
         let recommended_mode = self.predict_best_consensus();
 
         if self.consensus_mode != recommended_mode {
-            info!("Consensus mode changed: {:?} → {:?}", self.consensus_mode, recommended_mode);
+            info!(
+                "Consensus mode changed: {:?} → {:?}",
+                self.consensus_mode, recommended_mode
+            );
             self.consensus_mode = recommended_mode;
         }
 
@@ -183,8 +205,8 @@ impl AIAdaptiveConsensus {
     /// **Retrieve Real Blockchain Metrics**
     fn get_real_network_metrics(&self) -> (u64, u64, f64) {
         // **🚀 REAL-TIME NETWORK DATA FETCHING FROM BLEEP BLOCKCHAIN**
-        let load = self.fetch_network_load();          // % Load
-        let latency = self.fetch_average_latency();    // ms
+        let load = self.fetch_network_load(); // % Load
+        let latency = self.fetch_average_latency(); // ms
         let reliability = self.fetch_blockchain_health_score(); // 0.0 - 1.0
 
         (load, latency, reliability)

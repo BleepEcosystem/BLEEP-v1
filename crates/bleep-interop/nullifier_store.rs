@@ -131,7 +131,10 @@ impl GlobalNullifierSet {
             .write_opt(batch, &write_opts)
             .map_err(|e| NullifierError::Store(e.to_string()))?;
 
-        log::debug!("[NullifierStore] Nullifier spent: {}", hex::encode(nullifier));
+        log::debug!(
+            "[NullifierStore] Nullifier spent: {}",
+            hex::encode(nullifier)
+        );
         Ok(())
     }
 
@@ -150,7 +153,9 @@ impl GlobalNullifierSet {
             Some(c) => c,
             None => return 0,
         };
-        self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start).count()
+        self.db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .count()
     }
 
     /// Returns `true` if no nullifiers have been recorded yet.
@@ -215,7 +220,8 @@ mod tests {
         // Reproduce the SA-C1 scenario: same proof submitted twice.
         let ns = store();
         let nullifier = [0xDE; 32];
-        ns.spend(nullifier).expect("first proof submission must succeed");
+        ns.spend(nullifier)
+            .expect("first proof submission must succeed");
         let result = ns.spend(nullifier);
         assert!(
             matches!(result, Err(NullifierError::AlreadySpent(_))),
@@ -231,4 +237,4 @@ mod tests {
         // The clone should see the same spent nullifier.
         assert!(ns2.is_spent(&[0x11; 32]));
     }
-           }
+}

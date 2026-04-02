@@ -2,19 +2,16 @@
 //! Bridges the WasmRuntime to the Engine trait used by the VM router.
 
 use crate::error::{VmError, VmResult};
-use crate::execution::{
-    execution_context::ExecutionContext,
-    state_transition::StateDiff,
-};
+use crate::execution::{execution_context::ExecutionContext, state_transition::StateDiff};
 use crate::intent::TargetVm;
 use crate::router::vm_router::{Engine, EngineResult};
 use crate::types::{ExecutionLog, LogLevel};
+use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
-use parking_lot::RwLock;
 use tracing::{debug, instrument};
 
 type WasmStore = Arc<RwLock<HashMap<[u8; 32], Vec<u8>>>>;
@@ -34,14 +31,16 @@ impl WasmEngineAdapter {
     fn derive_address(bytecode: &[u8], salt: Option<[u8; 32]>) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(bytecode);
-        if let Some(s) = salt { h.update(s); }
+        if let Some(s) = salt {
+            h.update(s);
+        }
         h.finalize().into()
     }
 
     fn execute_wasm(
         &self,
-        bytecode:  &[u8],
-        calldata:  &[u8],
+        bytecode: &[u8],
+        calldata: &[u8],
         gas_limit: u64,
     ) -> VmResult<(bool, Vec<u8>, u64, Vec<ExecutionLog>)> {
         use wasmer::{imports, Instance, Module, Store, Value};
@@ -100,7 +99,7 @@ impl WasmEngineAdapter {
             .map_err(|e| VmError::ExecutionFailed(format!("WASM instantiate error: {e}")))?;
 
         let entry_points = ["execute", "call", "main", "_start", "invoke"];
-        let mut output  = Vec::new();
+        let mut output = Vec::new();
         let mut success = false;
         let mut last_err: Option<String> = None;
 
@@ -125,7 +124,10 @@ impl WasmEngineAdapter {
 
         if !success && last_err.is_some() {
             // All entry points failed — return error only if we actually tried one
-            if entry_points.iter().any(|ep| instance.exports.get_function(ep).is_ok()) {
+            if entry_points
+                .iter()
+                .any(|ep| instance.exports.get_function(ep).is_ok())
+            {
                 return Err(VmError::ExecutionFailed(
                     last_err.unwrap_or_else(|| "WASM execution failed".into()),
                 ));
@@ -135,11 +137,14 @@ impl WasmEngineAdapter {
         }
 
         let collected = log_store.read().clone();
-        let logs: Vec<ExecutionLog> = collected.into_iter().map(|msg| ExecutionLog {
-            level:   LogLevel::Info,
-            message: msg,
-            data:    Vec::new(),
-        }).collect();
+        let logs: Vec<ExecutionLog> = collected
+            .into_iter()
+            .map(|msg| ExecutionLog {
+                level: LogLevel::Info,
+                message: msg,
+                data: Vec::new(),
+            })
+            .collect();
 
         let gas_used = gas_limit
             .saturating_sub(gas_remaining.load(Ordering::Relaxed))
@@ -150,12 +155,16 @@ impl WasmEngineAdapter {
 }
 
 impl Default for WasmEngineAdapter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait::async_trait]
 impl Engine for WasmEngineAdapter {
-    fn name(&self) -> &'static str { "wasm-wasmer" }
+    fn name(&self) -> &'static str {
+        "wasm-wasmer"
+    }
 
     fn supports(&self, vm: &TargetVm) -> bool {
         matches!(vm, TargetVm::Wasm | TargetVm::Auto)
@@ -164,9 +173,9 @@ impl Engine for WasmEngineAdapter {
     #[instrument(skip(self, bytecode, calldata), fields(engine = "wasm-wasmer"))]
     async fn execute(
         &self,
-        ctx:       &ExecutionContext,
-        bytecode:  &[u8],
-        calldata:  &[u8],
+        ctx: &ExecutionContext,
+        bytecode: &[u8],
+        calldata: &[u8],
         gas_limit: u64,
     ) -> VmResult<EngineResult> {
         let start = Instant::now();
@@ -180,42 +189,51 @@ impl Engine for WasmEngineAdapter {
 
         if effective_bytecode.is_empty() {
             return Ok(EngineResult {
-                success:       true,
-                output:        calldata.to_vec(),
-                gas_used:      1_000,
-                state_diff:    StateDiff::empty(),
-                logs:          Vec::new(),
+                success: true,
+                output: calldata.to_vec(),
+                gas_used: 1_000,
+                state_diff: StateDiff::empty(),
+                logs: Vec::new(),
                 revert_reason: None,
-                exec_time:     start.elapsed(),
+                exec_time: start.elapsed(),
             });
         }
 
         let (success, output, gas_used, logs) =
             self.execute_wasm(&effective_bytecode, calldata, gas_limit)?;
 
-        debug!(success, gas_used, output_len = output.len(), "WASM execution complete");
+        debug!(
+            success,
+            gas_used,
+            output_len = output.len(),
+            "WASM execution complete"
+        );
 
         Ok(EngineResult {
             success,
             output,
             gas_used,
-            state_diff:    StateDiff::empty(),
+            state_diff: StateDiff::empty(),
             logs,
-            revert_reason: if success { None } else { Some("WASM execution failed".into()) },
-            exec_time:     start.elapsed(),
+            revert_reason: if success {
+                None
+            } else {
+                Some("WASM execution failed".into())
+            },
+            exec_time: start.elapsed(),
         })
     }
 
     #[instrument(skip(self, bytecode, init_args), fields(engine = "wasm-wasmer"))]
     async fn deploy(
         &self,
-        _ctx:      &ExecutionContext,
-        bytecode:  &[u8],
+        _ctx: &ExecutionContext,
+        bytecode: &[u8],
         init_args: &[u8],
         gas_limit: u64,
-        salt:      Option<[u8; 32]>,
+        salt: Option<[u8; 32]>,
     ) -> VmResult<EngineResult> {
-        let start   = Instant::now();
+        let start = Instant::now();
         let address = Self::derive_address(bytecode, salt);
 
         {
@@ -223,9 +241,9 @@ impl Engine for WasmEngineAdapter {
             modules.insert(address, bytecode.to_vec());
         }
 
-        let (success, output, gas_used, logs) =
-            self.execute_wasm(bytecode, init_args, gas_limit)
-                .unwrap_or((true, Vec::new(), 50_000, Vec::new()));
+        let (success, output, gas_used, logs) = self
+            .execute_wasm(bytecode, init_args, gas_limit)
+            .unwrap_or((true, Vec::new(), 50_000, Vec::new()));
 
         let mut diff = StateDiff::empty();
         diff.deploy_code(address, bytecode.to_vec());
@@ -233,7 +251,11 @@ impl Engine for WasmEngineAdapter {
 
         Ok(EngineResult {
             success,
-            output: if output.is_empty() { address.to_vec() } else { output },
+            output: if output.is_empty() {
+                address.to_vec()
+            } else {
+                output
+            },
             gas_used,
             state_diff: diff,
             logs,
@@ -251,8 +273,12 @@ mod tests {
 
     fn ctx(gas: u64) -> ExecutionContext {
         ExecutionContext::new(
-            BlockEnv::default(), TxEnv::default(), gas,
-            ChainId::Bleep, uuid::Uuid::new_v4(), 128,
+            BlockEnv::default(),
+            TxEnv::default(),
+            gas,
+            ChainId::Bleep,
+            uuid::Uuid::new_v4(),
+            128,
         )
     }
 
@@ -296,7 +322,11 @@ mod tests {
         let e = WasmEngineAdapter::new();
         let c = ctx(1_000_000);
         let result = e.execute(&c, &wasm, &[], 1_000_000).await;
-        assert!(result.is_ok(), "passive wasm must succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "passive wasm must succeed: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().success);
     }
 }

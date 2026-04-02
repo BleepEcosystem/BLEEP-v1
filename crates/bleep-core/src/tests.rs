@@ -16,7 +16,7 @@ mod tests {
     fn test_signature_verification() {
         let transactions = vec![];
         let mut block = Block::new(1, transactions, "genesis_hash".to_string());
-        
+
         let (public_key, private_key) = SphincsPlus::keypair();
         block.sign_block(&private_key);
 

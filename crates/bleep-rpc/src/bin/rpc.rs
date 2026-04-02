@@ -10,11 +10,11 @@
 //!   POST /tx/send  { to, amount }    → { tx_id }
 //!   GET  /telemetry                  → { blocks, txs, uptime_secs }
 
-use std::sync::{Arc,};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tracing::{info};
+use tracing::info;
 use warp::{Filter, Rejection, Reply};
 
 // ─── Shared state the RPC server reads ───────────────────────────────────────
@@ -186,9 +186,16 @@ fn build_routes(
                 h.update(ts.to_le_bytes());
                 hex::encode(&h.finalize()[..16])
             };
-            st.tx_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            info!("TX queued: {} → {} for {} (id={})", body.from, body.to, body.amount, tx_id);
-            warp::reply::json(&TxResponse { tx_id, accepted: true })
+            st.tx_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            info!(
+                "TX queued: {} → {} for {} (id={})",
+                body.from, body.to, body.amount, tx_id
+            );
+            warp::reply::json(&TxResponse {
+                tx_id,
+                accepted: true,
+            })
         });
 
     // GET /telemetry

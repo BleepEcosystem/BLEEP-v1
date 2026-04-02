@@ -9,22 +9,22 @@
 // 5. Thresholds are protocol rules (mutable via governance)
 // 6. Emergency rollback is available if monitoring fails
 
-use serde::{Serialize, Deserialize};
-use log::{info, warn, error};
-use thiserror::Error;
+use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum InvariantError {
     #[error("Invariant violated: {0}")]
     InvariantViolation(String),
-    
+
     #[error("Monitoring failed: {0}")]
     MonitoringFailed(String),
-    
+
     #[error("Invalid threshold: {0}")]
     InvalidThreshold(String),
-    
+
     #[error("Serialization error: {0}")]
     SerializationError(String),
 }
@@ -34,28 +34,28 @@ pub enum InvariantError {
 pub enum InvariantType {
     /// Network liveness: validators must produce blocks
     Liveness,
-    
+
     /// Safety: finality must be achieved
     Finality,
-    
+
     /// State coherence: all shards must agree on state
     StateCoherence,
-    
+
     /// Validator health: enough active validators
     ValidatorHealth,
-    
+
     /// Consensus participation: sufficient validator participation
     ConsensusParticipation,
-    
+
     /// Slashing correctness: slashing events are valid
     SlashingCorrectness,
-    
+
     /// Checkpoint integrity: checkpoints are valid
     CheckpointIntegrity,
-    
+
     /// Cross-shard consistency: cross-shard transactions are consistent
     CrossShardConsistency,
-    
+
     /// AI performance: AI proposals are performing well
     AIPerformance,
 }
@@ -81,16 +81,16 @@ impl InvariantType {
 pub struct InvariantThreshold {
     /// Invariant being monitored
     pub invariant_type: InvariantType,
-    
+
     /// Threshold value (e.g., minimum percentage)
     pub threshold: f64,
-    
+
     /// Number of consecutive epochs threshold must be violated
     pub violation_window: u64,
-    
+
     /// Whether violation triggers automatic rollback
     pub triggers_rollback: bool,
-    
+
     /// Severity level (informational, warning, critical)
     pub severity: InvariantSeverity,
 }
@@ -99,13 +99,13 @@ pub struct InvariantThreshold {
 pub enum InvariantSeverity {
     /// Informational, no action required
     Informational,
-    
+
     /// Warning, should be monitored
     Warning,
-    
+
     /// Critical, triggers investigation
     Critical,
-    
+
     /// Fatal, triggers rollback
     Fatal,
 }
@@ -119,11 +119,12 @@ impl InvariantThreshold {
         severity: InvariantSeverity,
     ) -> Result<Self, InvariantError> {
         if threshold < 0.0 || threshold > 100.0 {
-            return Err(InvariantError::InvalidThreshold(
-                format!("Threshold must be [0, 100], got {}", threshold)
-            ));
+            return Err(InvariantError::InvalidThreshold(format!(
+                "Threshold must be [0, 100], got {}",
+                threshold
+            )));
         }
-        
+
         Ok(InvariantThreshold {
             invariant_type,
             threshold,
@@ -139,25 +140,25 @@ impl InvariantThreshold {
 pub struct ViolationRecord {
     /// Type of invariant violated
     pub invariant_type: InvariantType,
-    
+
     /// Epoch when violation occurred
     pub epoch: u64,
-    
+
     /// Block height when violation detected
     pub block_height: u64,
-    
+
     /// Actual measured value
     pub measured_value: f64,
-    
+
     /// Expected threshold
     pub threshold: f64,
-    
+
     /// Detailed description
     pub description: String,
-    
+
     /// Whether rollback was triggered
     pub triggered_rollback: bool,
-    
+
     /// Proposal ID that caused this violation (if applicable)
     pub proposal_id: Option<String>,
 }
@@ -167,16 +168,16 @@ pub struct ViolationRecord {
 pub struct InvariantMonitor {
     /// Shard ID
     pub shard_id: u32,
-    
+
     /// Thresholds being monitored
     pub thresholds: HashMap<String, InvariantThreshold>,
-    
+
     /// Current violation counts (invariant_type -> violation_count)
     pub violation_counts: HashMap<String, u64>,
-    
+
     /// History of all violations
     pub violation_history: Vec<ViolationRecord>,
-    
+
     /// Current epoch
     pub current_epoch: u64,
 }
@@ -191,23 +192,24 @@ impl InvariantMonitor {
             current_epoch: 0,
         }
     }
-    
+
     /// Add a threshold to monitor
     pub fn add_threshold(&mut self, threshold: InvariantThreshold) -> Result<(), InvariantError> {
         let key = threshold.invariant_type.as_str().to_string();
-        
+
         if self.thresholds.contains_key(&key) {
-            return Err(InvariantError::InvalidThreshold(
-                format!("Threshold {} already exists", key)
-            ));
+            return Err(InvariantError::InvalidThreshold(format!(
+                "Threshold {} already exists",
+                key
+            )));
         }
-        
+
         self.thresholds.insert(key, threshold);
         Ok(())
     }
-    
+
     /// Check a single invariant
-    /// 
+    ///
     /// SAFETY: Returns whether invariant is violated and if rollback triggered
     pub fn check_invariant(
         &mut self,
@@ -219,21 +221,20 @@ impl InvariantMonitor {
         proposal_id: Option<String>,
     ) -> Result<bool, InvariantError> {
         self.current_epoch = epoch;
-        
+
         let key = invariant_type.as_str().to_string();
-        let threshold = self.thresholds.get(&key)
-            .ok_or_else(|| InvariantError::MonitoringFailed(
-                format!("No threshold defined for {}", key)
-            ))?;
-        
+        let threshold = self.thresholds.get(&key).ok_or_else(|| {
+            InvariantError::MonitoringFailed(format!("No threshold defined for {}", key))
+        })?;
+
         // Check if value violates threshold
         let is_violated = measured_value < threshold.threshold;
-        
+
         if is_violated {
             // Increment violation counter
             let count = self.violation_counts.entry(key.clone()).or_insert(0);
             *count += 1;
-            
+
             // Record violation
             let record = ViolationRecord {
                 invariant_type,
@@ -245,10 +246,11 @@ impl InvariantMonitor {
                 triggered_rollback: false,
                 proposal_id: proposal_id.clone(),
             };
-            
+
             // Check if rollback should trigger
-            let triggers_rollback = *count >= threshold.violation_window && threshold.triggers_rollback;
-            
+            let triggers_rollback =
+                *count >= threshold.violation_window && threshold.triggers_rollback;
+
             let mut final_record = record;
             if triggers_rollback {
                 final_record.triggered_rollback = true;
@@ -259,17 +261,26 @@ impl InvariantMonitor {
             } else {
                 match threshold.severity {
                     InvariantSeverity::Informational => {
-                        info!("Invariant warning: {} = {} (threshold {})", key, measured_value, threshold.threshold);
-                    },
+                        info!(
+                            "Invariant warning: {} = {} (threshold {})",
+                            key, measured_value, threshold.threshold
+                        );
+                    }
                     InvariantSeverity::Warning => {
-                        warn!("Invariant warning: {} = {} (threshold {})", key, measured_value, threshold.threshold);
-                    },
+                        warn!(
+                            "Invariant warning: {} = {} (threshold {})",
+                            key, measured_value, threshold.threshold
+                        );
+                    }
                     InvariantSeverity::Critical | InvariantSeverity::Fatal => {
-                        error!("INVARIANT VIOLATION: {} = {} (threshold {})", key, measured_value, threshold.threshold);
-                    },
+                        error!(
+                            "INVARIANT VIOLATION: {} = {} (threshold {})",
+                            key, measured_value, threshold.threshold
+                        );
+                    }
                 }
             }
-            
+
             self.violation_history.push(final_record);
             Ok(triggers_rollback)
         } else {
@@ -278,23 +289,24 @@ impl InvariantMonitor {
             Ok(false)
         }
     }
-    
+
     /// Perform deterministic invariant health check
-    /// 
+    ///
     /// SAFETY: Returns aggregate health status
     pub fn health_status(&self) -> HealthStatus {
         let total_invariants = self.thresholds.len();
-        let violated = self.violation_counts
+        let violated = self
+            .violation_counts
             .values()
             .filter(|&count| *count > 0)
             .count();
-        
+
         let health_percentage = if total_invariants == 0 {
             100.0
         } else {
             ((total_invariants - violated) as f64 / total_invariants as f64) * 100.0
         };
-        
+
         HealthStatus {
             health_percentage,
             total_invariants: total_invariants as u64,
@@ -302,12 +314,12 @@ impl InvariantMonitor {
             is_healthy: violated == 0,
         }
     }
-    
+
     /// Reset epoch violations (called at epoch boundary)
     pub fn reset_epoch_violations(&mut self) {
         self.violation_counts.clear();
     }
-    
+
     /// Get violation history for specific invariant
     pub fn violation_history_for(&self, invariant_type: InvariantType) -> Vec<&ViolationRecord> {
         let key = invariant_type.as_str();
@@ -323,13 +335,13 @@ impl InvariantMonitor {
 pub struct HealthStatus {
     /// Overall health percentage [0, 100]
     pub health_percentage: f64,
-    
+
     /// Total invariants monitored
     pub total_invariants: u64,
-    
+
     /// Number of violated invariants
     pub violated_count: u64,
-    
+
     /// Is system healthy
     pub is_healthy: bool,
 }
@@ -338,7 +350,7 @@ pub struct HealthStatus {
 pub struct GlobalInvariantMonitor {
     /// Per-shard monitors
     monitors: HashMap<u32, InvariantMonitor>,
-    
+
     /// Genesis thresholds (default for all shards)
     genesis_thresholds: Vec<InvariantThreshold>,
 }
@@ -355,66 +367,67 @@ impl GlobalInvariantMonitor {
                     2,    // 2 consecutive epoch violations
                     true, // Triggers rollback
                     InvariantSeverity::Fatal,
-                ).unwrap(),
-                
+                )
+                .unwrap(),
                 InvariantThreshold::new(
                     InvariantType::Finality,
                     66.0, // At least 66% finality
                     1,
                     true,
                     InvariantSeverity::Fatal,
-                ).unwrap(),
-                
+                )
+                .unwrap(),
                 InvariantThreshold::new(
                     InvariantType::ValidatorHealth,
                     75.0, // At least 75% validators healthy
                     3,
                     true,
                     InvariantSeverity::Critical,
-                ).unwrap(),
-                
+                )
+                .unwrap(),
                 InvariantThreshold::new(
                     InvariantType::ConsensusParticipation,
                     60.0, // At least 60% participation
                     2,
                     false, // Warning only
                     InvariantSeverity::Warning,
-                ).unwrap(),
-                
+                )
+                .unwrap(),
                 InvariantThreshold::new(
                     InvariantType::AIPerformance,
                     50.0, // AI proposals >= 50% acceptance
                     5,
                     false,
                     InvariantSeverity::Warning,
-                ).unwrap(),
+                )
+                .unwrap(),
             ],
         }
     }
-    
+
     /// Get or create monitor for shard
     pub fn get_or_create_monitor(&mut self, shard_id: u32) -> &mut InvariantMonitor {
         self.monitors.entry(shard_id).or_insert_with(|| {
             let mut monitor = InvariantMonitor::new(shard_id);
-            
+
             // Add genesis thresholds
             for threshold in &self.genesis_thresholds {
                 let _ = monitor.add_threshold(threshold.clone());
             }
-            
+
             monitor
         })
     }
-    
+
     /// Get global health across all shards
     pub fn global_health(&self) -> GlobalHealth {
         let mut total_health = 0.0;
         let shard_count = self.monitors.len();
-        
+
         let mut min_health: f64 = 100.0;
         let mut max_health: f64 = 0.0;
         let mut total_violated = 0u64;
-        
+
         for monitor in self.monitors.values() {
             let status = monitor.health_status();
             total_health += status.health_percentage;
@@ -422,13 +435,13 @@ impl GlobalInvariantMonitor {
             max_health = max_health.max(status.health_percentage);
             total_violated += status.violated_count;
         }
-        
+
         let avg_health = if shard_count > 0 {
             total_health / shard_count as f64
         } else {
             100.0
         };
-        
+
         GlobalHealth {
             average_health: avg_health,
             min_health,
@@ -462,8 +475,9 @@ mod tests {
             2,
             true,
             InvariantSeverity::Fatal,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert_eq!(threshold.threshold, 80.0);
         assert_eq!(threshold.violation_window, 2);
         assert!(threshold.triggers_rollback);
@@ -472,65 +486,73 @@ mod tests {
     #[test]
     fn test_invariant_monitor() {
         let mut monitor = InvariantMonitor::new(0);
-        
+
         let threshold = InvariantThreshold::new(
             InvariantType::Liveness,
             80.0,
             2,
             true,
             InvariantSeverity::Fatal,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         monitor.add_threshold(threshold).unwrap();
-        
+
         // Check passing invariant
-        let violates1 = monitor.check_invariant(
-            InvariantType::Liveness,
-            85.0,
-            "Test".to_string(),
-            1,
-            100,
-            None,
-        ).unwrap();
+        let violates1 = monitor
+            .check_invariant(
+                InvariantType::Liveness,
+                85.0,
+                "Test".to_string(),
+                1,
+                100,
+                None,
+            )
+            .unwrap();
         assert!(!violates1);
-        
+
         // Check failing invariant
-        let violates2 = monitor.check_invariant(
-            InvariantType::Liveness,
-            70.0,
-            "Test".to_string(),
-            2,
-            200,
-            None,
-        ).unwrap();
+        let violates2 = monitor
+            .check_invariant(
+                InvariantType::Liveness,
+                70.0,
+                "Test".to_string(),
+                2,
+                200,
+                None,
+            )
+            .unwrap();
         assert!(!violates2); // Not yet at violation window
-        
+
         // Check second violation
-        let violates3 = monitor.check_invariant(
-            InvariantType::Liveness,
-            70.0,
-            "Test".to_string(),
-            3,
-            300,
-            None,
-        ).unwrap();
+        let violates3 = monitor
+            .check_invariant(
+                InvariantType::Liveness,
+                70.0,
+                "Test".to_string(),
+                3,
+                300,
+                None,
+            )
+            .unwrap();
         assert!(violates3); // Now triggers rollback
     }
 
     #[test]
     fn test_health_status() {
         let mut monitor = InvariantMonitor::new(0);
-        
+
         let threshold = InvariantThreshold::new(
             InvariantType::Liveness,
             80.0,
             1,
             false,
             InvariantSeverity::Warning,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         monitor.add_threshold(threshold).unwrap();
-        
+
         let status = monitor.health_status();
         assert!(status.is_healthy);
         assert_eq!(status.total_invariants, 1);
@@ -540,13 +562,13 @@ mod tests {
     #[test]
     fn test_global_invariant_monitor() {
         let mut global_monitor = GlobalInvariantMonitor::new();
-        
+
         let monitor1 = global_monitor.get_or_create_monitor(0);
         assert_eq!(monitor1.shard_id, 0);
-        
+
         let monitor2 = global_monitor.get_or_create_monitor(1);
         assert_eq!(monitor2.shard_id, 1);
-        
+
         let health = global_monitor.global_health();
         assert_eq!(health.total_shards, 2);
         assert!(health.is_globally_healthy);

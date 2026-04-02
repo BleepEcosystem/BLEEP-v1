@@ -2,8 +2,8 @@
 mod tests {
     use super::*;
     use rand::Rng;
-    use tokio::runtime::Runtime;
     use std::sync::Arc;
+    use tokio::runtime::Runtime;
 
     // 🔹 Test Quantum-Resistant Transaction Signing & Verification
     #[test]
@@ -11,7 +11,10 @@ mod tests {
         let (sk, pk) = falcon::keygen().expect("Falcon keygen failed");
         let transaction = Transaction::new(1, "Alice", "Bob", 100, &sk, &pk);
 
-        assert!(transaction.verify(), "Transaction signature verification failed");
+        assert!(
+            transaction.verify(),
+            "Transaction signature verification failed"
+        );
     }
 
     // 🔹 Test SHA3-256 Hashing of Transactions
@@ -57,7 +60,10 @@ mod tests {
         blockchain.add_transaction(transaction.clone()).await;
         let mempool = blockchain.mempool.read().await;
 
-        assert!(mempool.contains(&transaction), "Transaction not found in mempool");
+        assert!(
+            mempool.contains(&transaction),
+            "Transaction not found in mempool"
+        );
     }
 
     // 🔹 Test Adding a Block to Blockchain
@@ -79,13 +85,22 @@ mod tests {
         let mut consensus = AdaptiveConsensus::new();
 
         consensus.switch_mode(90);
-        assert_eq!(consensus.consensus_mode, "PoW", "Consensus mode should switch to PoW");
+        assert_eq!(
+            consensus.consensus_mode, "PoW",
+            "Consensus mode should switch to PoW"
+        );
 
         consensus.switch_mode(50);
-        assert_eq!(consensus.consensus_mode, "PBFT", "Consensus mode should switch to PBFT");
+        assert_eq!(
+            consensus.consensus_mode, "PBFT",
+            "Consensus mode should switch to PBFT"
+        );
 
         consensus.switch_mode(20);
-        assert_eq!(consensus.consensus_mode, "PoS", "Consensus mode should switch to PoS");
+        assert_eq!(
+            consensus.consensus_mode, "PoS",
+            "Consensus mode should switch to PoS"
+        );
     }
 
     // 🔹 Test ZKP Proof Generation
@@ -93,7 +108,8 @@ mod tests {
     fn test_zkp_proof_generation() {
         let proving_key = ProvingKey::<Bls12_381>::default();
         let verifying_key = VerifyingKey::<Bls12_381>::default();
-        let zkp_module = BLEEPZKPModule::new(proving_key, verifying_key).expect("ZKP module initialization failed");
+        let zkp_module = BLEEPZKPModule::new(proving_key, verifying_key)
+            .expect("ZKP module initialization failed");
 
         let circuits: Vec<DummyCircuit<Fr>> = vec![DummyCircuit::default(); 5];
         let proofs = zkp_module.generate_batch_proofs(circuits);
@@ -104,7 +120,11 @@ mod tests {
     // 🔹 Test Asset Recovery Request Submission
     #[test]
     fn test_asset_recovery_submission() {
-        let request = AssetRecoveryRequest::new(String::from("asset123"), String::from("owner123"), String::from("zk-proof"));
+        let request = AssetRecoveryRequest::new(
+            String::from("asset123"),
+            String::from("owner123"),
+            String::from("zk-proof"),
+        );
 
         assert!(request.submit(), "Asset recovery request submission failed");
     }
@@ -112,16 +132,27 @@ mod tests {
     // 🔹 Test Asset Recovery Request Validation
     #[test]
     fn test_asset_recovery_validation() {
-        let mut request = AssetRecoveryRequest::new(String::from("asset456"), String::from("owner456"), String::from("zk-proof"));
+        let mut request = AssetRecoveryRequest::new(
+            String::from("asset456"),
+            String::from("owner456"),
+            String::from("zk-proof"),
+        );
 
-        assert!(request.validate(), "Asset recovery request validation failed");
+        assert!(
+            request.validate(),
+            "Asset recovery request validation failed"
+        );
     }
 
     // 🔹 Test Asset Recovery Finalization
     #[test]
     fn test_asset_recovery_finalization() {
-        let mut request = AssetRecoveryRequest::new(String::from("asset789"), String::from("owner789"), String::from("zk-proof"));
-        request.approvals = MIN_APPROVALS;  // Simulate enough approvals
+        let mut request = AssetRecoveryRequest::new(
+            String::from("asset789"),
+            String::from("owner789"),
+            String::from("zk-proof"),
+        );
+        request.approvals = MIN_APPROVALS; // Simulate enough approvals
 
         assert!(request.finalize(), "Asset recovery finalization failed");
     }

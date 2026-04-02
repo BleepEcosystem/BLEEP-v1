@@ -1,27 +1,36 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use log::info;
+    use std::collections::HashMap;
 
     /// **Helper function: Create mock validators**
     fn mock_validators() -> HashMap<String, Validator> {
         let mut validators = HashMap::new();
-        validators.insert("Validator1".to_string(), Validator {
-            reputation: 0.8,
-            latency: 30,
-            stake: 1000.0,
-        });
-        validators.insert("Validator2".to_string(), Validator {
-            reputation: 0.6,
-            latency: 50,
-            stake: 750.0,
-        });
-        validators.insert("Validator3".to_string(), Validator {
-            reputation: 0.9,
-            latency: 20,
-            stake: 1500.0,
-        });
+        validators.insert(
+            "Validator1".to_string(),
+            Validator {
+                reputation: 0.8,
+                latency: 30,
+                stake: 1000.0,
+            },
+        );
+        validators.insert(
+            "Validator2".to_string(),
+            Validator {
+                reputation: 0.6,
+                latency: 50,
+                stake: 750.0,
+            },
+        );
+        validators.insert(
+            "Validator3".to_string(),
+            Validator {
+                reputation: 0.9,
+                latency: 20,
+                stake: 1500.0,
+            },
+        );
         validators
     }
 
@@ -60,7 +69,10 @@ mod tests {
         ai_consensus.collect_metrics(30, 20, 0.95); // Low load, low latency → Should predict PoS
 
         let predicted_mode = ai_consensus.predict_best_consensus();
-        assert!(matches!(predicted_mode, ConsensusMode::PoW | ConsensusMode::PBFT | ConsensusMode::PoS));
+        assert!(matches!(
+            predicted_mode,
+            ConsensusMode::PoW | ConsensusMode::PBFT | ConsensusMode::PoS
+        ));
     }
 
     /// **Test Validator Reputation & Staking Adjustments**

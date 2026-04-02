@@ -11,11 +11,11 @@
 // 7. Detection is DETERMINISTIC and VERIFIABLE by any node
 // 8. Faults cannot be detected and then disputed without evidence
 
-use crate::shard_registry::{ShardId, EpochId};
+use crate::shard_registry::{EpochId, ShardId};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use log::{info, warn, error};
-use std::collections::{HashMap, BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Fault type enumeration - comprehensive Byzantine fault classification
 ///
@@ -394,7 +394,10 @@ impl AdvancedFaultDetector {
         }
 
         let key = (shard_id, block_height);
-        let signatures = self.block_signatures.entry(key).or_insert_with(HashSet::new);
+        let signatures = self
+            .block_signatures
+            .entry(key)
+            .or_insert_with(HashSet::new);
 
         // Equivocation requires two different blocks signed by same validator
         if !signatures.contains(&validator_pubkey) {
@@ -446,21 +449,24 @@ impl AdvancedFaultDetector {
         last_block_height: u64,
         last_block_epoch: EpochId,
     ) -> Option<FaultEvidence> {
-        let epochs_since = self.current_epoch.as_u64().saturating_sub(last_block_epoch.as_u64());
+        let epochs_since = self
+            .current_epoch
+            .as_u64()
+            .saturating_sub(last_block_epoch.as_u64());
 
         if epochs_since < self.config.liveness_timeout_epochs {
             return None; // Still within timeout
         }
 
-        let liveness_data = self
-            .shard_liveness
-            .entry(shard_id)
-            .or_insert_with(|| ShardLivenessData {
-                last_block_height,
-                last_block_epoch,
-                missed_blocks: 0,
-                consecutive_misses: 0,
-            });
+        let liveness_data =
+            self.shard_liveness
+                .entry(shard_id)
+                .or_insert_with(|| ShardLivenessData {
+                    last_block_height,
+                    last_block_epoch,
+                    missed_blocks: 0,
+                    consecutive_misses: 0,
+                });
 
         liveness_data.consecutive_misses = epochs_since;
         liveness_data.missed_blocks = liveness_data.missed_blocks.saturating_add(epochs_since);
@@ -616,7 +622,7 @@ impl AdvancedFaultDetector {
     pub fn total_detected(&self) -> u64 {
         self.total_faults_detected
     }
-    
+
     /// Get shard state history for a specific shard
     pub fn get_shard_history(&self, shard_id: &ShardId) -> Option<&VecDeque<ShardSnapshot>> {
         self.shard_state_history.get(shard_id)
@@ -689,11 +695,7 @@ mod tests {
         let mut detector = AdvancedFaultDetector::new(FaultDetectionConfig::default());
         detector.update_epoch(EpochId(25));
 
-        let evidence = detector.detect_liveness_failure(
-            ShardId(0),
-            50,
-            EpochId(10),
-        );
+        let evidence = detector.detect_liveness_failure(ShardId(0), 50, EpochId(10));
 
         let ev = match evidence {
             Some(ev) => ev,
@@ -717,7 +719,7 @@ mod tests {
             "receipt_1".to_string(),
             "tx_999".to_string(),
             ShardId(1),
-            false,  // tx doesn't exist
+            false, // tx doesn't exist
         );
 
         let ev = match evidence {
@@ -737,13 +739,9 @@ mod tests {
         let mut detector = AdvancedFaultDetector::new(FaultDetectionConfig::default());
         detector.update_epoch(EpochId(10));
 
-        let evidence = detector.detect_state_root_mismatch(
-            ShardId(0),
-            100,
-            "a".to_string(),
-            "b".to_string(),
-            3,
-        ).unwrap();
+        let evidence = detector
+            .detect_state_root_mismatch(ShardId(0), 100, "a".to_string(), "b".to_string(), 3)
+            .unwrap();
 
         let fault_id = match detector.record_fault(evidence) {
             Ok(id) => id,

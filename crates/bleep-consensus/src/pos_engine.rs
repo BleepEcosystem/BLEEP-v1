@@ -1,15 +1,15 @@
 // PROOF-OF-STAKE CONSENSUS ENGINE
 // Validator-based block selection and finalization
-// 
+//
 // SAFETY INVARIANTS:
 // 1. Block proposer is deterministically selected based on stake weight
 // 2. Block signature must be from the selected proposer
 // 3. Validator participation is verifiable on-chain
 // 4. Proposer slashing occurs on double-signing or safety violations
 
-use crate::epoch::EpochState;
 use crate::engine::{ConsensusEngine, ConsensusError};
-use bleep_core::block::{Block, Transaction, ConsensusMode};
+use crate::epoch::EpochState;
+use bleep_core::block::{Block, ConsensusMode, Transaction};
 use bleep_core::blockchain::BlockchainState;
 use log::info;
 
@@ -18,13 +18,13 @@ use log::info;
 pub struct ValidatorStake {
     /// Public key identifier
     pub id: String,
-    
+
     /// Current stake amount
     pub stake: u64,
-    
+
     /// Whether this validator is currently active
     pub active: bool,
-    
+
     /// Number of slashing events
     pub slashing_count: u32,
 }
@@ -44,10 +44,10 @@ impl ValidatorStake {
 pub struct PoSConsensusEngine {
     /// Validator ID (public key)
     validator_id: String,
-    
+
     /// This validator's stake weight
     my_stake: u64,
-    
+
     /// Last block this validator signed
     last_signed_block_height: u64,
 }
@@ -80,13 +80,13 @@ impl PoSConsensusEngine {
     }
 
     /// Select the block proposer for a given height.
-    /// 
+    ///
     /// SAFETY: This function is deterministic.
     /// Same block height + validator set always produces same proposer.
-    /// 
+    ///
     /// Uses weighted random selection: each validator has probability
     /// proportional to their stake.
-    /// 
+    ///
     /// PUBLIC: Called by orchestrator during block proposal selection.
     pub fn select_proposer(
         height: u64,
@@ -94,10 +94,7 @@ impl PoSConsensusEngine {
         prev_block_hash: &str,
     ) -> Result<String, ConsensusError> {
         // Filter to active validators
-        let active: Vec<_> = validators
-            .iter()
-            .filter(|v| v.can_participate())
-            .collect();
+        let active: Vec<_> = validators.iter().filter(|v| v.can_participate()).collect();
 
         if active.is_empty() {
             return Err(ConsensusError::InsufficientValidatorParticipation {
@@ -161,7 +158,7 @@ impl PoSConsensusEngine {
     }
 
     /// Check if a validator is allowed to participate.
-    /// 
+    ///
     /// PUBLIC: Called when validating block proposals.
     pub fn check_validator_health(validator: &ValidatorStake) -> Result<(), ConsensusError> {
         if !validator.active {
@@ -248,9 +245,9 @@ impl ConsensusEngine for PoSConsensusEngine {
             previous_hash,
             epoch_state.epoch_id,
             ConsensusMode::PosNormal,
-            1, // protocol_version
+            1,             // protocol_version
             String::new(), // shard_registry_root
-            0, // shard_id - default to main shard
+            0,             // shard_id - default to main shard
             String::new(), // shard_state_root
         );
 
@@ -339,14 +336,12 @@ mod tests {
 
     #[test]
     fn test_select_proposer_no_active_validators() {
-        let validators = vec![
-            ValidatorStake {
-                id: "v1".to_string(),
-                stake: 100,
-                active: false,
-                slashing_count: 0,
-            },
-        ];
+        let validators = vec![ValidatorStake {
+            id: "v1".to_string(),
+            stake: 100,
+            active: false,
+            slashing_count: 0,
+        }];
 
         let result = PoSConsensusEngine::select_proposer(100, &validators, "hash1");
         assert!(result.is_err());
@@ -397,7 +392,10 @@ mod tests {
     fn test_compute_seed_different_inputs() {
         let seed1 = PoSConsensusEngine::compute_seed(100, "hash1");
         let seed2 = PoSConsensusEngine::compute_seed(101, "hash1");
-        assert_ne!(seed1, seed2, "S-02: different heights must yield different seeds");
+        assert_ne!(
+            seed1, seed2,
+            "S-02: different heights must yield different seeds"
+        );
     }
 
     #[test]
@@ -407,7 +405,7 @@ mod tests {
         h.update(&55u64.to_le_bytes());
         h.update(b"prev_abc");
         let d = h.finalize();
-        let expected = u64::from_le_bytes([d[0],d[1],d[2],d[3],d[4],d[5],d[6],d[7]]);
+        let expected = u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]);
         assert_eq!(
             PoSConsensusEngine::compute_seed(55, "prev_abc"),
             expected,

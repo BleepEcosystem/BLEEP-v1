@@ -1,13 +1,13 @@
 // src/bin/bleep_block.rs
 
-use bleep_crypto::quantum_secure::QuantumSecure;
-use bleep_crypto::tx_signer::generate_tx_keypair;
-use bleep_core::{Block, Blockchain, TransactionPool, Mempool};
 use bleep_core::block::Transaction;
 use bleep_core::transaction::ZKTransaction;
+use bleep_core::{Block, Blockchain, Mempool, TransactionPool};
+use bleep_crypto::quantum_secure::QuantumSecure;
+use bleep_crypto::tx_signer::generate_tx_keypair;
 
+use log::{error, info, warn};
 use std::error::Error;
-use log::{info, warn, error};
 
 #[tokio::main]
 async fn main() {
@@ -24,7 +24,10 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
     let genesis_block = Block::new(0, vec![], "0".repeat(64));
     let tx_pool = TransactionPool::new(10000);
     let mut blockchain = Blockchain::new(genesis_block, Default::default(), tx_pool.clone());
-    info!("✅ Blockchain initialized with {} blocks", blockchain.chain.len());
+    info!(
+        "✅ Blockchain initialized with {} blocks",
+        blockchain.chain.len()
+    );
 
     let quantum_secure = QuantumSecure::keygen();
     let pending_tx = ZKTransaction::new("alice", "bob", 42, &quantum_secure);
@@ -37,8 +40,11 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
     let zk_txs = mempool.get_pending_transactions().await;
     let mut pending_txs: Vec<Transaction> = Vec::with_capacity(zk_txs.len());
     for tx in zk_txs {
-        if !tx.verify(&quantum_secure) {
-            warn!("Skipping invalid transaction from {} to {}", tx.sender, tx.receiver);
+        if !tx.verify() {
+            warn!(
+                "Skipping invalid transaction from {} to {}",
+                tx.sender, tx.receiver
+            );
             continue;
         }
         pending_txs.push(Transaction {
@@ -50,7 +56,10 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    info!("📦 {} transactions collected from mempool", pending_txs.len());
+    info!(
+        "📦 {} transactions collected from mempool",
+        pending_txs.len()
+    );
 
     let last_block = match blockchain.chain.back() {
         Some(block) => block,
@@ -64,7 +73,10 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
 
     let (_sphincs_pk, sphincs_sk) = generate_tx_keypair();
     new_block.sign_block(&sphincs_sk)?;
-    info!("📄 New block created with hash: {}", new_block.compute_hash());
+    info!(
+        "📄 New block created with hash: {}",
+        new_block.compute_hash()
+    );
 
     if !blockchain.add_block(new_block, &[]) {
         return Err("Failed to append new block".into());

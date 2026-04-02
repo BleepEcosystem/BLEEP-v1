@@ -7,7 +7,7 @@
 //! with each accepted block.  Sprint 3 replaces the HashMap with a RocksDB
 //! sparse Merkle trie via bleep-state::state_storage.
 
-use std::collections::{VecDeque, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use crate::block::{Block, Transaction};
@@ -83,7 +83,11 @@ impl BlockchainState {
             if let Err(e) = self.apply_transaction(tx) {
                 log::warn!(
                     "Block {} tx from={} to={} amount={} rejected: {} — rolling back block",
-                    block.index, tx.sender, tx.receiver, tx.amount, e
+                    block.index,
+                    tx.sender,
+                    tx.receiver,
+                    tx.amount,
+                    e
                 );
                 self.balances = snapshot;
                 return Err(e);
@@ -173,7 +177,10 @@ impl Blockchain {
             .transactions
             .iter()
             .map(|tx| {
-                format!("{}:{}:{}:{}", tx.sender, tx.receiver, tx.amount, tx.timestamp)
+                format!(
+                    "{}:{}:{}:{}",
+                    tx.sender, tx.receiver, tx.amount, tx.timestamp
+                )
             })
             .collect();
         tokio::spawn(async move {

@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod phase1_proof_of_concept {
-    use std::collections::{HashMap, BTreeSet};
+    use std::collections::{BTreeSet, HashMap};
 
     // ============ CORE DATA STRUCTURES ============
 
@@ -123,8 +123,8 @@ mod phase1_proof_of_concept {
         }
 
         fn can_participate(&self) -> bool {
-            self.state == ValidatorState::Active 
-                && self.reputation > 0.0 
+            self.state == ValidatorState::Active
+                && self.reputation > 0.0
                 && self.stake > 0
                 && self.double_sign_count == 0
         }
@@ -155,10 +155,7 @@ mod phase1_proof_of_concept {
         }
 
         fn activate(&mut self, id: &str) -> Result<(), String> {
-            let validator = self
-                .validators
-                .get_mut(id)
-                .ok_or("Validator not found")?;
+            let validator = self.validators.get_mut(id).ok_or("Validator not found")?;
 
             validator.activate()?;
             self.active_validators.insert(id.to_string());
@@ -306,7 +303,8 @@ mod phase1_proof_of_concept {
                 return Err("Insufficient quorum".to_string());
             }
 
-            self.finalized_blocks.insert(cert.block_height, cert.clone());
+            self.finalized_blocks
+                .insert(cert.block_height, cert.clone());
             self.highest_finalized = cert.block_height.max(self.highest_finalized);
             Ok(())
         }
@@ -323,7 +321,9 @@ mod phase1_proof_of_concept {
 
     impl EpochConfig {
         fn new(length: u64) -> Self {
-            EpochConfig { epoch_length: length }
+            EpochConfig {
+                epoch_length: length,
+            }
         }
 
         fn epoch_id(&self, height: u64) -> u64 {

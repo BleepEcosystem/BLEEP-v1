@@ -1,6 +1,6 @@
 // PHASE 1: VALIDATOR IDENTITY & POST-QUANTUM SECURITY
 // Each validator has a persistent, post-quantum-secure identity
-// 
+//
 // SAFETY INVARIANTS:
 // 1. Each validator has a unique on-chain identifier
 // 2. Validator keys are cryptographically derived from post-quantum primitives
@@ -8,56 +8,56 @@
 // 4. Double-signing is impossible: same key cannot sign two conflicting blocks
 // 5. Validator lifecycle is enforced via state machine
 
-use serde::{Serialize, Deserialize};
-use std::collections::{HashMap, BTreeSet};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 /// Validator identity using post-quantum cryptography.
-/// 
+///
 /// SAFETY: This structure holds the authoritative validator record.
 /// All validator operations must reference this identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorIdentity {
     /// Unique on-chain validator ID (typically derived from public key)
     pub id: String,
-    
+
     /// Kyber-1024 public key for key encapsulation (post-quantum security)
     pub kyber_public_key: Vec<u8>,
-    
+
     /// Ed25519-style deterministic signing key for protocol messages
     pub signing_key_id: String,
-    
+
     /// Stake amount in microBLEEP
     pub stake: u128,
-    
+
     /// Current state of the validator
     pub state: ValidatorState,
-    
+
     /// Reputation score (0.0 to 1.0)
     pub reputation: f64,
-    
+
     /// Number of double-signing incidents (PERMANENT RECORD)
     pub double_sign_count: u32,
-    
+
     /// Number of equivocation incidents (PERMANENT RECORD)
     pub equivocation_count: u32,
-    
+
     /// Number of downtime incidents
     pub downtime_count: u32,
-    
+
     /// Epoch when validator joined
     pub joined_epoch: u64,
-    
+
     /// Epoch when validator exited (if applicable)
     pub exited_epoch: Option<u64>,
-    
+
     /// Total slashed amount (cumulative across all incidents)
     pub total_slashed: u128,
 }
 
 impl ValidatorIdentity {
     /// Create a new validator identity.
-    /// 
+    ///
     /// SAFETY: This is the only way to register a new validator.
     /// The validator's identity is immutable after registration.
     pub fn new(
@@ -94,7 +94,7 @@ impl ValidatorIdentity {
     }
 
     /// Activate this validator for consensus participation.
-    /// 
+    ///
     /// SAFETY: Can only transition from Inactive → Active
     pub fn activate(&mut self) -> Result<(), String> {
         match self.state {
@@ -102,12 +102,15 @@ impl ValidatorIdentity {
                 self.state = ValidatorState::Active;
                 Ok(())
             }
-            _ => Err(format!("Cannot activate validator in state {:?}", self.state)),
+            _ => Err(format!(
+                "Cannot activate validator in state {:?}",
+                self.state
+            )),
         }
     }
 
     /// Mark validator for exit (pending epoch end).
-    /// 
+    ///
     /// SAFETY: Can transition from Active → PendingExit
     pub fn mark_for_exit(&mut self) -> Result<(), String> {
         match self.state {
@@ -123,7 +126,7 @@ impl ValidatorIdentity {
     }
 
     /// Finalize exit (after pending epoch ends).
-    /// 
+    ///
     /// SAFETY: Transitions PendingExit → Exited
     pub fn finalize_exit(&mut self, exit_epoch: u64) -> Result<(), String> {
         match self.state {
@@ -132,12 +135,15 @@ impl ValidatorIdentity {
                 self.exited_epoch = Some(exit_epoch);
                 Ok(())
             }
-            _ => Err(format!("Cannot finalize exit for validator in state {:?}", self.state)),
+            _ => Err(format!(
+                "Cannot finalize exit for validator in state {:?}",
+                self.state
+            )),
         }
     }
 
     /// Record a double-signing incident and slash the validator.
-    /// 
+    ///
     /// SAFETY: This incident is permanent and irreversible.
     /// The validator is immediately ejected and heavily slashed.
     pub fn slash_for_double_signing(&mut self, slash_amount: u128) -> Result<(), String> {
@@ -193,7 +199,7 @@ impl ValidatorIdentity {
     }
 
     /// Check if this validator can participate in consensus.
-    /// 
+    ///
     /// SAFETY: Only Active validators with positive reputation can participate
     pub fn can_participate(&self) -> bool {
         matches!(self.state, ValidatorState::Active)
@@ -204,8 +210,10 @@ impl ValidatorIdentity {
 
     /// Check if this validator has been permanently ejected.
     pub fn is_ejected(&self) -> bool {
-        matches!(self.state, ValidatorState::Slashed | ValidatorState::Ejected)
-            || self.double_sign_count > 0
+        matches!(
+            self.state,
+            ValidatorState::Slashed | ValidatorState::Ejected
+        ) || self.double_sign_count > 0
     }
 
     /// Get the effective stake (accounting for slashing).
@@ -232,7 +240,7 @@ impl fmt::Display for ValidatorIdentity {
 }
 
 /// Validator lifecycle state machine.
-/// 
+///
 /// SAFETY: Transitions are strictly defined. Invalid transitions fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValidatorState {
@@ -269,7 +277,7 @@ impl fmt::Display for ValidatorState {
 }
 
 /// Registry of all validators on the chain.
-/// 
+///
 /// SAFETY: This is the authoritative validator set.
 /// All consensus operations reference this registry.
 pub struct ValidatorRegistry {
@@ -294,7 +302,7 @@ impl ValidatorRegistry {
     }
 
     /// Register a new validator.
-    /// 
+    ///
     /// SAFETY: Validator ID must be globally unique.
     pub fn register_validator(&mut self, validator: ValidatorIdentity) -> Result<(), String> {
         if self.validators.contains_key(&validator.id) {
@@ -311,14 +319,14 @@ impl ValidatorRegistry {
     }
 
     /// Get a validator by ID (mutable reference).
-    /// 
+    ///
     /// SAFETY: Used when modifying validator state (slashing, status changes)
     pub fn get_mut(&mut self, id: &str) -> Option<&mut ValidatorIdentity> {
         self.validators.get_mut(id)
     }
 
     /// Activate a validator for consensus participation.
-    /// 
+    ///
     /// SAFETY: Updates the active validator set and total stake.
     pub fn activate_validator(&mut self, id: &str) -> Result<(), String> {
         let validator_stake = {
@@ -336,7 +344,7 @@ impl ValidatorRegistry {
     }
 
     /// Mark a validator for exit.
-    /// 
+    ///
     /// SAFETY: Removes from active set but doesn't finalize exit yet.
     pub fn mark_validator_for_exit(&mut self, id: &str) -> Result<(), String> {
         let stake = {
@@ -364,9 +372,13 @@ impl ValidatorRegistry {
     }
 
     /// Slash a validator for double-signing.
-    /// 
+    ///
     /// SAFETY: This action is irreversible.
-    pub fn slash_validator_double_sign(&mut self, id: &str, slash_amount: u128) -> Result<(), String> {
+    pub fn slash_validator_double_sign(
+        &mut self,
+        id: &str,
+        slash_amount: u128,
+    ) -> Result<(), String> {
         let validator = self
             .get_mut(id)
             .ok_or_else(|| format!("Validator {} not found", id))?;
@@ -380,7 +392,11 @@ impl ValidatorRegistry {
     }
 
     /// Slash a validator for equivocation.
-    pub fn slash_validator_equivocation(&mut self, id: &str, slash_amount: u128) -> Result<(), String> {
+    pub fn slash_validator_equivocation(
+        &mut self,
+        id: &str,
+        slash_amount: u128,
+    ) -> Result<(), String> {
         let validator = self
             .get_mut(id)
             .ok_or_else(|| format!("Validator {} not found", id))?;
@@ -394,7 +410,11 @@ impl ValidatorRegistry {
     }
 
     /// Record downtime for a validator.
-    pub fn record_validator_downtime(&mut self, id: &str, slash_amount: u128) -> Result<(), String> {
+    pub fn record_validator_downtime(
+        &mut self,
+        id: &str,
+        slash_amount: u128,
+    ) -> Result<(), String> {
         let validator = self
             .get_mut(id)
             .ok_or_else(|| format!("Validator {} not found", id))?;
@@ -464,7 +484,7 @@ mod tests {
     fn test_validator_activation() {
         let mut v = create_test_identity("v1");
         assert_eq!(v.state, ValidatorState::Inactive);
-        
+
         v.activate().unwrap();
         assert_eq!(v.state, ValidatorState::Active);
         assert!(v.can_participate());
@@ -476,7 +496,7 @@ mod tests {
         v.activate().unwrap();
         v.mark_for_exit().unwrap();
         assert_eq!(v.state, ValidatorState::PendingExit);
-        
+
         v.finalize_exit(1).unwrap();
         assert_eq!(v.state, ValidatorState::Exited);
         assert!(!v.can_participate());
@@ -486,7 +506,7 @@ mod tests {
     fn test_validator_double_sign_slashing() {
         let mut v = create_test_identity("v1");
         v.activate().unwrap();
-        
+
         v.slash_for_double_signing(100000).unwrap();
         assert_eq!(v.stake, 900000);
         assert_eq!(v.double_sign_count, 1);
@@ -497,10 +517,10 @@ mod tests {
     fn test_validator_registry_activation() {
         let mut registry = ValidatorRegistry::new();
         let v = create_test_identity("v1");
-        
+
         registry.register_validator(v).unwrap();
         registry.activate_validator("v1").unwrap();
-        
+
         assert_eq!(registry.active_count(), 1);
         assert_eq!(registry.total_active_stake(), 1000000);
     }
@@ -509,12 +529,12 @@ mod tests {
     fn test_validator_registry_slashing() {
         let mut registry = ValidatorRegistry::new();
         let v = create_test_identity("v1");
-        
+
         registry.register_validator(v).unwrap();
         registry.activate_validator("v1").unwrap();
-        
+
         registry.slash_validator_double_sign("v1", 100000).unwrap();
-        
+
         assert_eq!(registry.active_count(), 0);
         let validator = registry.get("v1").unwrap();
         assert_eq!(validator.stake, 900000);
@@ -524,12 +544,12 @@ mod tests {
     fn test_validator_registry_voting_power() {
         let mut registry = ValidatorRegistry::new();
         let v = create_test_identity("v1");
-        
+
         registry.register_validator(v).unwrap();
         registry.activate_validator("v1").unwrap();
-        
+
         assert_eq!(registry.get_voting_power("v1"), 1000000);
-        
+
         registry.slash_validator_equivocation("v1", 100000).unwrap();
         assert_eq!(registry.get_voting_power("v1"), 0); // Slashed = no power
     }

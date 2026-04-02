@@ -10,8 +10,8 @@
 //! - `energy_module` — requires `tch` (LibTorch); enabled via `ml` feature in Phase 4.
 //! - `tests` — internal integration tests.
 
-pub mod metrics;
 pub mod load_balancer;
+pub mod metrics;
 
 /// Initialise telemetry subsystem.
 /// Returns immediately; actual metric collection is driven by the scheduler.

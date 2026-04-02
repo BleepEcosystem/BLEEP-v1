@@ -1,6 +1,6 @@
 // PHASE 1: AUTOMATIC SLASHING ENGINE
 // Deterministic, evidence-based slashing without human intervention
-// 
+//
 // SAFETY INVARIANTS:
 // 1. Slashing is automatic (no manual override possible)
 // 2. Slashing requires cryptographic evidence
@@ -9,12 +9,12 @@
 // 5. Slashing never panics (all errors are handled)
 
 use crate::validator_identity::{ValidatorIdentity, ValidatorRegistry};
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 use log::info;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Evidence of a slashable offense.
-/// 
+///
 /// SAFETY: All slashing decisions require evidence that can be cryptographically verified.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SlashingEvidence {
@@ -27,7 +27,7 @@ pub enum SlashingEvidence {
         signature_1: Vec<u8>,
         signature_2: Vec<u8>,
     },
-    
+
     /// Two votes for conflicting validators at the same height
     Equivocation {
         validator_id: String,
@@ -37,7 +37,7 @@ pub enum SlashingEvidence {
         timestamp_1: u64,
         timestamp_2: u64,
     },
-    
+
     /// Validator offline for more than N blocks (measurable via gossip)
     Downtime {
         validator_id: String,
@@ -57,7 +57,7 @@ impl SlashingEvidence {
     }
 
     /// Verify that this evidence is well-formed and could be valid.
-    /// 
+    ///
     /// SAFETY: This is a SOFT check (form validation).
     /// Cryptographic verification happens in the slashing engine.
     pub fn is_well_formed(&self) -> Result<(), String> {
@@ -117,16 +117,16 @@ impl SlashingEvidence {
 }
 
 /// Slashing penalty configuration.
-/// 
+///
 /// SAFETY: These percentages are immutable once set at genesis.
 #[derive(Debug, Clone)]
 pub struct SlashingPenalty {
     /// Percentage of stake slashed for double-signing (100% = 1.0)
     pub double_signing_penalty: f64,
-    
+
     /// Percentage of stake slashed for equivocation
     pub equivocation_penalty: f64,
-    
+
     /// Percentage of stake slashed for downtime per missed block
     pub downtime_penalty_per_block: f64,
 }
@@ -134,24 +134,24 @@ pub struct SlashingPenalty {
 impl Default for SlashingPenalty {
     fn default() -> Self {
         SlashingPenalty {
-            double_signing_penalty: 0.33, // Slash 33% of stake
-            equivocation_penalty: 0.25, // Slash 25% of stake
+            double_signing_penalty: 0.33,      // Slash 33% of stake
+            equivocation_penalty: 0.25,        // Slash 25% of stake
             downtime_penalty_per_block: 0.001, // Slash 0.1% per missed block
         }
     }
 }
 
 /// Automatic slashing engine.
-/// 
+///
 /// SAFETY: This engine is the ONLY component that can slash validators.
 /// All slashing decisions are deterministic and evidence-based.
 pub struct SlashingEngine {
     /// Slashing penalty configuration
     penalties: SlashingPenalty,
-    
+
     /// Record of all slashing events (immutable audit trail)
     slashing_history: Vec<SlashingEvent>,
-    
+
     /// Map of (validator_id, height) → evidence (to detect duplicates)
     processed_evidence: HashMap<(String, u64), SlashingEvidence>,
 }
@@ -187,7 +187,7 @@ impl SlashingEngine {
     }
 
     /// Process evidence and slash the validator.
-    /// 
+    ///
     /// SAFETY: This is the entry point for all slashing.
     /// Must verify evidence before calling this.
     pub fn process_evidence(
@@ -203,11 +203,14 @@ impl SlashingEngine {
         let validator_id = evidence.validator_id().to_string();
 
         // SAFETY: Check if we've already processed this evidence
-        let evidence_key = (validator_id.clone(), match &evidence {
-            SlashingEvidence::DoubleSigning { height, .. } => *height,
-            SlashingEvidence::Equivocation { height, .. } => *height,
-            SlashingEvidence::Downtime { .. } => current_epoch,
-        });
+        let evidence_key = (
+            validator_id.clone(),
+            match &evidence {
+                SlashingEvidence::DoubleSigning { height, .. } => *height,
+                SlashingEvidence::Equivocation { height, .. } => *height,
+                SlashingEvidence::Downtime { .. } => current_epoch,
+            },
+        );
 
         if self.processed_evidence.contains_key(&evidence_key) {
             return Err("Evidence already processed".to_string());
@@ -224,28 +227,38 @@ impl SlashingEngine {
         // This avoids a borrow-after-move compile error.
         let evidence_type_str: String = match &evidence {
             SlashingEvidence::DoubleSigning { .. } => "DOUBLE_SIGNING",
-            SlashingEvidence::Equivocation  { .. } => "EQUIVOCATION",
-            SlashingEvidence::Downtime      { .. } => "DOWNTIME",
-        }.to_string();
+            SlashingEvidence::Equivocation { .. } => "EQUIVOCATION",
+            SlashingEvidence::Downtime { .. } => "DOWNTIME",
+        }
+        .to_string();
         let block_height_val: u64 = match &evidence {
             SlashingEvidence::DoubleSigning { height, .. } => *height,
-            SlashingEvidence::Equivocation  { height, .. } => *height,
-            SlashingEvidence::Downtime      { .. }         => 0,
+            SlashingEvidence::Equivocation { height, .. } => *height,
+            SlashingEvidence::Downtime { .. } => 0,
         };
 
         // SAFETY: Apply the slash (this modifies the validator registry)
         match &evidence {
             SlashingEvidence::DoubleSigning { .. } => {
                 validator_registry.slash_validator_double_sign(&validator_id, slash_amount)?;
-                info!("Slashed validator {} for double-signing: {} microBLEEP", validator_id, slash_amount);
+                info!(
+                    "Slashed validator {} for double-signing: {} microBLEEP",
+                    validator_id, slash_amount
+                );
             }
             SlashingEvidence::Equivocation { .. } => {
                 validator_registry.slash_validator_equivocation(&validator_id, slash_amount)?;
-                info!("Slashed validator {} for equivocation: {} microBLEEP", validator_id, slash_amount);
+                info!(
+                    "Slashed validator {} for equivocation: {} microBLEEP",
+                    validator_id, slash_amount
+                );
             }
             SlashingEvidence::Downtime { .. } => {
                 validator_registry.record_validator_downtime(&validator_id, slash_amount)?;
-                info!("Slashed validator {} for downtime: {} microBLEEP", validator_id, slash_amount);
+                info!(
+                    "Slashed validator {} for downtime: {} microBLEEP",
+                    validator_id, slash_amount
+                );
             }
         }
 
@@ -266,7 +279,11 @@ impl SlashingEngine {
     }
 
     /// Calculate the slash amount based on evidence and validator state.
-    fn calculate_slash_amount(&self, evidence: &SlashingEvidence, validator: &ValidatorIdentity) -> Result<u128, String> {
+    fn calculate_slash_amount(
+        &self,
+        evidence: &SlashingEvidence,
+        validator: &ValidatorIdentity,
+    ) -> Result<u128, String> {
         let slash_amount = match evidence {
             SlashingEvidence::DoubleSigning { .. } => {
                 // Double-signing results in full ejection
@@ -291,12 +308,16 @@ impl SlashingEngine {
                 );
                 amount.min(validator.stake)
             }
-            SlashingEvidence::Downtime { validator_id, missed_blocks, total_blocks_in_epoch } => {
+            SlashingEvidence::Downtime {
+                validator_id,
+                missed_blocks,
+                total_blocks_in_epoch,
+            } => {
                 // Calculate downtime penalty based on missed blocks
                 let missed_ratio = *missed_blocks as f64 / *total_blocks_in_epoch as f64;
                 let penalty_percentage = missed_ratio * self.penalties.downtime_penalty_per_block;
                 let amount = (validator.stake as f64 * penalty_percentage) as u128;
-                
+
                 info!(
                     "Downtime detected for {}: missed {}/{} blocks ({:.2}%); slashing {:.2}% ({})",
                     validator_id,
@@ -324,7 +345,8 @@ impl SlashingEngine {
 
     /// Check if evidence has already been processed.
     pub fn has_evidence(&self, validator_id: &str, height: u64) -> bool {
-        self.processed_evidence.contains_key(&(validator_id.to_string(), height))
+        self.processed_evidence
+            .contains_key(&(validator_id.to_string(), height))
     }
 
     /// Get the total slashed amount across all events.
@@ -400,7 +422,9 @@ mod tests {
             signature_2: vec![4, 5, 6],
         };
 
-        let event = engine.process_evidence(evidence, &mut registry, 1, 1000).unwrap();
+        let event = engine
+            .process_evidence(evidence, &mut registry, 1, 1000)
+            .unwrap();
 
         assert_eq!(event.validator_id, "v1");
         assert_eq!(event.evidence_type, "DOUBLE_SIGNING");
@@ -428,7 +452,9 @@ mod tests {
             timestamp_2: 1001,
         };
 
-        let event = engine.process_evidence(evidence, &mut registry, 1, 1000).unwrap();
+        let event = engine
+            .process_evidence(evidence, &mut registry, 1, 1000)
+            .unwrap();
 
         assert_eq!(event.evidence_type, "EQUIVOCATION");
         assert!(event.slash_amount > 0);
@@ -483,7 +509,9 @@ mod tests {
                 signature_2: vec![4, 5, 6],
             };
 
-            engine.process_evidence(evidence, &mut registry, 1, 1000 + i as u64).unwrap();
+            engine
+                .process_evidence(evidence, &mut registry, 1, 1000 + i as u64)
+                .unwrap();
         }
 
         assert_eq!(engine.history().len(), 3);

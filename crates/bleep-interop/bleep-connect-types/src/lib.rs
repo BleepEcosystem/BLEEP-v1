@@ -1,7 +1,7 @@
 //! # BLEEP Connect Types
-//! 
+//!
 //! Core type definitions for the BLEEP Connect Protocol
-//! 
+//!
 //! This module defines all fundamental types used across the BLEEP Connect system,
 //! including transfers, intents, proofs, and layer-specific types.
 
@@ -179,12 +179,12 @@ pub struct AssetId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetType {
-    Native,           // ETH, BTC, SOL, etc.
-    ERC20,           // ERC-20 tokens
-    ERC721,          // NFTs
-    ERC1155,         // Multi-token
-    SPLToken,        // Solana tokens
-    CosmosIBC,       // Cosmos IBC tokens
+    Native,    // ETH, BTC, SOL, etc.
+    ERC20,     // ERC-20 tokens
+    ERC721,    // NFTs
+    ERC1155,   // Multi-token
+    SPLToken,  // Solana tokens
+    CosmosIBC, // Cosmos IBC tokens
     Custom,
 }
 
@@ -209,8 +209,12 @@ impl AssetId {
 
     pub fn to_string(&self) -> String {
         match &self.contract_address {
-            Some(addr) => format!("{}:{}:{}", self.chain.canonical_name(), addr, 
-                                 self.token_id.as_deref().unwrap_or("0")),
+            Some(addr) => format!(
+                "{}:{}:{}",
+                self.chain.canonical_name(),
+                addr,
+                self.token_id.as_deref().unwrap_or("0")
+            ),
             None => format!("{}:native", self.chain.canonical_name()),
         }
     }
@@ -225,7 +229,7 @@ pub struct InstantIntent {
     pub intent_id: [u8; 32],
     pub created_at: u64,
     pub expires_at: u64,
-    
+
     // Transfer details
     pub source_chain: ChainId,
     pub dest_chain: ChainId,
@@ -233,19 +237,19 @@ pub struct InstantIntent {
     pub dest_asset: AssetId,
     pub source_amount: u128,
     pub min_dest_amount: u128,
-    
+
     // Parties
     pub sender: UniversalAddress,
     pub recipient: UniversalAddress,
-    
+
     // Economics
-    pub max_solver_reward_bps: u16,  // Basis points (1 bps = 0.01%)
+    pub max_solver_reward_bps: u16, // Basis points (1 bps = 0.01%)
     pub slippage_tolerance_bps: u16,
-    
+
     // Security
     pub nonce: u64,
     pub signature: Vec<u8>,
-    
+
     // Escrow proof
     pub escrow_tx_hash: String,
     pub escrow_proof: Vec<u8>,
@@ -262,7 +266,7 @@ impl InstantIntent {
         hasher.update(&self.recipient.to_bytes());
         hasher.update(&self.nonce.to_be_bytes());
         hasher.update(&self.created_at.to_be_bytes());
-        
+
         let result = hasher.finalize();
         let mut id = [0u8; 32];
         id.copy_from_slice(&result);
@@ -285,27 +289,27 @@ impl InstantIntent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutorTier {
-    Bootstrap,      // New executors: 200% bond, $100K max
-    Standard,       // Proven: 110% bond, $1M max
-    Premium,        // High reputation: 50% bond, $10M max
-    Institutional,  // Major institutions: 10% bond, $100M max
+    Bootstrap,     // New executors: 200% bond, $100K max
+    Standard,      // Proven: 110% bond, $1M max
+    Premium,       // High reputation: 50% bond, $10M max
+    Institutional, // Major institutions: 10% bond, $100M max
 }
 
 impl ExecutorTier {
     pub fn bond_ratio_bps(&self) -> u16 {
         match self {
-            ExecutorTier::Bootstrap => 20_000,      // 200%
-            ExecutorTier::Standard => 11_000,       // 110%
-            ExecutorTier::Premium => 5_000,         // 50%
-            ExecutorTier::Institutional => 1_000,   // 10%
+            ExecutorTier::Bootstrap => 20_000,    // 200%
+            ExecutorTier::Standard => 11_000,     // 110%
+            ExecutorTier::Premium => 5_000,       // 50%
+            ExecutorTier::Institutional => 1_000, // 10%
         }
     }
 
     pub fn max_transfer_value(&self) -> u128 {
         match self {
-            ExecutorTier::Bootstrap => 100_000_000_000,         // $100K (8 decimals)
-            ExecutorTier::Standard => 1_000_000_000_000,        // $1M
-            ExecutorTier::Premium => 10_000_000_000_000,        // $10M
+            ExecutorTier::Bootstrap => 100_000_000_000, // $100K (8 decimals)
+            ExecutorTier::Standard => 1_000_000_000_000, // $1M
+            ExecutorTier::Premium => 10_000_000_000_000, // $10M
             ExecutorTier::Institutional => 100_000_000_000_000, // $100M
         }
     }
@@ -321,10 +325,10 @@ impl ExecutorTier {
 
     pub fn max_failure_rate_bps(&self) -> u16 {
         match self {
-            ExecutorTier::Bootstrap => 100,        // 1%
-            ExecutorTier::Standard => 50,          // 0.5%
-            ExecutorTier::Premium => 10,           // 0.1%
-            ExecutorTier::Institutional => 1,      // 0.01%
+            ExecutorTier::Bootstrap => 100,   // 1%
+            ExecutorTier::Standard => 50,     // 0.5%
+            ExecutorTier::Premium => 10,      // 0.1%
+            ExecutorTier::Institutional => 1, // 0.01%
         }
     }
 }
@@ -345,21 +349,21 @@ pub struct ExecutorProfile {
     pub address: UniversalAddress,
     pub tier: ExecutorTier,
     pub reputation_score: f64,
-    
+
     // Statistics
     pub total_executions: u64,
     pub successful_executions: u64,
     pub failed_executions: u64,
     pub total_volume: u128,
-    
+
     // Performance metrics
     pub average_execution_time_ms: u64,
     pub uptime_percentage: f64,
-    
+
     // Staking
     pub total_staked: u128,
     pub available_liquidity: u128,
-    
+
     // Timestamps
     pub registered_at: u64,
     pub last_execution_at: u64,
@@ -375,27 +379,33 @@ impl ExecutorProfile {
 
     pub fn can_upgrade_tier(&self) -> Option<ExecutorTier> {
         let failure_rate = self.failure_rate_bps();
-        
+
         match self.tier {
             ExecutorTier::Bootstrap => {
-                if self.successful_executions >= ExecutorTier::Standard.required_successful_transfers()
-                    && failure_rate <= ExecutorTier::Standard.max_failure_rate_bps() {
+                if self.successful_executions
+                    >= ExecutorTier::Standard.required_successful_transfers()
+                    && failure_rate <= ExecutorTier::Standard.max_failure_rate_bps()
+                {
                     Some(ExecutorTier::Standard)
                 } else {
                     None
                 }
             }
             ExecutorTier::Standard => {
-                if self.successful_executions >= ExecutorTier::Premium.required_successful_transfers()
-                    && failure_rate <= ExecutorTier::Premium.max_failure_rate_bps() {
+                if self.successful_executions
+                    >= ExecutorTier::Premium.required_successful_transfers()
+                    && failure_rate <= ExecutorTier::Premium.max_failure_rate_bps()
+                {
                     Some(ExecutorTier::Premium)
                 } else {
                     None
                 }
             }
             ExecutorTier::Premium => {
-                if self.successful_executions >= ExecutorTier::Institutional.required_successful_transfers()
-                    && failure_rate <= ExecutorTier::Institutional.max_failure_rate_bps() {
+                if self.successful_executions
+                    >= ExecutorTier::Institutional.required_successful_transfers()
+                    && failure_rate <= ExecutorTier::Institutional.max_failure_rate_bps()
+                {
                     Some(ExecutorTier::Institutional)
                 } else {
                     None
@@ -516,7 +526,7 @@ impl ProofBatch {
             hasher.update(&proof.proof_id);
         }
         hasher.update(&self.created_at.to_be_bytes());
-        
+
         let result = hasher.finalize();
         let mut id = [0u8; 32];
         id.copy_from_slice(&result);
@@ -556,15 +566,15 @@ pub enum ClientImplementation {
     Nethermind,
     Erigon,
     Reth,
-    
+
     // Bitcoin
     BitcoinCore,
     Btcd,
-    
+
     // Solana
     SolanaValidator,
     JitoValidator,
-    
+
     // Other
     Custom(u32),
 }
@@ -688,11 +698,11 @@ impl CommitmentBlock {
         hasher.update(&self.block_number.to_be_bytes());
         hasher.update(&self.timestamp.to_be_bytes());
         hasher.update(&self.previous_hash);
-        
+
         for commitment in &self.commitments {
             hasher.update(&commitment.commitment_id);
         }
-        
+
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&result);
@@ -732,40 +742,40 @@ pub struct ValidatorSignature {
 pub enum BleepConnectError {
     #[error("Invalid chain ID: {0}")]
     InvalidChainId(String),
-    
+
     #[error("Invalid address format: {0}")]
     InvalidAddress(String),
-    
+
     #[error("Intent expired at {0}")]
     IntentExpired(u64),
-    
+
     #[error("Insufficient bond: required {required}, provided {provided}")]
     InsufficientBond { required: u128, provided: u128 },
-    
+
     #[error("Executor not qualified: {0}")]
     ExecutorNotQualified(String),
-    
+
     #[error("Transfer limit exceeded: max {max}, attempted {attempted}")]
     TransferLimitExceeded { max: u128, attempted: u128 },
-    
+
     #[error("Proof verification failed: {0}")]
     ProofVerificationFailed(String),
-    
+
     #[error("Consensus not reached: {agreement}% agreement")]
     ConsensusNotReached { agreement: f64 },
-    
+
     #[error("Serialization error: {0}")]
     SerializationError(String),
-    
+
     #[error("Signature verification failed")]
     SignatureVerificationFailed,
-    
+
     #[error("Database error: {0}")]
     DatabaseError(String),
-    
+
     #[error("Network error: {0}")]
     NetworkError(String),
-    
+
     #[error("Internal error: {0}")]
     InternalError(String),
 }
@@ -783,30 +793,30 @@ pub mod constants {
     pub const EXECUTOR_AUCTION_DURATION: Duration = Duration::from_secs(15);
     pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(120);
     pub const INTENT_DEFAULT_EXPIRY: Duration = Duration::from_secs(300); // 5 minutes
-    
+
     // Layer 3 constants
     pub const PROOF_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
     pub const BATCH_TARGET_SIZE: usize = 50;
     pub const BATCH_MAX_SIZE: usize = 500;
     pub const BATCH_MIN_SIZE: usize = 5;
     pub const BATCH_INTERVAL: Duration = Duration::from_secs(5);
-    
+
     // Layer 2 constants
     pub const FULL_NODE_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60);
     pub const CONSENSUS_THRESHOLD: f64 = 0.90; // 90% agreement
     pub const MIN_VERIFIER_NODES: usize = 3;
-    
+
     // Layer 1 constants
     pub const VOTING_PERIOD_NORMAL: Duration = Duration::from_secs(7 * 24 * 3600); // 7 days
     pub const VOTING_PERIOD_EMERGENCY: Duration = Duration::from_secs(24 * 3600); // 1 day
     pub const VOTING_THRESHOLD_NORMAL: f64 = 0.66; // 66%
     pub const VOTING_THRESHOLD_EMERGENCY: f64 = 0.80; // 80%
-    
+
     // Economic constants
     pub const MIN_EXECUTOR_STAKE: u128 = 10_000_000_000; // 100 tokens (8 decimals)
     pub const SLASH_PENALTY_BPS: u16 = 3_000; // 30%
     pub const PROTOCOL_FEE_BPS: u16 = 10; // 0.1%
-    
+
     // Security constants
     pub const MAX_REORG_DEPTH: u64 = 100;
     pub const CHAIN_FINALITY_BLOCKS: &[(super::ChainId, u64)] = &[
@@ -832,14 +842,23 @@ mod tests {
     fn test_universal_address() {
         let addr = UniversalAddress::ethereum("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb");
         assert_eq!(addr.chain, ChainId::Ethereum);
-        assert_eq!(addr.to_string(), "ethereum:0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb");
+        assert_eq!(
+            addr.to_string(),
+            "ethereum:0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb"
+        );
     }
 
     #[test]
     fn test_executor_tier_requirements() {
         assert_eq!(ExecutorTier::Bootstrap.bond_ratio_bps(), 20_000);
-        assert_eq!(ExecutorTier::Standard.required_successful_transfers(), 1_000);
-        assert_eq!(ExecutorTier::Premium.max_transfer_value(), 10_000_000_000_000);
+        assert_eq!(
+            ExecutorTier::Standard.required_successful_transfers(),
+            1_000
+        );
+        assert_eq!(
+            ExecutorTier::Premium.max_transfer_value(),
+            10_000_000_000_000
+        );
     }
 
     #[test]
@@ -869,4 +888,4 @@ mod tests {
         assert_eq!(id1, id2); // Deterministic
         assert_ne!(id1, [0u8; 32]); // Non-zero
     }
-  }
+}

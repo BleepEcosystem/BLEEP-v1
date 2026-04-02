@@ -1,6 +1,6 @@
 // PHASE 1: EMERGENCY PROOF-OF-WORK CONSENSUS ENGINE
 // Time-bounded emergency consensus when validator availability drops
-// 
+//
 // SAFETY CONSTRAINTS:
 // 1. PoW CAN ONLY activate via the Orchestrator
 // 2. PoW is RATE-LIMITED (max duration: 5 epochs)
@@ -8,50 +8,46 @@
 // 4. PoW CANNOT become permanent
 // 5. PoW difficulty auto-adjusts to maintain block time
 
-use crate::epoch::EpochState;
 use crate::engine::{ConsensusEngine, ConsensusError};
-use bleep_core::block::{Block, Transaction, ConsensusMode};
+use crate::epoch::EpochState;
+use bleep_core::block::{Block, ConsensusMode, Transaction};
 use bleep_core::blockchain::BlockchainState;
-use sha2::{Sha256, Digest};
 use log::info;
+use sha2::{Digest, Sha256};
 
 /// Emergency PoW consensus engine.
-/// 
+///
 /// SAFETY: PoW is activated ONLY by the Orchestrator when Byzantine faults
 /// are detected or validator participation drops below 66%.
 /// PoW is time-bounded and will auto-exit.
 pub struct EmergencyPoWEngine {
     /// Validator ID
     validator_id: String,
-    
+
     /// Current difficulty (number of leading zeros required in hash)
     difficulty: u32,
-    
+
     /// Target block time in milliseconds (default: 14,400 ms = 14.4 sec)
     target_block_time_ms: u64,
-    
+
     /// Adjustment period (recalculate difficulty every N blocks)
     difficulty_adjustment_period: u64,
-    
+
     /// Number of blocks mined with current difficulty
     blocks_mined: u64,
-    
+
     /// Timestamp of first block in current adjustment period
     period_start_time: u64,
 }
 
 impl EmergencyPoWEngine {
     /// Create a new emergency PoW engine.
-    /// 
+    ///
     /// # Arguments
     /// * `validator_id` - This validator's ID
     /// * `initial_difficulty` - Starting difficulty (leading zeros in hash)
     /// * `target_block_time_ms` - Target time between blocks
-    pub fn new(
-        validator_id: String,
-        initial_difficulty: u32,
-        target_block_time_ms: u64,
-    ) -> Self {
+    pub fn new(validator_id: String, initial_difficulty: u32, target_block_time_ms: u64) -> Self {
         EmergencyPoWEngine {
             validator_id,
             difficulty: initial_difficulty,
@@ -88,10 +84,10 @@ impl EmergencyPoWEngine {
     }
 
     /// Compute the Proof-of-Work for a block.
-    /// 
+    ///
     /// SAFETY: This is computationally expensive but deterministic.
     /// The work difficulty is adjusted to maintain target block time.
-    /// 
+    ///
     /// # Returns
     /// - `Ok((nonce, hash))` if PoW is found
     /// - `Err(...)` if max attempts exceeded
@@ -107,7 +103,9 @@ impl EmergencyPoWEngine {
             if hash.starts_with(&target) {
                 info!(
                     "PoW found: difficulty={}, nonce={}, hash={}",
-                    self.difficulty, nonce, &hash[..16]
+                    self.difficulty,
+                    nonce,
+                    &hash[..16]
                 );
                 return Ok((nonce, hash));
             }
@@ -122,12 +120,12 @@ impl EmergencyPoWEngine {
     }
 
     /// Verify that a block's PoW is valid.
-    /// 
+    ///
     /// SAFETY: Checks that the hash meets the difficulty requirement.
     /// The block_data is verified by comparing the expected hash to the provided hash.
-    /// 
+    ///
     /// PUBLIC: Called by orchestrator to verify PoW blocks.
-    /// 
+    ///
     /// # Arguments
     /// * `block_data` - The block data that was hashed
     /// * `hash` - The hash claimed to prove work
@@ -161,11 +159,11 @@ impl EmergencyPoWEngine {
     }
 
     /// Adjust difficulty based on average block time.
-    /// 
+    ///
     /// SAFETY: Difficulty adjustment is deterministic.
     /// If blocks are coming too fast, increase difficulty.
     /// If blocks are coming too slowly, decrease difficulty.
-    /// 
+    ///
     /// PUBLIC: Called by orchestrator to dynamically adjust PoW difficulty.
     pub fn adjust_difficulty(&mut self, actual_block_time_ms: u64) {
         let target = self.target_block_time_ms as f64;
@@ -253,9 +251,9 @@ impl ConsensusEngine for EmergencyPoWEngine {
             previous_hash,
             epoch_state.epoch_id,
             ConsensusMode::EmergencyPow,
-            1, // protocol_version
+            1,             // protocol_version
             String::new(), // shard_registry_root
-            0, // shard_id
+            0,             // shard_id
             String::new(), // shard_state_root
         );
 

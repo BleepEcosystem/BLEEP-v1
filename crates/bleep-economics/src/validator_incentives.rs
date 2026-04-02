@@ -3,10 +3,9 @@
 /// This module implements reward distribution and validation incentives.
 /// Validators are rewarded for honest participation and penalized for malicious behavior.
 /// Rewards are performance-based, epoch-settled, and proof-dependent.
-
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use sha2::{Sha256, Digest};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
@@ -128,11 +127,11 @@ impl SlashingViolationType {
     /// Base slash percentage (of stake)
     pub fn base_slash_percentage(&self) -> u16 {
         match self {
-            SlashingViolationType::DoubleSigning => 3200,        // 32%
-            SlashingViolationType::InvalidTransition => 1600,    // 16%
-            SlashingViolationType::RecoveryWithholding => 800,   // 8%
-            SlashingViolationType::FalseGovernance => 1000,      // 10%
-            SlashingViolationType::MaliciousRollback => 3200,    // 32%
+            SlashingViolationType::DoubleSigning => 3200,     // 32%
+            SlashingViolationType::InvalidTransition => 1600, // 16%
+            SlashingViolationType::RecoveryWithholding => 800, // 8%
+            SlashingViolationType::FalseGovernance => 1000,   // 10%
+            SlashingViolationType::MaliciousRollback => 3200, // 32%
         }
     }
 }
@@ -164,7 +163,10 @@ impl ValidatorAccount {
 
     /// Check if validator is still participating
     pub fn is_active(&self) -> bool {
-        matches!(self.status, ValidatorStatus::Active | ValidatorStatus::Slashed)
+        matches!(
+            self.status,
+            ValidatorStatus::Active | ValidatorStatus::Slashed
+        )
     }
 
     /// Check if validator is permanently removed
@@ -204,9 +206,9 @@ impl Default for RewardParameters {
     fn default() -> Self {
         RewardParameters {
             block_proposal_reward: 32 * 10u128.pow(6), // 0.32 BLEEP (8 decimals)
-            participation_reward: 1 * 10u128.pow(6),    // 0.01 BLEEP
-            healing_multiplier: 3,                       // 3x participation
-            cross_shard_reward: 5 * 10u128.pow(6),      // 0.05 BLEEP
+            participation_reward: 1 * 10u128.pow(6),   // 0.01 BLEEP
+            healing_multiplier: 3,                     // 3x participation
+            cross_shard_reward: 5 * 10u128.pow(6),     // 0.05 BLEEP
         }
     }
 }
@@ -324,24 +326,22 @@ impl ValidatorIncentivesEngine {
             }
 
             records.push(record.clone());
-            self.reward_history.insert((epoch, validator_id.clone()), record);
+            self.reward_history
+                .insert((epoch, validator_id.clone()), record);
         }
 
         Ok(records)
     }
 
     /// Apply slashing for a violation
-    pub fn apply_slashing(
-        &mut self,
-        evidence: SlashingEvidence,
-    ) -> Result<(), ValidatorError> {
+    pub fn apply_slashing(&mut self, evidence: SlashingEvidence) -> Result<(), ValidatorError> {
         if let Some(validator) = self.validators.get_mut(&evidence.validator_id) {
             let slash_amount = evidence.slash_amount;
 
             // Apply slash (cap at effective stake)
             let effective = validator.effective_stake();
             let actual_slash = std::cmp::min(slash_amount, effective);
-            
+
             validator.total_slashed = validator.total_slashed.saturating_add(actual_slash);
 
             // Apply jail if too much slashed
@@ -355,7 +355,8 @@ impl ValidatorIncentivesEngine {
                 validator.status = ValidatorStatus::Ejected;
             }
 
-            self.slashing_evidence.insert(evidence.proof_hash.clone(), evidence);
+            self.slashing_evidence
+                .insert(evidence.proof_hash.clone(), evidence);
             Ok(())
         } else {
             Err(ValidatorError::ValidatorNotFound)
@@ -436,8 +437,10 @@ mod tests {
     fn test_validator_registration() {
         let mut engine = ValidatorIncentivesEngine::genesis();
         let validator_id = vec![1, 2, 3, 4];
-        
-        assert!(engine.register_validator(validator_id.clone(), 1000).is_ok());
+
+        assert!(engine
+            .register_validator(validator_id.clone(), 1000)
+            .is_ok());
         assert!(engine.validators.contains_key(&validator_id));
     }
 
@@ -445,9 +448,9 @@ mod tests {
     fn test_reward_computation() {
         let mut engine = ValidatorIncentivesEngine::genesis();
         let validator_id = vec![1, 2, 3, 4];
-        
+
         engine.register_validator(validator_id.clone(), 1000).ok();
-        
+
         let metrics = ValidatorMetrics {
             validator_id: validator_id.clone(),
             blocks_proposed: 5,
@@ -458,7 +461,7 @@ mod tests {
             state_transition_failures: 0,
             epoch: 0,
         };
-        
+
         engine.record_metrics(validator_id.clone(), metrics).ok();
         let rewards = match engine.compute_epoch_rewards(0) {
             Ok(rewards) => rewards,
@@ -486,10 +489,10 @@ mod tests {
     #[test]
     fn test_total_stake() {
         let mut engine = ValidatorIncentivesEngine::genesis();
-        
+
         engine.register_validator(vec![1], 1000).ok();
         engine.register_validator(vec![2], 2000).ok();
-        
+
         assert_eq!(engine.total_active_stake(), 3000);
     }
 }

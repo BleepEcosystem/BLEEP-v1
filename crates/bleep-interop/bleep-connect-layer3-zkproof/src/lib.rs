@@ -10,33 +10,33 @@
 //! Proofs are batch-aggregated via Merkle tree into a single commitment
 //! anchored to the Commitment Chain every `BATCH_INTERVAL` seconds.
 
+use std::ops::Neg;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::ops::Neg;
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::PrimeField;
-use ark_groth16::{Groth16, PreparedVerifyingKey, ProvingKey, VerifyingKey, Proof as Groth16Proof};
-use ark_snark::SNARK;
-use ark_r1cs_std::prelude::*;
+use ark_groth16::{Groth16, PreparedVerifyingKey, Proof as Groth16Proof, ProvingKey, VerifyingKey};
 use ark_r1cs_std::fields::fp::FpVar;
+use ark_r1cs_std::prelude::*;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::SeedableRng;
+use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
+use ark_std::rand::SeedableRng;
 
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use bleep_connect_types::{
-    ZKProof, ProofBatch, ProofType, StateCommitment, CommitmentType,
-    BleepConnectError, BleepConnectResult,
-    constants::{BATCH_TARGET_SIZE, BATCH_INTERVAL},
-};
-use bleep_connect_crypto::{sha256, merkle_root};
 use bleep_connect_commitment_chain::CommitmentChain;
+use bleep_connect_crypto::{merkle_root, sha256};
+use bleep_connect_types::{
+    constants::{BATCH_INTERVAL, BATCH_TARGET_SIZE},
+    BleepConnectError, BleepConnectResult, CommitmentType, ProofBatch, ProofType, StateCommitment,
+    ZKProof,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // R1CS CIRCUIT: Cross-Chain Transfer Proof
@@ -126,25 +126,32 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
             self.intent_id_hi.ok_or(SynthesisError::AssignmentMissing)
         })?;
         let min_amount_var = FpVar::new_input(ark_relations::ns!(cs, "min_dest_amount"), || {
-            self.min_dest_amount.ok_or(SynthesisError::AssignmentMissing)
+            self.min_dest_amount
+                .ok_or(SynthesisError::AssignmentMissing)
         })?;
         let _root_lo = FpVar::new_input(ark_relations::ns!(cs, "source_state_root_lo"), || {
-            self.source_state_root_lo.ok_or(SynthesisError::AssignmentMissing)
+            self.source_state_root_lo
+                .ok_or(SynthesisError::AssignmentMissing)
         })?;
         let _root_hi = FpVar::new_input(ark_relations::ns!(cs, "source_state_root_hi"), || {
-            self.source_state_root_hi.ok_or(SynthesisError::AssignmentMissing)
+            self.source_state_root_hi
+                .ok_or(SynthesisError::AssignmentMissing)
         })?;
 
         // Allocate private witnesses
         let pre_lo = FpVar::new_witness(ark_relations::ns!(cs, "escrow_preimage_lo"), || {
-            self.escrow_preimage_lo.ok_or(SynthesisError::AssignmentMissing)
+            self.escrow_preimage_lo
+                .ok_or(SynthesisError::AssignmentMissing)
         })?;
         let pre_hi = FpVar::new_witness(ark_relations::ns!(cs, "escrow_preimage_hi"), || {
-            self.escrow_preimage_hi.ok_or(SynthesisError::AssignmentMissing)
+            self.escrow_preimage_hi
+                .ok_or(SynthesisError::AssignmentMissing)
         })?;
-        let delivered_var = FpVar::new_witness(ark_relations::ns!(cs, "dest_amount_delivered"), || {
-            self.dest_amount_delivered.ok_or(SynthesisError::AssignmentMissing)
-        })?;
+        let delivered_var =
+            FpVar::new_witness(ark_relations::ns!(cs, "dest_amount_delivered"), || {
+                self.dest_amount_delivered
+                    .ok_or(SynthesisError::AssignmentMissing)
+            })?;
         let _nonce_var = FpVar::new_witness(ark_relations::ns!(cs, "executor_nonce"), || {
             self.executor_nonce.ok_or(SynthesisError::AssignmentMissing)
         })?;
@@ -198,23 +205,30 @@ impl ProvingKeys {
     pub fn generate() -> BleepConnectResult<Self> {
         let mut rng = StdRng::seed_from_u64(0xB1EE_B1EE_B1EE_B1EE_u64);
         let circuit = TransferCircuit::new_empty();
-        let (pk, vk) = Groth16::<Bls12_381>::circuit_specific_setup(circuit, &mut rng)
-            .map_err(|e| BleepConnectError::InternalError(format!("Groth16 setup failed: {e:?}")))?;
-        let pvk = Groth16::<Bls12_381>::process_vk(&vk)
-            .map_err(|e| BleepConnectError::InternalError(format!("VK processing failed: {e:?}")))?;
+        let (pk, vk) =
+            Groth16::<Bls12_381>::circuit_specific_setup(circuit, &mut rng).map_err(|e| {
+                BleepConnectError::InternalError(format!("Groth16 setup failed: {e:?}"))
+            })?;
+        let pvk = Groth16::<Bls12_381>::process_vk(&vk).map_err(|e| {
+            BleepConnectError::InternalError(format!("VK processing failed: {e:?}"))
+        })?;
         Ok(Self { pk, pvk })
     }
 
     /// Serialize the verifying key to bytes for storage.
     pub fn verifying_key_bytes(&self) -> BleepConnectResult<Vec<u8>> {
         let mut buf = Vec::new();
-        self.pvk.vk.serialize_uncompressed(&mut buf)
+        self.pvk
+            .vk
+            .serialize_uncompressed(&mut buf)
             .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
         Ok(buf)
     }
 
     /// Load verifying key from bytes (for verifier nodes that don't hold the full pk).
-    pub fn verifying_key_from_bytes(bytes: &[u8]) -> BleepConnectResult<PreparedVerifyingKey<Bls12_381>> {
+    pub fn verifying_key_from_bytes(
+        bytes: &[u8],
+    ) -> BleepConnectResult<PreparedVerifyingKey<Bls12_381>> {
         let vk = VerifyingKey::<Bls12_381>::deserialize_uncompressed(bytes)
             .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
         Groth16::<Bls12_381>::process_vk(&vk)
@@ -233,7 +247,10 @@ pub struct ProofCache {
 
 impl ProofCache {
     pub fn new(max_size: usize) -> Self {
-        Self { proofs: DashMap::new(), max_size }
+        Self {
+            proofs: DashMap::new(),
+            max_size,
+        }
     }
 
     pub fn insert(&self, proof: ZKProof) {
@@ -313,17 +330,20 @@ impl ProofGenerator {
             input.executor_nonce,
         );
 
-        let mut rng = StdRng::seed_from_u64(
-            u64::from_le_bytes(input.intent_id[..8].try_into()
-                .map_err(|_| BleepConnectError::InternalError("slice error".into()))?)
-        );
+        let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(
+            input.intent_id[..8]
+                .try_into()
+                .map_err(|_| BleepConnectError::InternalError("slice error".into()))?,
+        ));
 
-        let proof = Groth16::<Bls12_381>::prove(&self.keys.pk, circuit, &mut rng)
-            .map_err(|e| BleepConnectError::ProofVerificationFailed(format!("Prove failed: {e:?}")))?;
+        let proof = Groth16::<Bls12_381>::prove(&self.keys.pk, circuit, &mut rng).map_err(|e| {
+            BleepConnectError::ProofVerificationFailed(format!("Prove failed: {e:?}"))
+        })?;
 
         // Serialize proof to bytes
         let mut proof_bytes = Vec::new();
-        proof.serialize_uncompressed(&mut proof_bytes)
+        proof
+            .serialize_uncompressed(&mut proof_bytes)
             .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
 
         // Build public inputs vector
@@ -356,7 +376,11 @@ impl ProofGenerator {
         };
 
         self.cache.insert(zk_proof.clone());
-        info!("Generated Groth16 proof {} for intent {}", hex::encode(proof_id), hex::encode(input.intent_id));
+        info!(
+            "Generated Groth16 proof {} for intent {}",
+            hex::encode(proof_id),
+            hex::encode(input.intent_id)
+        );
         Ok(zk_proof)
     }
 
@@ -365,7 +389,8 @@ impl ProofGenerator {
             input.intent_id.as_slice(),
             &input.min_dest_amount.to_be_bytes(),
             &input.source_state_root,
-        ].concat();
+        ]
+        .concat();
         sha256(&data)
     }
 }
@@ -385,30 +410,34 @@ impl ProofVerifier {
 
     /// Verify a Groth16 proof.  Returns true if valid.
     pub fn verify(&self, proof: &ZKProof) -> BleepConnectResult<bool> {
-        let groth_proof = Groth16Proof::<Bls12_381>::deserialize_uncompressed(
-            proof.groth16_bytes.as_slice()
-        ).map_err(|e| BleepConnectError::ProofVerificationFailed(
-            format!("Deserialize proof: {e:?}")
-        ))?;
+        let groth_proof =
+            Groth16Proof::<Bls12_381>::deserialize_uncompressed(proof.groth16_bytes.as_slice())
+                .map_err(|e| {
+                    BleepConnectError::ProofVerificationFailed(format!("Deserialize proof: {e:?}"))
+                })?;
 
         // Deserialize public inputs (each is serialized separately)
         let mut public_inputs = Vec::new();
         for pi_bytes in &proof.public_inputs {
-            let fr = Fr::deserialize_uncompressed(pi_bytes.as_slice())
-                .map_err(|e| BleepConnectError::ProofVerificationFailed(
-                    format!("Deserialize public input: {e:?}")
-                ))?;
+            let fr = Fr::deserialize_uncompressed(pi_bytes.as_slice()).map_err(|e| {
+                BleepConnectError::ProofVerificationFailed(format!(
+                    "Deserialize public input: {e:?}"
+                ))
+            })?;
             public_inputs.push(fr);
         }
 
-        let valid = Groth16::<Bls12_381>::verify_with_processed_vk(
-            &self.pvk,
-            &public_inputs,
-            &groth_proof,
-        ).map_err(|e| BleepConnectError::ProofVerificationFailed(format!("Verify: {e:?}")))?;
+        let valid =
+            Groth16::<Bls12_381>::verify_with_processed_vk(&self.pvk, &public_inputs, &groth_proof)
+                .map_err(|e| {
+                    BleepConnectError::ProofVerificationFailed(format!("Verify: {e:?}"))
+                })?;
 
         if valid {
-            debug!("Proof {} verified successfully", hex::encode(proof.proof_id));
+            debug!(
+                "Proof {} verified successfully",
+                hex::encode(proof.proof_id)
+            );
         } else {
             warn!("Proof {} FAILED verification", hex::encode(proof.proof_id));
         }
@@ -472,7 +501,12 @@ impl BatchAggregator {
         };
 
         self.completed_batches.insert(batch_id, proof_batch.clone());
-        info!("Batch {} aggregated: {} proofs, root={}", hex::encode(batch_id), proof_ids.len(), hex::encode(aggregated_root));
+        info!(
+            "Batch {} aggregated: {} proofs, root={}",
+            hex::encode(batch_id),
+            proof_ids.len(),
+            hex::encode(aggregated_root)
+        );
         Some(proof_batch)
     }
 
@@ -482,7 +516,9 @@ impl BatchAggregator {
 }
 
 impl Default for BatchAggregator {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,7 +554,7 @@ impl Layer3ZKProof {
         let valid = self.verifier.verify(&proof)?;
         if !valid {
             return Err(BleepConnectError::ProofVerificationFailed(
-                "Self-verification of generated proof failed".into()
+                "Self-verification of generated proof failed".into(),
             ));
         }
 
@@ -548,7 +584,10 @@ impl Layer3ZKProof {
                     created_at: now(),
                 };
                 self.commitment_chain.submit_commitment(commitment).await?;
-                info!("Batch {} anchored to commitment chain", hex::encode(batch.batch_id));
+                info!(
+                    "Batch {} anchored to commitment chain",
+                    hex::encode(batch.batch_id)
+                );
                 Ok(Some(batch.batch_id))
             }
         }
@@ -652,15 +691,17 @@ mod tests {
     #[test]
     fn test_batch_aggregator_merkle() {
         let agg = BatchAggregator::new();
-        let proofs: Vec<ZKProof> = (0..5).map(|i| ZKProof {
-            proof_id: sha256(&[i]),
-            proof_type: ProofType::TransferExecution,
-            proof_bytes: vec![i],
-            public_inputs: vec![i],
-            intent_id: sha256(&[i]),
-            generated_at: 0,
-            verified: true,
-        }).collect();
+        let proofs: Vec<ZKProof> = (0..5)
+            .map(|i| ZKProof {
+                proof_id: sha256(&[i]),
+                proof_type: ProofType::TransferExecution,
+                proof_bytes: vec![i],
+                public_inputs: vec![i],
+                intent_id: sha256(&[i]),
+                generated_at: 0,
+                verified: true,
+            })
+            .collect();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

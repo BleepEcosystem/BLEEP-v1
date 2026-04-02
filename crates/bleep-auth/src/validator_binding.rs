@@ -27,9 +27,9 @@
 
 use crate::errors::{AuthError, AuthResult};
 use bleep_crypto::pq_crypto::{KyberKem, KyberPublicKey};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use rand::RngCore;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -40,27 +40,27 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorBindingProof {
     /// Challenge ID issued by the server
-    pub challenge_id:    String,
+    pub challenge_id: String,
     /// SHA3-256(shared_secret ∥ challenge_id)
-    pub response_hash:   String,
+    pub response_hash: String,
 }
 
 /// A verified and registered binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorBinding {
     /// Unique binding ID: SHA3-256(operator_id ∥ validator_id)
-    pub binding_id:   String,
-    pub operator_id:  String,
+    pub binding_id: String,
+    pub operator_id: String,
     pub validator_id: String,
-    pub bound_at:     chrono::DateTime<chrono::Utc>,
-    pub active:       bool,
+    pub bound_at: chrono::DateTime<chrono::Utc>,
+    pub active: bool,
 }
 
 // Internal challenge record
 struct PendingChallenge {
     /// SHA3-256(shared_secret ∥ challenge_id) — what we expect from the operator
-    expected_response:   String,
-    issued_at:           chrono::DateTime<chrono::Utc>,
+    expected_response: String,
+    issued_at: chrono::DateTime<chrono::Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,8 +68,8 @@ struct PendingChallenge {
 // ---------------------------------------------------------------------------
 
 pub struct ValidatorBindingRegistry {
-    bindings:  HashMap<String, ValidatorBinding>, // binding_id → binding
-    pending:   HashMap<String, PendingChallenge>, // challenge_id → challenge
+    bindings: HashMap<String, ValidatorBinding>, // binding_id → binding
+    pending: HashMap<String, PendingChallenge>,  // challenge_id → challenge
     /// validator_id → binding_id (one active binding per validator)
     by_validator: HashMap<String, String>,
 }
@@ -77,8 +77,8 @@ pub struct ValidatorBindingRegistry {
 impl ValidatorBindingRegistry {
     pub fn new() -> Self {
         Self {
-            bindings:     HashMap::new(),
-            pending:      HashMap::new(),
+            bindings: HashMap::new(),
+            pending: HashMap::new(),
             by_validator: HashMap::new(),
         }
     }
@@ -108,16 +108,14 @@ impl ValidatorBindingRegistry {
 
         // ── Real Kyber-1024 KEM encapsulation ───────────────────────────────
         // Parse the validator's Kyber-1024 public key
-        let kyber_pk = KyberPublicKey::from_bytes(validator_public_key.to_vec())
-            .map_err(|e| AuthError::InvalidKeyMaterial(
-                format!("Kyber-1024 public key invalid: {}", e)
-            ))?;
+        let kyber_pk = KyberPublicKey::from_bytes(validator_public_key.to_vec()).map_err(|e| {
+            AuthError::InvalidKeyMaterial(format!("Kyber-1024 public key invalid: {}", e))
+        })?;
 
         // Encapsulate: produces (shared_secret_32B, ciphertext_1568B)
-        let (shared_secret, kyber_ct) = KyberKem::encapsulate(&kyber_pk)
-            .map_err(|e| AuthError::InvalidKeyMaterial(
-                format!("Kyber-1024 encapsulation failed: {}", e)
-            ))?;
+        let (shared_secret, kyber_ct) = KyberKem::encapsulate(&kyber_pk).map_err(|e| {
+            AuthError::InvalidKeyMaterial(format!("Kyber-1024 encapsulation failed: {}", e))
+        })?;
 
         let kyber_ciphertext = kyber_ct.to_vec();
         // ────────────────────────────────────────────────────────────────────
@@ -130,10 +128,13 @@ impl ValidatorBindingRegistry {
             hex::encode(h.finalize())
         };
 
-        self.pending.insert(challenge_id.clone(), PendingChallenge {
-            expected_response,
-            issued_at: chrono::Utc::now(),
-        });
+        self.pending.insert(
+            challenge_id.clone(),
+            PendingChallenge {
+                expected_response,
+                issued_at: chrono::Utc::now(),
+            },
+        );
 
         Ok((challenge_id, kyber_ciphertext))
     }
@@ -143,12 +144,14 @@ impl ValidatorBindingRegistry {
     /// Verify a `ValidatorBindingProof` and register the binding if valid.
     pub fn bind(
         &mut self,
-        operator_id:  String,
+        operator_id: String,
         validator_id: String,
-        proof:        ValidatorBindingProof,
+        proof: ValidatorBindingProof,
     ) -> AuthResult<ValidatorBinding> {
         // Consume the challenge (single-use)
-        let challenge = self.pending.remove(&proof.challenge_id)
+        let challenge = self
+            .pending
+            .remove(&proof.challenge_id)
             .ok_or_else(|| AuthError::ChallengeNotFound(proof.challenge_id.clone()))?;
 
         // TTL check (5 minutes)
@@ -157,7 +160,10 @@ impl ValidatorBindingRegistry {
         }
 
         // Constant-time comparison
-        if !constant_time_eq(proof.response_hash.as_bytes(), challenge.expected_response.as_bytes()) {
+        if !constant_time_eq(
+            proof.response_hash.as_bytes(),
+            challenge.expected_response.as_bytes(),
+        ) {
             return Err(AuthError::ValidatorBindingError(
                 "Binding proof verification failed — incorrect response hash".into(),
             ));
@@ -198,18 +204,25 @@ impl ValidatorBindingRegistry {
     }
 
     pub fn get_binding_for_validator(&self, validator_id: &str) -> Option<&ValidatorBinding> {
-        self.by_validator.get(validator_id)
+        self.by_validator
+            .get(validator_id)
             .and_then(|bid| self.bindings.get(bid))
             .filter(|b| b.active)
     }
 
-    pub fn total_bindings(&self) -> usize { self.bindings.len() }
+    pub fn total_bindings(&self) -> usize {
+        self.bindings.len()
+    }
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) { diff |= x ^ y; }
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
     diff == 0
 }
 
@@ -219,7 +232,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_crypto::pq_crypto::{KyberKem, KyberSecretKey, KyberCiphertext};
+    use bleep_crypto::pq_crypto::{KyberCiphertext, KyberKem, KyberSecretKey};
 
     /// Generate a real Kyber-1024 keypair and return (pk_bytes, sk).
     fn real_kyber_keypair() -> (Vec<u8>, bleep_crypto::pq_crypto::KyberSecretKey) {
@@ -256,11 +269,16 @@ mod tests {
 
         let response = compute_response_real(&sk, &cid, &ct);
 
-        let binding = reg.bind(
-            "op1".into(),
-            "val1".into(),
-            ValidatorBindingProof { challenge_id: cid, response_hash: response },
-        ).expect("bind");
+        let binding = reg
+            .bind(
+                "op1".into(),
+                "val1".into(),
+                ValidatorBindingProof {
+                    challenge_id: cid,
+                    response_hash: response,
+                },
+            )
+            .expect("bind");
 
         assert_eq!(binding.validator_id, "val1");
         assert!(reg.get_binding_for_validator("val1").is_some());
@@ -272,8 +290,12 @@ mod tests {
         let (pk_bytes, _sk) = real_kyber_keypair();
         let (cid, _) = reg.issue_challenge(&pk_bytes).expect("issue_challenge");
         let result = reg.bind(
-            "op1".into(), "val1".into(),
-            ValidatorBindingProof { challenge_id: cid, response_hash: "deadbeef".into() },
+            "op1".into(),
+            "val1".into(),
+            ValidatorBindingProof {
+                challenge_id: cid,
+                response_hash: "deadbeef".into(),
+            },
         );
         assert!(result.is_err(), "Wrong response hash must be rejected");
     }
@@ -285,12 +307,25 @@ mod tests {
         let (cid, ct) = reg.issue_challenge(&pk_bytes).expect("issue_challenge");
         let r = compute_response_real(&sk, &cid, &ct);
 
-        reg.bind("op1".into(), "val1".into(),
-            ValidatorBindingProof { challenge_id: cid.clone(), response_hash: r.clone() }).unwrap();
+        reg.bind(
+            "op1".into(),
+            "val1".into(),
+            ValidatorBindingProof {
+                challenge_id: cid.clone(),
+                response_hash: r.clone(),
+            },
+        )
+        .unwrap();
 
         // Second use of the same challenge must fail (challenge was consumed)
-        let result = reg.bind("op1".into(), "val2".into(),
-            ValidatorBindingProof { challenge_id: cid, response_hash: r });
+        let result = reg.bind(
+            "op1".into(),
+            "val2".into(),
+            ValidatorBindingProof {
+                challenge_id: cid,
+                response_hash: r,
+            },
+        );
         assert!(result.is_err(), "Replayed challenge must be rejected");
     }
 
@@ -312,16 +347,32 @@ mod tests {
         // First binding
         let (cid1, ct1) = reg.issue_challenge(&pk1).expect("challenge1");
         let r1 = compute_response_real(&sk1, &cid1, &ct1);
-        reg.bind("op1".into(), "val1".into(),
-            ValidatorBindingProof { challenge_id: cid1, response_hash: r1 }).unwrap();
+        reg.bind(
+            "op1".into(),
+            "val1".into(),
+            ValidatorBindingProof {
+                challenge_id: cid1,
+                response_hash: r1,
+            },
+        )
+        .unwrap();
 
         // Second binding for same validator replaces first
         let (cid2, ct2) = reg.issue_challenge(&pk2).expect("challenge2");
         let r2 = compute_response_real(&sk2, &cid2, &ct2);
-        reg.bind("op2".into(), "val1".into(),
-            ValidatorBindingProof { challenge_id: cid2, response_hash: r2 }).unwrap();
+        reg.bind(
+            "op2".into(),
+            "val1".into(),
+            ValidatorBindingProof {
+                challenge_id: cid2,
+                response_hash: r2,
+            },
+        )
+        .unwrap();
 
-        let b = reg.get_binding_for_validator("val1").expect("binding exists");
+        let b = reg
+            .get_binding_for_validator("val1")
+            .expect("binding exists");
         assert_eq!(b.operator_id, "op2", "Second binding must supersede first");
         assert!(b.active);
     }

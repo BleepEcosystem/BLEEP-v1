@@ -45,21 +45,21 @@
 //! Old code: `filter(reputation > 0.8)` → flagged as malicious.
 //! Fixed: `filter(reputation < REPUTATION_SUSPECT_THRESHOLD)` → marked inactive.
 
+use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use log::{info, warn};
 
+use bincode;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use sha2::{Digest, Sha256};
-use bincode;
 
-use bleep_core::block::Block;
-use bleep_core::blockchain::Blockchain;
+use crate::ai_adaptive_logic::AIAdaptiveConsensus;
 use crate::blockchain_state::BlockchainState;
 use crate::networking::NetworkingModule;
+use bleep_core::block::Block;
+use bleep_core::blockchain::Blockchain;
 use bleep_crypto::zkp_verification::BLEEPError;
-use crate::ai_adaptive_logic::AIAdaptiveConsensus;
 
 // ── SPHINCS+-SHAKE-256-simple constants ───────────────────────────────────────
 
@@ -133,22 +133,22 @@ pub struct Validator {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct BLEEPAdaptiveConsensus {
-    consensus_mode:     ConsensusMode,
+    consensus_mode: ConsensusMode,
     network_reliability: f64,
-    validators:         HashMap<String, Validator>,
+    validators: HashMap<String, Validator>,
     #[allow(dead_code)]
-    pow_difficulty:     usize,
-    networking:         Arc<NetworkingModule>,
+    pow_difficulty: usize,
+    networking: Arc<NetworkingModule>,
     #[allow(dead_code)]
-    ai_engine:          Arc<AIAdaptiveConsensus>,
+    ai_engine: Arc<AIAdaptiveConsensus>,
     #[allow(dead_code)]
-    blockchain:         Arc<RwLock<Blockchain>>,
+    blockchain: Arc<RwLock<Blockchain>>,
 
     // S-01 FIX: persistent signing identity (never ephemeral).
-    signing_key:        ValidatorSigningKey,
+    signing_key: ValidatorSigningKey,
 
     // S-05 FIX: peer public-key registry for correct verification.
-    validator_pubkeys:  HashMap<String, Vec<u8>>,
+    validator_pubkeys: HashMap<String, Vec<u8>>,
 }
 
 impl BLEEPAdaptiveConsensus {
@@ -157,21 +157,19 @@ impl BLEEPAdaptiveConsensus {
     /// * `validator_pubkeys` — maps validator_id → SPHINCS+ pk bytes (S-05 fix).
     /// * `signing_key`       — this node's persistent signing identity (S-01 fix).
     pub fn new(
-        validators:        HashMap<String, Validator>,
+        validators: HashMap<String, Validator>,
         validator_pubkeys: HashMap<String, Vec<u8>>,
-        signing_key:       ValidatorSigningKey,
-        networking:        Arc<NetworkingModule>,
-        ai_engine:         Arc<AIAdaptiveConsensus>,
+        signing_key: ValidatorSigningKey,
+        networking: Arc<NetworkingModule>,
+        ai_engine: Arc<AIAdaptiveConsensus>,
     ) -> Self {
-        use bleep_core::transaction_pool::TransactionPool;
         use bleep_core::blockchain::BlockchainState;
+        use bleep_core::transaction_pool::TransactionPool;
 
-        let tx_pool       = TransactionPool::new(10_000);
-        let state         = BlockchainState::default();
+        let tx_pool = TransactionPool::new(10_000);
+        let state = BlockchainState::default();
         let genesis_block = Block::new(0, vec![], "0".to_string());
-        let blockchain    = Arc::new(RwLock::new(
-            Blockchain::new(genesis_block, state, tx_pool)
-        ));
+        let blockchain = Arc::new(RwLock::new(Blockchain::new(genesis_block, state, tx_pool)));
 
         BLEEPAdaptiveConsensus {
             consensus_mode: ConsensusMode::PoS,
@@ -222,7 +220,7 @@ impl BLEEPAdaptiveConsensus {
                 "Switching consensus mode to {:?} (load={}%, latency={}ms, reliability={:.2})",
                 predicted_mode, network_load, avg_latency, network_reliability
             );
-            self.consensus_mode     = predicted_mode;
+            self.consensus_mode = predicted_mode;
             self.network_reliability = network_reliability;
         }
     }
@@ -238,7 +236,10 @@ impl BLEEPAdaptiveConsensus {
     ) -> Result<(), BLEEPError> {
         let success = self.run_consensus(block, state);
         if success {
-            info!("Block {} finalized using {:?}", block.index, self.consensus_mode);
+            info!(
+                "Block {} finalized using {:?}",
+                block.index, self.consensus_mode
+            );
             return Ok(());
         }
 
@@ -249,7 +250,10 @@ impl BLEEPAdaptiveConsensus {
         self.switch_consensus_mode(50, 40);
 
         if self.run_consensus(block, state) {
-            info!("Block {} finalized on retry using {:?}", block.index, self.consensus_mode);
+            info!(
+                "Block {} finalized on retry using {:?}",
+                block.index, self.consensus_mode
+            );
             Ok(())
         } else {
             Err(BLEEPError::ConsensusFailed(format!(
@@ -261,9 +265,9 @@ impl BLEEPAdaptiveConsensus {
 
     fn run_consensus(&mut self, block: &Block, state: &mut BlockchainState) -> bool {
         match self.consensus_mode {
-            ConsensusMode::PoS  => self.pos_algorithm(block, state),
+            ConsensusMode::PoS => self.pos_algorithm(block, state),
             ConsensusMode::PBFT => self.pbft_algorithm(block, state),
-            ConsensusMode::PoW  => self.pow_algorithm(block),
+            ConsensusMode::PoW => self.pow_algorithm(block),
         }
     }
 
@@ -271,9 +275,7 @@ impl BLEEPAdaptiveConsensus {
 
     fn pos_algorithm(&self, block: &Block, state: &mut BlockchainState) -> bool {
         let mut sorted: Vec<&Validator> = self.validators.values().collect();
-        sorted.sort_by(|a, b| {
-            b.stake.cmp(&a.stake).then_with(|| a.id.cmp(&b.id))
-        });
+        sorted.sort_by(|a, b| b.stake.cmp(&a.stake).then_with(|| a.id.cmp(&b.id)));
         if let Some(v) = sorted.first() {
             if v.active && v.reputation > 0.8 {
                 return state.add_block(block.clone()).is_ok();
@@ -296,8 +298,11 @@ impl BLEEPAdaptiveConsensus {
     #[allow(dead_code)]
     fn pow_algorithm(&mut self, block: &Block) -> bool {
         let block_bytes = match bincode::serialize(block) {
-            Ok(b)  => b,
-            Err(e) => { warn!("PoW: serialise failed: {}", e); return false; }
+            Ok(b) => b,
+            Err(e) => {
+                warn!("PoW: serialise failed: {}", e);
+                return false;
+            }
         };
         let commitment: [u8; 32] = Sha256::digest(&block_bytes).into();
         let target = "0".repeat(self.pow_difficulty);
@@ -308,7 +313,12 @@ impl BLEEPAdaptiveConsensus {
             h.update(&nonce.to_le_bytes());
             let hash_hex = hex::encode(h.finalize());
             if hash_hex.starts_with(&target) {
-                info!("PoW block {}: nonce={}, hash={}", block.index, nonce, &hash_hex[..16]);
+                info!(
+                    "PoW block {}: nonce={}, hash={}",
+                    block.index,
+                    nonce,
+                    &hash_hex[..16]
+                );
                 self.adjust_pow_difficulty();
                 return true;
             }
@@ -332,9 +342,13 @@ impl BLEEPAdaptiveConsensus {
     fn pbft_algorithm(&self, block: &Block, state: &mut BlockchainState) -> bool {
         let leader = match self.select_pbft_leader() {
             Some(l) => l,
-            None    => return false,
+            None => return false,
         };
-        if self.networking.broadcast_proposal(block, &leader.id.clone()).is_err() {
+        if self
+            .networking
+            .broadcast_proposal(block, &leader.id.clone())
+            .is_err()
+        {
             warn!("PBFT: broadcast failed for block {}", block.index);
             return false;
         }
@@ -346,7 +360,8 @@ impl BLEEPAdaptiveConsensus {
         if !self.has_quorum(&candidates) {
             warn!(
                 "PBFT: insufficient eligible voters for block {} ({}/{})",
-                block.index, candidates.len(),
+                block.index,
+                candidates.len(),
                 (self.validators.len() as f64 * 0.66).ceil() as usize
             );
             return false;
@@ -355,7 +370,9 @@ impl BLEEPAdaptiveConsensus {
     }
 
     fn select_pbft_leader(&self) -> Option<&Validator> {
-        let mut active: Vec<&Validator> = self.validators.values()
+        let mut active: Vec<&Validator> = self
+            .validators
+            .values()
             .filter(|v| v.active && v.reputation > 0.7)
             .collect();
         if active.is_empty() {
@@ -369,7 +386,8 @@ impl BLEEPAdaptiveConsensus {
     /// Return the set of validator IDs eligible to vote (local registry only).
     /// S-04: renamed from `collect_votes`; no longer claims to count network votes.
     fn eligible_voters(&self) -> HashSet<String> {
-        self.validators.iter()
+        self.validators
+            .iter()
             .filter(|(_, v)| v.active && v.reputation >= MIN_REPUTATION_FOR_VOTE)
             .map(|(id, _)| id.clone())
             .collect()
@@ -393,14 +411,19 @@ impl BLEEPAdaptiveConsensus {
     /// Actual stake slashing requires cryptographic evidence and goes through
     /// `SlashingEngine`, not this method.
     pub fn monitor_validators(&mut self) {
-        let suspects: Vec<String> = self.validators.iter()
+        let suspects: Vec<String> = self
+            .validators
+            .iter()
             .filter(|(_, v)| v.reputation < REPUTATION_SUSPECT_THRESHOLD)
             .map(|(id, _)| id.clone())
             .collect();
 
         for id in suspects {
             if let Some(v) = self.validators.get_mut(&id) {
-                warn!("Validator {} critically low reputation ({:.3}); deactivating.", id, v.reputation);
+                warn!(
+                    "Validator {} critically low reputation ({:.3}); deactivating.",
+                    id, v.reputation
+                );
                 v.active = false;
             }
         }
@@ -428,8 +451,11 @@ impl BLEEPAdaptiveConsensus {
             .map_err(|e| format!("Invalid signing key: {:?}", e))?;
 
         let sig = sphincsshake256fsimple::detached_sign(&block_hash, &sk);
-        info!("Block {} signed (sig_len={})", block.index,
-              sphincsshake256fsimple::DetachedSignature::as_bytes(&sig).len());
+        info!(
+            "Block {} signed (sig_len={})",
+            block.index,
+            sphincsshake256fsimple::DetachedSignature::as_bytes(&sig).len()
+        );
         Ok(sphincsshake256fsimple::DetachedSignature::as_bytes(&sig).to_vec())
     }
 
@@ -454,28 +480,47 @@ impl BLEEPAdaptiveConsensus {
         };
 
         let pk = match sphincsshake256fsimple::PublicKey::from_bytes(pk_bytes) {
-            Ok(k)  => k,
-            Err(e) => { warn!("verify_signature: bad pk for '{}': {:?}", validator_id, e); return false; }
+            Ok(k) => k,
+            Err(e) => {
+                warn!("verify_signature: bad pk for '{}': {:?}", validator_id, e);
+                return false;
+            }
         };
 
         if signature.len() != SPHINCS_SIG_LEN {
-            warn!("verify_signature: bad sig len {} for '{}'", signature.len(), validator_id);
+            warn!(
+                "verify_signature: bad sig len {} for '{}'",
+                signature.len(),
+                validator_id
+            );
             return false;
         }
         let sig = match sphincsshake256fsimple::DetachedSignature::from_bytes(signature) {
-            Ok(s)  => s,
-            Err(e) => { warn!("verify_signature: malformed sig from '{}': {:?}", validator_id, e); return false; }
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "verify_signature: malformed sig from '{}': {:?}",
+                    validator_id, e
+                );
+                return false;
+            }
         };
 
         let block_bytes = match bincode::serialize(block) {
-            Ok(b)  => b,
-            Err(e) => { warn!("verify_signature: serialise failed: {}", e); return false; }
+            Ok(b) => b,
+            Err(e) => {
+                warn!("verify_signature: serialise failed: {}", e);
+                return false;
+            }
         };
         let block_hash: [u8; 32] = Sha256::digest(&block_bytes).into();
 
         let ok = sphincsshake256fsimple::verify_detached_signature(&sig, &block_hash, &pk).is_ok();
         if !ok {
-            warn!("verify_signature: FAILED for block {} from '{}'", block.index, validator_id);
+            warn!(
+                "verify_signature: FAILED for block {} from '{}'",
+                block.index, validator_id
+            );
         }
         ok
     }
@@ -512,7 +557,10 @@ mod tests {
         Block::new(index, vec![], format!("prev_{}", index))
     }
 
-    fn make_consensus(key: ValidatorSigningKey, pubkeys: HashMap<String, Vec<u8>>) -> BLEEPAdaptiveConsensus {
+    fn make_consensus(
+        key: ValidatorSigningKey,
+        pubkeys: HashMap<String, Vec<u8>>,
+    ) -> BLEEPAdaptiveConsensus {
         BLEEPAdaptiveConsensus::new(
             HashMap::new(),
             pubkeys,
@@ -527,41 +575,50 @@ mod tests {
     #[test]
     fn test_sign_verify_roundtrip() {
         let key = ValidatorSigningKey::generate();
-        let pk  = key.pk_bytes.clone();
+        let pk = key.pk_bytes.clone();
         let vid = "v1".to_string();
         let mut pubkeys = HashMap::new();
         pubkeys.insert(vid.clone(), pk);
 
-        let c     = make_consensus(key, pubkeys);
+        let c = make_consensus(key, pubkeys);
         let block = make_block(42);
-        let sig   = c.sign_block(&block, &vid).expect("sign failed");
+        let sig = c.sign_block(&block, &vid).expect("sign failed");
 
-        assert!(c.verify_signature(&block, &sig, &vid), "S-01: round-trip must pass");
+        assert!(
+            c.verify_signature(&block, &sig, &vid),
+            "S-01: round-trip must pass"
+        );
     }
 
     #[test]
     fn test_verify_fails_unknown_validator() {
-        let c     = make_consensus(ValidatorSigningKey::generate(), HashMap::new());
+        let c = make_consensus(ValidatorSigningKey::generate(), HashMap::new());
         let block = make_block(1);
-        let fake  = vec![0u8; SPHINCS_SIG_LEN];
-        assert!(!c.verify_signature(&block, &fake, "nobody"), "S-05: unknown validator → false");
+        let fake = vec![0u8; SPHINCS_SIG_LEN];
+        assert!(
+            !c.verify_signature(&block, &fake, "nobody"),
+            "S-05: unknown validator → false"
+        );
     }
 
     #[test]
     fn test_verify_fails_wrong_validator_key() {
         let key_v1 = ValidatorSigningKey::generate();
         let key_v2 = ValidatorSigningKey::generate();
-        let pk_v2  = key_v2.pk_bytes.clone();
+        let pk_v2 = key_v2.pk_bytes.clone();
 
         let mut pubkeys = HashMap::new();
         pubkeys.insert("v2".to_string(), pk_v2);
 
         // Node signs as v1, registry only has v2.
-        let c     = make_consensus(key_v1, pubkeys);
+        let c = make_consensus(key_v1, pubkeys);
         let block = make_block(7);
-        let sig   = c.sign_block(&block, "v1").expect("sign failed");
+        let sig = c.sign_block(&block, "v1").expect("sign failed");
 
-        assert!(!c.verify_signature(&block, &sig, "v2"), "S-05: v1 sig must not verify as v2");
+        assert!(
+            !c.verify_signature(&block, &sig, "v2"),
+            "S-05: v1 sig must not verify as v2"
+        );
     }
 
     // ── S-02: Deterministic proposer seed ────────────────────────────────────
@@ -594,7 +651,7 @@ mod tests {
         h.update(&42u64.to_le_bytes());
         h.update(b"genesis_hash");
         let d = h.finalize();
-        let expected = u64::from_le_bytes([d[0],d[1],d[2],d[3],d[4],d[5],d[6],d[7]]);
+        let expected = u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]);
         assert_eq!(
             BLEEPAdaptiveConsensus::compute_proposer_seed(42, "genesis_hash"),
             expected,
@@ -607,7 +664,7 @@ mod tests {
     #[test]
     fn test_pow_hash_deterministic_per_nonce() {
         let block = make_block(0);
-        let bytes  = bincode::serialize(&block).unwrap();
+        let bytes = bincode::serialize(&block).unwrap();
         let commit: [u8; 32] = Sha256::digest(&bytes).into();
 
         let hash_fn = |n: u64| {
@@ -617,8 +674,16 @@ mod tests {
             hex::encode(h.finalize())
         };
 
-        assert_eq!(hash_fn(0), hash_fn(0), "S-03: same nonce must give same hash");
-        assert_ne!(hash_fn(0), hash_fn(1), "S-03: different nonces must give different hashes");
+        assert_eq!(
+            hash_fn(0),
+            hash_fn(0),
+            "S-03: same nonce must give same hash"
+        );
+        assert_ne!(
+            hash_fn(0),
+            hash_fn(1),
+            "S-03: different nonces must give different hashes"
+        );
     }
 
     // ── monitor_validators logic ──────────────────────────────────────────────
@@ -626,14 +691,28 @@ mod tests {
     #[test]
     fn test_monitor_deactivates_low_reputation() {
         let mut validators = HashMap::new();
-        validators.insert("good".into(), Validator {
-            id: "good".into(), reputation: 0.95, latency: 10,
-            stake: 1000, active: true, last_signed_block: 0,
-        });
-        validators.insert("bad".into(), Validator {
-            id: "bad".into(), reputation: 0.05, latency: 999,
-            stake: 100, active: true, last_signed_block: 0,
-        });
+        validators.insert(
+            "good".into(),
+            Validator {
+                id: "good".into(),
+                reputation: 0.95,
+                latency: 10,
+                stake: 1000,
+                active: true,
+                last_signed_block: 0,
+            },
+        );
+        validators.insert(
+            "bad".into(),
+            Validator {
+                id: "bad".into(),
+                reputation: 0.05,
+                latency: 999,
+                stake: 100,
+                active: true,
+                last_signed_block: 0,
+            },
+        );
 
         let mut c = BLEEPAdaptiveConsensus::new(
             validators,
@@ -646,7 +725,7 @@ mod tests {
         c.monitor_validators();
 
         assert!(c.validators["good"].active, "high-rep must remain active");
-        assert!(!c.validators["bad"].active,  "low-rep must be deactivated");
+        assert!(!c.validators["bad"].active, "low-rep must be deactivated");
     }
 
     // ── register_validator_pubkey ─────────────────────────────────────────────

@@ -29,9 +29,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionToken {
     /// Raw JWT string — present as `Authorization: Bearer <token>`
-    pub token:      String,
+    pub token: String,
     /// Unique token ID (use this to revoke a specific token)
-    pub jti:        String,
+    pub jti: String,
     /// Wall-clock expiry
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -40,13 +40,13 @@ pub struct SessionToken {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionClaims {
     /// Subject — the authenticated identity ID
-    pub sub:   String,
+    pub sub: String,
     /// JWT ID — unique per issuance
-    pub jti:   String,
+    pub jti: String,
     /// Issued-at (Unix seconds)
-    pub iat:   i64,
+    pub iat: i64,
     /// Expiry (Unix seconds)
-    pub exp:   i64,
+    pub exp: i64,
     /// RBAC roles embedded at issuance time
     pub roles: Vec<Role>,
     /// Per-token CSPRNG nonce (replay prevention)
@@ -80,12 +80,13 @@ impl SessionManager {
             ));
         }
         Ok(Self {
-            active_key:     tokio::sync::RwLock::new(
-                (EncodingKey::from_secret(&secret), DecodingKey::from_secret(&secret))
-            ),
-            previous_key:   tokio::sync::RwLock::new(None),
-            revoked:         Arc::new(DashMap::new()),
-            rotation_count:  std::sync::atomic::AtomicU64::new(0),
+            active_key: tokio::sync::RwLock::new((
+                EncodingKey::from_secret(&secret),
+                DecodingKey::from_secret(&secret),
+            )),
+            previous_key: tokio::sync::RwLock::new(None),
+            revoked: Arc::new(DashMap::new()),
+            rotation_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -121,15 +122,18 @@ impl SessionManager {
         *self.previous_key.write().await = old_dec;
         *self.active_key.write().await = (new_enc, new_dec);
 
-        let count = self.rotation_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let count = self
+            .rotation_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         log::info!("JWT secret rotated (rotation #{})", count);
         Ok(count)
     }
 
     /// Number of times the secret has been rotated since startup.
     pub fn rotation_count(&self) -> u64 {
-        self.rotation_count.load(std::sync::atomic::Ordering::SeqCst)
+        self.rotation_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     // ── Issue ─────────────────────────────────────────────────────────────
@@ -141,10 +145,10 @@ impl SessionManager {
     pub fn issue(
         &self,
         identity_id: &str,
-        roles:       &[Role],
-        ttl:         chrono::Duration,
+        roles: &[Role],
+        ttl: chrono::Duration,
     ) -> AuthResult<SessionToken> {
-        let now        = chrono::Utc::now();
+        let now = chrono::Utc::now();
         let expires_at = now + ttl;
 
         // Unique token ID
@@ -158,10 +162,10 @@ impl SessionManager {
         let nonce = hex::encode(nonce_raw);
 
         let claims = SessionClaims {
-            sub:   identity_id.to_string(),
-            jti:   jti.clone(),
-            iat:   now.timestamp(),
-            exp:   expires_at.timestamp(),
+            sub: identity_id.to_string(),
+            jti: jti.clone(),
+            iat: now.timestamp(),
+            exp: expires_at.timestamp(),
             roles: roles.to_vec(),
             nonce,
         };
@@ -170,7 +174,11 @@ impl SessionManager {
         let token = encode(&Header::new(Algorithm::HS256), &claims, &enc_key.0)
             .map_err(|e| AuthError::CryptoError(format!("JWT encode: {e}")))?;
 
-        Ok(SessionToken { token, jti, expires_at })
+        Ok(SessionToken {
+            token,
+            jti,
+            expires_at,
+        })
     }
 
     // ── Validate ──────────────────────────────────────────────────────────
@@ -185,14 +193,13 @@ impl SessionManager {
         v.validate_exp = true;
 
         let dec_key = self.active_key.blocking_read();
-        let data = decode::<SessionClaims>(token, &dec_key.1, &v)
-            .map_err(|e| {
-                use jsonwebtoken::errors::ErrorKind;
-                match e.kind() {
-                    ErrorKind::ExpiredSignature => AuthError::ExpiredSession,
-                    _                           => AuthError::InvalidSession,
-                }
-            })?;
+        let data = decode::<SessionClaims>(token, &dec_key.1, &v).map_err(|e| {
+            use jsonwebtoken::errors::ErrorKind;
+            match e.kind() {
+                ErrorKind::ExpiredSignature => AuthError::ExpiredSession,
+                _ => AuthError::InvalidSession,
+            }
+        })?;
 
         let claims = data.claims;
 
@@ -227,7 +234,9 @@ impl SessionManager {
         self.revoked.retain(|_, revoked_at| *revoked_at > cutoff);
     }
 
-    pub fn revoked_count(&self) -> usize { self.revoked.len() }
+    pub fn revoked_count(&self) -> usize {
+        self.revoked.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,17 +253,21 @@ mod tests {
 
     #[test]
     fn issue_and_validate() {
-        let m   = mgr();
-        let tok = m.issue("op1", &[Role::NodeOperator], chrono::Duration::hours(1)).unwrap();
-        let c   = m.validate(&tok.token).unwrap();
+        let m = mgr();
+        let tok = m
+            .issue("op1", &[Role::NodeOperator], chrono::Duration::hours(1))
+            .unwrap();
+        let c = m.validate(&tok.token).unwrap();
         assert_eq!(c.sub, "op1");
         assert!(c.roles.contains(&Role::NodeOperator));
     }
 
     #[test]
     fn revocation_works() {
-        let m   = mgr();
-        let tok = m.issue("op2", &[Role::ReadOnly], chrono::Duration::hours(1)).unwrap();
+        let m = mgr();
+        let tok = m
+            .issue("op2", &[Role::ReadOnly], chrono::Duration::hours(1))
+            .unwrap();
         m.revoke(&tok.jti).unwrap();
         assert_eq!(m.validate(&tok.token), Err(AuthError::RevokedSession));
     }
