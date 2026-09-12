@@ -582,4 +582,41 @@ mod tests {
             ParallelBatchSigProver::verify_block(tampered_pi, result.proof, &fast_options);
         assert!(verify_result.is_err(), "verification must fail with tampered public inputs");
     }
+
+    #[test]
+    #[ignore = "explicit benchmark: run with cargo test -p bleep-zkp --lib benchmark_100_tx -- --ignored --nocapture"]
+    fn benchmark_100_tx_proof_generation_and_verification() {
+        let transaction_count = 100;
+        let signatures = fake_sigs(transaction_count);
+        let secret_seed = [0x42u8; 32];
+        let prover = ParallelBatchSigProver::new(100, bleep_proof_options());
+        let public_inputs = test_pub_inputs(transaction_count as u32);
+
+        let commitment_start = std::time::Instant::now();
+        let (commitment_root, signature_hashes) = compute_commitment_parallel(&signatures);
+        let commitment_ms = commitment_start.elapsed().as_secs_f64() * 1_000.0;
+
+        let mut proof_inputs = public_inputs;
+        proof_inputs.sig_commitment_root = commitment_root;
+        proof_inputs.sk_seed_hash = hash_sk_seed(&secret_seed);
+
+        let trace_start = std::time::Instant::now();
+        let trace = prover.build_trace(&proof_inputs, &signature_hashes);
+        let trace_ms = trace_start.elapsed().as_secs_f64() * 1_000.0;
+
+        let prove_start = std::time::Instant::now();
+        let proof = prover.prove(trace).expect("100-transaction STARK generation failed");
+        let prove_ms = prove_start.elapsed().as_secs_f64() * 1_000.0;
+        let proof_bytes = proof.to_bytes().len();
+
+        let verify_start = std::time::Instant::now();
+        ParallelBatchSigProver::verify_block(proof_inputs, proof, &bleep_proof_options())
+            .expect("100-transaction STARK verification failed");
+        let verify_ms = verify_start.elapsed().as_secs_f64() * 1_000.0;
+
+        let total_ms = commitment_ms + trace_ms + prove_ms + verify_ms;
+        eprintln!(
+            "100-tx STARK benchmark: commitment_ms={commitment_ms:.2}, trace_ms={trace_ms:.2}, prove_ms={prove_ms:.2}, verify_ms={verify_ms:.2}, total_ms={total_ms:.2}, proof_bytes={proof_bytes}"
+        );
+    }
 }
