@@ -495,6 +495,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(Arc::clone(&p2p_node)), // direct gossip broadcast
         Some(sal_bridge.clone()),
     );
+    let block_producer = Arc::new(block_producer);
 
     // Subscribe a second receiver for GossipBridge BEFORE the producer starts
     let block_rx_gossip = block_producer.subscribe();
@@ -558,6 +559,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let blocks_relay = blocks_produced.clone();
     let txs_relay = txs_processed.clone();
     let gas_relay = gas_used_gauge.clone();
+    let rpc_blocks_relay = Arc::clone(&rpc_state.blocks_produced);
+    let rpc_txs_relay = Arc::clone(&rpc_state.txs_processed);
     let economics_relay = Arc::clone(&economics_runtime);
     let rpc_height_relay = Arc::clone(&rpc_state.chain_height);
 
@@ -571,8 +574,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
             match block_rx_sched.recv().await {
                 Ok(fb) => {
                     blocks_relay.increment();
+                    rpc_blocks_relay.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     for _ in 0..fb.tx_count {
                         txs_relay.increment();
+                        rpc_txs_relay.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     gas_relay.set(fb.gas_used as i64);
                     rpc_height_relay.store(fb.height, std::sync::atomic::Ordering::Relaxed);
@@ -636,8 +641,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    let producer_for_task = Arc::clone(&block_producer);
     let producer_handle = tokio::spawn(async move {
-        block_producer.run().await;
+        BlockProducer::run_arc(producer_for_task).await;
     });
 
     // GossipBridge: fan out FinalizedBlock events to connected P2P peers
@@ -742,6 +748,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let rpc_txs = Arc::clone(&rpc_state.txs_processed);
     let rpc_height = Arc::clone(&rpc_state.chain_height);
     let rpc_peers = Arc::clone(&rpc_state.peer_count);
+
+    // Attach the live producer after it exists so the benchmark endpoint reports
+    // real block production and chain height rather than a NOT_READY stub.
+    let rpc_state = rpc_state.with_block_producer(Arc::clone(&block_producer));
 
     // Seed peer counter from current P2P state
     rpc_peers.store(p2p_node.peer_count(), std::sync::atomic::Ordering::Relaxed);
