@@ -6,17 +6,15 @@ use rayon::prelude::*;
 pub struct BlockValidator;
 
 impl BlockValidator {
-    /// **Validate block integrity (Signature + Fiat-Shamir ZKP)**
+    /// **Validate block integrity (SPHINCS+ signature + extended STARK)**
     ///
     /// SAFETY: Rejects blocks with invalid signatures or ZK proofs.
     /// This is a mandatory check before adding a block to the chain.
     ///
     /// ## ZKP check
-    /// `verify_zkp()` validates either the legacy 64-byte Fiat-Shamir
-    /// commitment from `generate_zkp()` or the Winterfell STARK envelope
-    /// emitted by `BlockProducer`. The proof binds block fields, validator
-    /// identity, and tx count. An empty proof is allowed only for unsigned
-    /// genesis blocks.
+    /// `verify_zkp()` validates the extended Winterfell STARK envelope emitted
+    /// by `BlockProducer`. An empty proof is allowed only for unsigned genesis
+    /// blocks.
     pub fn validate_block(block: &Block, public_key: &[u8]) -> bool {
         // Verify validator signature (quantum-secure)
         match block.verify_signature(public_key) {
