@@ -235,6 +235,93 @@ For a production-grade capacity study, repeat this benchmark with:
 7. Several repetitions with median, p95, and p99 latency and throughput reporting.
 8. Explicit transaction status polling so accepted, included, committed, rejected, and expired transactions are counted separately.
 
+## Concurrent Stress Test
+
+After the sequential benchmark, a second run stressed the same live single-node instance with 10,000 transfers and 32 concurrent CLI submitters. This is a burst/concurrency test, not a direct comparison of protocol capacity: each worker still launched a separate `bleep-cli` process and performed SPHINCS+ signing.
+
+### Workload and outcome
+
+| Result | Measurement |
+|---|---:|
+| Concurrency | 32 workers |
+| Transactions submitted | 10,000 / 10,000 |
+| Result files | 10,000 |
+| Application errors | 0 |
+| Wall-clock duration | 379.831 s (6m 19.831s) |
+| Concurrent submission throughput | 26.327498 TPS |
+| Start time UTC | 2026-09-12T11:31:43Z |
+| End time UTC | 2026-09-12T11:38:03Z |
+
+The shell emitted this harness warning because `xargs` was given both `--max-args` and replacement mode:
+
+```text
+xargs: warning: options --max-args and --replace/-I/-i are mutually exclusive, ignoring previous --max-args value
+```
+
+This did not reduce concurrency: replacement mode still launched one command per input item and `-P 32` limited active commands to 32. The warning should be removed in a future harness revision by dropping `-n 1` when using `-I`.
+
+### Chain and processing readings
+
+The immediate post-run scrape reported height 578 while final blocks were still being produced. The settled scrape after the workload drained reported:
+
+```json
+{"status":"ok","height":580,"peers":0,"uptime_secs":4407,"version":"1.0.0"}
+```
+
+| Metric | Before stress | Settled after stress | Delta |
+|---|---:|---:|---:|
+| Chain height | 520 | 580 | +60 |
+| Blocks produced | 520 | 580 | +60 |
+| Transactions processed | 10,001 | 20,001 | +10,000 |
+| Peers | 0 | 0 | 0 |
+
+Derived settled rates for the 379.831-second run:
+
+| Derived metric | Result |
+|---|---:|
+| Transaction throughput | 26.327498 TPS |
+| Block production rate | 0.157965 blocks/s |
+| Average block interval | 6.331 s |
+| Average transactions per block | 166.667 |
+| Submission completion | 100% |
+| Settled processing completion | 100% |
+
+The lower apparent block rate and higher transactions-per-block value reflect batching under concurrent load. The node continued processing blocks after the submission command returned, so the settled values must be used for completion accounting.
+
+### Resource readings
+
+| Reading | Before | After | Change |
+|---|---:|---:|---:|
+| CPU percentage sample | 4.0% | 6.0% | +2.0 pp |
+| Memory percentage sample | 3.9% | 7.8% | +3.9 pp |
+| RSS | 652,244 KB | 1,286,500 KB | +634,256 KB |
+| VSZ | 1,285,240 KB | 1,944,744 KB | +659,504 KB |
+
+The shell timing output was `real_seconds=379.831 user_seconds=991.123 sys_seconds=222.727`. User and system CPU seconds exceed wall time because the 32 workers ran concurrently. The RSS increase is significant and should be investigated before treating this workload shape as production-ready.
+
+### Stress-test interpretation
+
+Compared with the sequential CLI run at 6.432982 TPS, this 32-worker run achieved 26.327498 TPS, a 4.095x throughput increase. The result is still dominated by CLI process startup, wallet loading, SPHINCS+ signing, and local RPC behavior. It does not establish multi-validator throughput, network propagation capacity, or finality latency.
+
+### Stress-test artifacts
+
+```text
+/tmp/bleep-stress-10000-c32/start.utc
+/tmp/bleep-stress-10000-c32/end.utc
+/tmp/bleep-stress-10000-c32/time.txt
+/tmp/bleep-stress-10000-c32/summary.txt
+/tmp/bleep-stress-10000-c32/health-before.json
+/tmp/bleep-stress-10000-c32/health-after.json
+/tmp/bleep-stress-10000-c32/metrics-before.txt
+/tmp/bleep-stress-10000-c32/metrics-after.txt
+/tmp/bleep-stress-10000-c32/process-before.txt
+/tmp/bleep-stress-10000-c32/process-after.txt
+/tmp/bleep-stress-10000-c32/out/
+/tmp/bleep-stress-10000-c32/err/
+```
+
+The per-request stderr files contain CLI debug diagnostics, so their non-zero file count is not an application-error count. The authoritative stress result is the summary's `submitted=10000` and `application_errors=0`, corroborated by the settled node counter delta.
+
 ## Raw Artifacts
 
 The raw files from this run were written outside the repository at:
