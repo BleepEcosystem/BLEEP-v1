@@ -36,13 +36,11 @@ use bleep_core::transaction_pool::TransactionPool;
 use bleep_core::ZKTransaction;
 use bleep_sig_availability::{broadcast_block_announcement, BlockId, GossipBroadcaster};
 use bleep_state::state_manager::StateManager;
-use bleep_zkp::{BlockProver, BlockValidityCircuit};
 use bleep_zkp::{
     ParallelBatchSigProver, ExtendedBlockPublicInputs,
     bleep_proof_options, EXTENDED_STARK_MAGIC, EXT_PUB_INPUTS_LEN,
 };
 use parking_lot::Mutex as PLMutex;
-use sha3::{Digest, Sha3_256};
 
 // P2P node for in-producer gossip broadcast
 use bleep_p2p::p2p_node::P2PNode;
@@ -244,6 +242,35 @@ impl BlockProducer {
         }
     }
 
+    /// Shared Arc-based runner used when the same producer is attached to RPC
+    /// state and also runs the block loop in a background task.
+    pub async fn run_arc(self_arc: Arc<Self>) {
+        info!(
+            "[BlockProducer] Starting — {}ms slots, validator={}",
+            BLOCK_INTERVAL_MS, self_arc.config.validator_id
+        );
+        let mut ticker = tokio::time::interval(Duration::from_millis(BLOCK_INTERVAL_MS));
+
+        loop {
+            ticker.tick().await;
+            match self_arc.produce_one().await {
+                Ok(Some(fb)) => {
+                    info!(
+                        "⛏ Block {} | epoch={} | txs={} | gas={} | root={}",
+                        fb.height,
+                        fb.epoch,
+                        fb.tx_count,
+                        fb.gas_used,
+                        hex::encode(&fb.state_root[..4])
+                    );
+                    let _ = self_arc.block_tx.send(fb);
+                }
+                Ok(None) => { /* empty pool — skip slot */ }
+                Err(e) => error!("[BlockProducer] {}", e),
+            }
+        }
+    }
+
     async fn produce_one(&self) -> Result<Option<FinalizedBlock>, String> {
         // Wall-clock start — used for live benchmark instrumentation
         let block_start = Instant::now();
@@ -412,12 +439,11 @@ impl BlockProducer {
         if block_txs.is_empty() {
             if any_pending {
                 info!(
-                    "[BlockProducer] All pending transactions failed; producing empty block {} to preserve liveness",
+                    "[BlockProducer] All pending transactions failed; no block produced at height {}",
                     next_height
                 );
-            } else {
-                return Ok(None);
             }
+            return Ok(None);
         }
 
         // ── 5: Compute state root ─────────────────────────────────────────────
@@ -443,77 +469,31 @@ impl BlockProducer {
             .map(|tx| tx.signature.clone())
             .collect();
 
-        let (sal_proof_bytes, prove_time_ms, sal_sig_hashes, sal_commitment_root) =
-            if !raw_sigs.is_empty() {
-                // ── Extended path: compute commitment + extended STARK proof ──
-                let (sig_commitment_root, sig_hashes) =
-                    bleep_sig_availability::compute_sig_commitment(&raw_sigs);
+        let (sal_commitment_root, sal_sig_hashes) = if raw_sigs.is_empty() {
+            ([0u8; 32], vec![])
+        } else {
+            bleep_sig_availability::compute_sig_commitment(&raw_sigs)
+        };
+        block.sig_commitment_root = sal_commitment_root;
 
-                // ── 7b: Stamp sig_commitment_root on the block ─────────────
-                block.sig_commitment_root = sig_commitment_root;
+        // Every non-genesis block must carry a real SPHINCS+ signature.
+        block.sign_block_with_pk(&self.config.validator_sk, &self.config.validator_pk)
+            .map_err(|e| format!("Block {} signing failed: {}", next_height, e))?;
 
-                // ── 7c: Sign block (now commits to sig_commitment_root) ────
-                if let Err(e) = block.sign_block_with_pk(
-                    &self.config.validator_sk,
-                    &self.config.validator_pk,
-                ) {
-                    warn!("[BlockProducer] sign_block_with_pk failed: {} — stamping validator_id", e);
-                    block.validator_signature = self.config.validator_id.as_bytes().to_vec();
-                }
-
-                // ── 8: Extended STARK proof (68-column, SAL-bound) ────────
-                match Self::generate_extended_proof(
-                    &block,
-                    &self.config.validator_pk,
-                    &self.config.validator_sk,
-                    sig_commitment_root,
-                    &sig_hashes,
-                ) {
-                    Ok((proof_bytes, ms)) => (proof_bytes, ms, sig_hashes, sig_commitment_root),
-                    Err(e) => {
-                        // Fall back to legacy proof rather than dropping the block.
-                        warn!("[BlockProducer] Extended proof failed ({}), falling back to legacy", e);
-                        if let Err(e2) = block.sign_block_with_pk(
-                            &self.config.validator_sk, &self.config.validator_pk,
-                        ) {
-                            warn!("[BlockProducer] Fallback sign failed: {}", e2);
-                        }
-                        match Self::generate_winterfell_proof(
-                            &block, &self.config.validator_pk, &self.config.validator_sk,
-                        ) {
-                            Ok((p, ms)) => (p, ms, vec![], [0u8; 32]),
-                            Err(e3) => {
-                                error!("[BlockProducer] Fallback proof generation failed: {}", e3);
-                                return Err(e3);
-                            }
-                        }
-                    }
-                }
-            } else {
-                // ── Empty block: use legacy proof path ───────────────────────
-                // ── 7c: Sign (sig_commitment_root stays [0u8;32]) ─────────
-                if let Err(e) = block.sign_block_with_pk(
-                    &self.config.validator_sk,
-                    &self.config.validator_pk,
-                ) {
-                    warn!("[BlockProducer] sign_block_with_pk failed: {} — stamping validator_id", e);
-                    block.validator_signature = self.config.validator_id.as_bytes().to_vec();
-                }
-                match Self::generate_winterfell_proof(
-                    &block, &self.config.validator_pk, &self.config.validator_sk,
-                ) {
-                    Ok((p, ms)) => (p, ms, vec![], [0u8; 32]),
-                    Err(e) => {
-                        error!("[BlockProducer] Winterfell proof generation failed: {}", e);
-                        return Err(e);
-                    }
-                }
-            };
-
+        // Every produced block, including empty blocks, must carry an extended
+        // STARK. There is no Fiat-Shamir or legacy proof downgrade path.
+        let (sal_proof_bytes, prove_time_ms) = Self::generate_extended_proof(
+            &block,
+            &self.config.validator_pk,
+            &self.config.validator_sk,
+            sal_commitment_root,
+            &sal_sig_hashes,
+        )
+        .map_err(|e| format!("Block {} STARK generation failed: {}", next_height, e))?;
         block.zk_proof = sal_proof_bytes;
 
         if !block.verify_zkp() {
-            return Err(format!("ZKP verification failed for block {}", next_height));
+            return Err(format!("Block {} STARK verification failed", next_height));
         }
 
         // ── 9: Commit to chain ────────────────────────────────────────────────
@@ -698,33 +678,6 @@ impl BlockProducer {
         Ok((out, elapsed_ms))
     }
 
-    fn generate_winterfell_proof(
-        block: &Block,
-        validator_pk: &[u8],
-        validator_sk: &[u8],
-    ) -> Result<(Vec<u8>, u64), String> {
-        let start = Instant::now();
-        let mut block_hash = [0u8; 32];
-        let block_hash_hex = block.compute_hash();
-        hex::decode_to_slice(&block_hash_hex, &mut block_hash)
-            .map_err(|e| format!("Failed to decode block hash: {}", e))?;
-
-        let sk_seed_digest = Sha3_256::digest(validator_sk);
-        let mut sk_seed_bytes = [0u8; 32];
-        sk_seed_bytes.copy_from_slice(&sk_seed_digest);
-        let circuit = BlockValidityCircuit::for_proving(
-            block.index,
-            block.epoch_id,
-            block.transactions.len() as u64,
-            &block.merkle_root,
-            validator_pk,
-            block_hash,
-            sk_seed_bytes,
-        );
-        let proof = BlockProver::new().prove(circuit)?;
-
-        Ok((proof, start.elapsed().as_millis() as u64))
-    }
 }
 
 // ── Legacy shim ───────────────────────────────────────────────────────────────
@@ -800,4 +753,110 @@ pub fn start_block_producer(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod real_transaction_benchmark {
+    use super::*;
+    use bleep_core::blockchain::{Blockchain, BlockchainState};
+    use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+
+    #[tokio::test]
+    #[ignore = "explicit 1000-real-transaction benchmark"]
+    async fn benchmark_1000_real_transactions_end_to_end() {
+        const TRANSACTION_COUNT: usize = 1_000;
+        let total_start = Instant::now();
+
+        let (sender_pk, sender_sk) = generate_tx_keypair();
+        let (validator_pk, validator_sk) = generate_tx_keypair();
+        let sender = "bleep1realbenchmarksender";
+        let receiver = "bleep1realbenchmarkreceiver";
+
+        let signing_start = Instant::now();
+        let mut transactions = Vec::with_capacity(TRANSACTION_COUNT);
+        for index in 0..TRANSACTION_COUNT {
+            let timestamp = 1_700_000_000 + index as u64;
+            let payload = tx_payload(sender, receiver, 1, timestamp);
+            let detached = sign_tx_payload(&payload, &sender_sk).expect("transaction signing");
+            let mut signature = Vec::with_capacity(sender_pk.len() + detached.len());
+            signature.extend_from_slice(&sender_pk);
+            signature.extend_from_slice(&detached);
+            transactions.push(ZKTransaction {
+                sender: sender.to_string(),
+                receiver: receiver.to_string(),
+                amount: 1,
+                timestamp,
+                signature,
+            });
+        }
+        let signing_ms = signing_start.elapsed().as_secs_f64() * 1_000.0;
+
+        let tx_pool = TransactionPool::new(TRANSACTION_COUNT);
+        let admission_start = Instant::now();
+        let mut admitted = 0usize;
+        for transaction in transactions {
+            if tx_pool.add_transaction(transaction).await {
+                admitted += 1;
+            }
+        }
+        let admission_ms = admission_start.elapsed().as_secs_f64() * 1_000.0;
+        assert_eq!(admitted, TRANSACTION_COUNT, "transaction admission health failed");
+
+        let genesis = Block::new(0, vec![], "0".to_string());
+        let blockchain = Arc::new(RwLock::new(Blockchain::new(
+            genesis,
+            BlockchainState::new(),
+            tx_pool.clone(),
+        )));
+        let state = Arc::new(PLMutex::new(StateManager::new()));
+        let (producer, _events) = BlockProducer::new(
+            "real-benchmark-validator".to_string(),
+            1_000,
+            tx_pool.clone(),
+            blockchain.clone(),
+            state,
+            validator_sk,
+            validator_pk.clone(),
+            None,
+        );
+
+        let production_start = Instant::now();
+        let finalized = producer
+            .produce_one()
+            .await
+            .expect("block production failed")
+            .expect("producer skipped the admitted transaction batch");
+        let production_ms = production_start.elapsed().as_secs_f64() * 1_000.0;
+
+        let chain = blockchain.read().expect("blockchain read lock");
+        let block = chain.latest_block().expect("committed block missing");
+        let healthy_transactions = block
+            .transactions
+            .iter()
+            .filter(|transaction| transaction.verify_signature())
+            .count();
+        let healthy_block_signature = block
+            .verify_signature(&validator_pk)
+            .expect("block signature verification errored");
+        let healthy_stark = block.verify_zkp();
+        let height = block.index;
+        let proof_bytes = block.zk_proof.len();
+        let block_signature_bytes = block.validator_signature.len();
+        let committed_transactions = block.transactions.len();
+        drop(chain);
+
+        assert_eq!(finalized.height, 1);
+        assert_eq!(height, 1);
+        assert_eq!(committed_transactions, TRANSACTION_COUNT);
+        assert_eq!(healthy_transactions, TRANSACTION_COUNT);
+        assert!(healthy_block_signature, "SPHINCS+ block signature failed");
+        assert!(healthy_stark, "extended STARK verification failed");
+
+        let total_ms = total_start.elapsed().as_secs_f64() * 1_000.0;
+        let production_tps = TRANSACTION_COUNT as f64 / (production_ms / 1_000.0);
+        let end_to_end_tps = TRANSACTION_COUNT as f64 / (total_ms / 1_000.0);
+        eprintln!(
+            "1000-real-tx benchmark: admitted={admitted}, committed={committed_transactions}, height={height}, tx_health={healthy_transactions}/{TRANSACTION_COUNT}, sphincs_block_signature={healthy_block_signature}, stark={healthy_stark}, signing_ms={signing_ms:.2}, admission_ms={admission_ms:.2}, production_ms={production_ms:.2}, total_ms={total_ms:.2}, production_tps={production_tps:.2}, end_to_end_tps={end_to_end_tps:.2}, block_signature_bytes={block_signature_bytes}, proof_bytes={proof_bytes}"
+        );
+    }
 }
