@@ -301,7 +301,7 @@ The shell timing output was `real_seconds=379.831 user_seconds=991.123 sys_secon
 
 ### Stress-test interpretation
 
-Compared with the sequential CLI run at 6.432982 TPS, this 32-worker run achieved 26.327498 TPS, a 4.095x throughput increase. The result is still dominated by CLI process startup, wallet loading, SPHINCS+ signing, and local RPC behavior. It does not establish multi-validator throughput, network propagation capacity, or finality latency.
+Compared with the sequential CLI run at 6.432982 TPS, this 32-worker run achieved 26.327498 TPS, a 4.092581x throughput increase. The result is still dominated by CLI process startup, wallet loading, SPHINCS+ signing, and local RPC behavior. It does not establish multi-validator throughput, network propagation capacity, or finality latency.
 
 ### Stress-test artifacts
 
