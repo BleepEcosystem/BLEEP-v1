@@ -21,16 +21,13 @@
 //! `verify_signature(public_key)` reconstructs the block hash, then calls
 //! `sphincsshake256fsimple::verify_detached_signature`.
 //!
-//! ### Backward compatibility
-//! Blocks with a 96-byte `validator_signature` are treated as Sprint 5 legacy
-//! and accepted with a length-check downgrade path.  The genesis block (empty
-//! `validator_signature`) is always accepted.
+//! The unsigned genesis block is the only signature exception. All subsequent
+//! blocks require a real SPHINCS+ signature and an extended STARK proof.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use bleep_zkp::{BlockValidityVerifier, StarkProof};
 use bleep_zkp::{
     EXTENDED_STARK_MAGIC, EXT_PUB_INPUTS_LEN,
     ExtendedBlockPublicInputs, ParallelBatchSigProver, bleep_proof_options,
@@ -41,7 +38,7 @@ use bleep_sig_availability::compute_sig_commitment;
 use bleep_crypto::pq_crypto::SignatureScheme;
 use bleep_crypto::tx_signer::{tx_payload, verify_tx_signature};
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
-use pqcrypto_traits::sign::{DetachedSignature as _, SecretKey as _};
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 
 /// Byte length of a SPHINCS+-SHAKE-256-simple public key.
 /// pqcrypto_sphincsplus::sphincsshake256fsimple generates 64-byte public keys.
@@ -50,9 +47,6 @@ pub const SPHINCS_PK_LEN: usize = 64;
 pub const SPHINCS_SIG_LEN: usize = 49856;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
-
-/// Legacy Sprint 5 validator_signature length (SHA3 scheme).
-const LEGACY_SIG_LEN: usize = 96;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
@@ -192,8 +186,8 @@ pub struct Block {
     /// 96 bytes for legacy Sprint 5 blocks (SHA3 scheme, still accepted).
     pub validator_signature: Vec<u8>,
 
-    /// 64-byte Fiat-Shamir ZK commitment (Sprint 5+).
-    /// Replaced with STARK proof bytes in Sprint 9 - post-quantum secure, no trusted setup.
+    /// Extended STARK proof bytes (Sprint 9+), post-quantum secure and
+    /// transparent with no trusted setup.
     pub zk_proof: Vec<u8>,
 
     pub epoch_id: u64,
@@ -346,7 +340,7 @@ impl Block {
     /// `sphincs_pk_bytes` must be raw SPHINCS+-SHAKE-256-simple public key bytes (64 bytes).
     ///
     /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
-    /// Then auto-generates the 64-byte Fiat-Shamir ZKP commitment.
+    /// The block proof is generated separately by the consensus producer.
     pub fn sign_block(&mut self, seed_bytes: &[u8]) -> Result<(), String> {
         // For backward compatibility: derive keypair from seed
         // In production, BlockProducer should call sign_block_with_pk instead
@@ -393,211 +387,55 @@ impl Block {
         vsig.extend_from_slice(sig_bytes); // [64..]    SPHINCS+ detached sig
         self.validator_signature = vsig;
 
-        self.generate_zkp();
         Ok(())
     }
 
     /// Verify the block signature.
     ///
-    /// Accepts three formats:
+    /// Accepts two formats:
     ///
     /// 1. **Empty** — genesis / unsigned block: always `Ok(true)`.
-    /// 2. **96 bytes (legacy Sprint 5 SHA3 scheme)** — verified with SHA3 checks.
-    /// 3. **7,888 bytes (Sprint 6 SPHINCS+ scheme)** — verified with `pqcrypto`.
+    /// 2. **7,888 bytes (SPHINCS+ scheme)** — verified with `pqcrypto`.
     ///
     /// `public_key` must be the 32-byte SHA3 fingerprint of the SPHINCS+ sk seed
     /// (as derived by `derive_block_keypair`).
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, String> {
         if self.validator_signature.is_empty() {
-            return Ok(true); // genesis exemption
-        }
-
-        // ── Legacy path: Sprint 5 SHA3 scheme ────────────────────────────────
-        if self.validator_signature.len() == LEGACY_SIG_LEN {
-            return self.verify_signature_legacy(public_key);
+            return Ok(self.index == 0); // only the unsigned genesis block is exempt
         }
 
         // ── Sprint 6: SPHINCS+ path ───────────────────────────────────────────
-        if self.validator_signature.len() < SPHINCS_PK_LEN + 1 {
+        if self.validator_signature.len() != VALIDATOR_SIG_LEN {
             return Ok(false);
         }
 
-        let stored_pk_hash = &self.validator_signature[..SPHINCS_PK_LEN];
-        if public_key.len() == SPHINCS_PK_LEN && stored_pk_hash != public_key {
+        let stored_pk = &self.validator_signature[..SPHINCS_PK_LEN];
+        if public_key.len() != SPHINCS_PK_LEN || stored_pk != public_key {
             return Ok(false);
         }
 
-        // The signature bytes start after the pk fingerprint
-        let sig_bytes = &self.validator_signature[SPHINCS_PK_LEN..];
-        if sig_bytes.len() != SPHINCS_SIG_LEN {
-            // Accept if length doesn't match exactly but pk_hash matches (forward compat)
-            // For now, any non-matching sig-length after pk is a failure
-            return Ok(false);
-        }
+        let pk = sphincsshake256fsimple::PublicKey::from_bytes(stored_pk)
+            .map_err(|e| format!("Invalid SPHINCS+ public key: {:?}", e))?;
+        let sig = sphincsshake256fsimple::DetachedSignature::from_bytes(
+            &self.validator_signature[SPHINCS_PK_LEN..],
+        )
+        .map_err(|e| format!("Invalid SPHINCS+ signature: {:?}", e))?;
 
-        // We cannot verify without the actual SPHINCS+ public key object.
-        // The public_key parameter is only a 32-byte fingerprint (sha3 of sk seed).
-        // Full public-key registry verification requires looking up the validator's
-        // SPHINCS+ pk from the ValidatorRegistry — done in main.rs InboundBlockHandler.
-        //
-        // Here we perform:
-        //   1. pk fingerprint match  (checked above)
-        //   2. sig is structurally valid (non-zero, correct length)
-        //   3. ZKP commitment is valid (called via verify_zkp)
-        //
-        // Full SPHINCS+ cryptographic verification happens in InboundBlockHandler
-        // where the full pk bytes are available from the ValidatorRegistry.
-        let sig_non_zero = sig_bytes.iter().any(|&b| b != 0);
-        Ok(sig_non_zero)
+        Ok(sphincsshake256fsimple::verify_detached_signature(
+            &sig,
+            &self.compute_hash_bytes(),
+            &pk,
+        )
+        .is_ok())
     }
 
-    /// Legacy Sprint 5 verification (SHA3 scheme, 96-byte sig).
-    fn verify_signature_legacy(&self, public_key: &[u8]) -> Result<bool, String> {
-        if public_key.len() != 32 {
-            return Err(format!(
-                "Legacy pk must be 32 bytes, got {}",
-                public_key.len()
-            ));
-        }
-        let sig = &self.validator_signature;
-        let stored_pk = &sig[0..32];
-        let stored_msg = &sig[32..64];
-        let stored_prf = &sig[64..96];
-
-        if stored_pk != public_key {
-            return Ok(false);
-        }
-        let block_hash = self.compute_hash();
-        let mut h = Sha3_256::new();
-        h.update(block_hash.as_bytes());
-        let expected_msg = h.finalize();
-        if stored_msg != expected_msg.as_slice() {
-            return Ok(false);
-        }
-        let proof_ok = stored_prf.iter().any(|&b| b != 0);
-        Ok(proof_ok)
-    }
-
-    // ── Fiat-Shamir ZK commitment (Sprint 5+, replaced by STARK in Sprint 9) ──
-
-    /// Generate a 64-byte Fiat-Shamir ZK commitment over all semantic block fields.
-    ///
-    /// ```text
-    /// challenge = SHA3-256( "BLEEP-ZKP-v1"
-    ///                       || block_hash_bytes
-    ///                       || validator_pk_fingerprint[0..32]
-    ///                       || epoch_id_le8 || protocol_version_le4
-    ///                       || consensus_mode_u8 || merkle_root_bytes
-    ///                       || shard_id_le8 || shard_state_root_bytes
-    ///                       || tx_count_le8 )
-    ///
-    /// response  = SHA3-256( challenge || validator_pk_fingerprint || block_index_le8 )
-    ///
-    /// zk_proof  = challenge(32) || response(32)
-    /// ```
-    pub fn generate_zkp(&mut self) {
-        if self.validator_signature.len() < 32 {
-            self.zk_proof = vec![];
-            return;
-        }
-        let vk = &self.validator_signature[0..32];
-
-        let mut ch = Sha3_256::new();
-        ch.update(b"BLEEP-ZKP-v1");
-        ch.update(self.compute_hash().as_bytes());
-        ch.update(vk);
-        ch.update(&self.epoch_id.to_le_bytes());
-        ch.update(&self.protocol_version.to_le_bytes());
-        ch.update(&[self.consensus_mode as u8]);
-        ch.update(self.merkle_root.as_bytes());
-        ch.update(&self.shard_id.to_le_bytes());
-        ch.update(self.shard_state_root.as_bytes());
-        ch.update(&(self.transactions.len() as u64).to_le_bytes());
-        ch.update(&self.sig_commitment_root);
-        let challenge: [u8; 32] = ch.finalize().into();
-
-        let mut rsp = Sha3_256::new();
-        rsp.update(&challenge);
-        rsp.update(vk);
-        rsp.update(&self.index.to_le_bytes());
-        let response: [u8; 32] = rsp.finalize().into();
-
-        let mut proof = Vec::with_capacity(64);
-        proof.extend_from_slice(&challenge);
-        proof.extend_from_slice(&response);
-        self.zk_proof = proof;
-    }
-
-    /// Verify the ZK commitment.
-    ///
-    /// Returns `true` for empty proofs (genesis exemption), valid 64-byte
-    /// Fiat-Shamir commitments, or valid Winterfell STARK proof envelopes.
+    /// Verify the extended Winterfell STARK proof.
     pub fn verify_zkp(&self) -> bool {
         if self.zk_proof.is_empty() {
-            return true;
+            return self.index == 0 && self.validator_signature.is_empty();
         }
-        // ── Extended STARK proof (68-column, SAL-bound) ────────────────────
-        if self.zk_proof.starts_with(EXTENDED_STARK_MAGIC) {
-            return self.verify_extended_stark_zkp();
-        }
-        if self.zk_proof.len() != 64 {
-            return StarkProof::from_bytes(&self.zk_proof)
-                .ok()
-                .and_then(|proof| {
-                    if proof.proof_bytes.len() < 8 || &proof.proof_bytes[..8] != b"STARK_V1" {
-                        return None;
-                    }
-
-                    let validator_pk_bytes = if self.validator_signature.len() >= 64 {
-                        &self.validator_signature[..64]
-                    } else {
-                        return Some(false);
-                    };
-
-                    BlockValidityVerifier::verify(
-                        &proof,
-                        self.index,
-                        self.epoch_id,
-                        self.transactions.len() as u64,
-                        self.merkle_root.as_bytes(),
-                        validator_pk_bytes,
-                    )
-                    .ok()
-                })
-                .unwrap_or(false);
-        }
-        if self.validator_signature.len() < 32 {
-            return false;
-        }
-        let vk = &self.validator_signature[0..32];
-        let stored_challenge = &self.zk_proof[0..32];
-        let stored_response = &self.zk_proof[32..64];
-
-        let mut ch = Sha3_256::new();
-        ch.update(b"BLEEP-ZKP-v1");
-        ch.update(self.compute_hash().as_bytes());
-        ch.update(vk);
-        ch.update(&self.epoch_id.to_le_bytes());
-        ch.update(&self.protocol_version.to_le_bytes());
-        ch.update(&[self.consensus_mode as u8]);
-        ch.update(self.merkle_root.as_bytes());
-        ch.update(&self.shard_id.to_le_bytes());
-        ch.update(self.shard_state_root.as_bytes());
-        ch.update(&(self.transactions.len() as u64).to_le_bytes());
-        ch.update(&self.sig_commitment_root);
-        let challenge: [u8; 32] = ch.finalize().into();
-
-        if &challenge[..] != stored_challenge {
-            return false;
-        }
-
-        let mut rsp = Sha3_256::new();
-        rsp.update(&challenge);
-        rsp.update(vk);
-        rsp.update(&self.index.to_le_bytes());
-        let response: [u8; 32] = rsp.finalize().into();
-
-        &response[..] == stored_response
+        self.zk_proof.starts_with(EXTENDED_STARK_MAGIC)
+            && self.verify_extended_stark_zkp()
     }
 
     // ── Extended STARK verification ───────────────────────────────────────────
@@ -639,6 +477,10 @@ impl Block {
         }
         if pub_inputs.tx_count as usize != self.transactions.len() {
             log::error!("Extended STARK: tx_count mismatch ({} vs {})", pub_inputs.tx_count, self.transactions.len());
+            return false;
+        }
+        if pub_inputs.sig_count as usize != self.transactions.len() {
+            log::error!("Extended STARK: sig_count mismatch");
             return false;
         }
         if pub_inputs.sig_commitment_root != self.sig_commitment_root {
@@ -843,9 +685,8 @@ mod tests {
             b.validator_signature.len()
         );
 
-        // ZKP should be 64 bytes
-        assert_eq!(b.zk_proof.len(), 64);
-        assert!(b.verify_zkp(), "ZKP verification failed");
+        // Signing alone must not satisfy the STARK requirement.
+        assert!(!b.verify_zkp(), "missing STARK proof should fail");
 
         // verify_signature with the SHA3 pk fingerprint
         let (_, pk_fp) = derive_block_keypair(&sk_bytes).unwrap();
@@ -858,7 +699,7 @@ mod tests {
         let (_pk, sk) = generate_tx_keypair();
         let mut b = Block::new(2, vec![], "prev".to_string());
         b.sign_block(&sk).unwrap();
-        assert!(b.verify_zkp());
+        assert!(!b.verify_zkp(), "missing STARK proof should fail");
 
         // Tamper with one byte of the proof
         b.zk_proof[0] ^= 0xFF;
@@ -866,12 +707,11 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_96byte_sig_still_accepted() {
-        // Sprint 5 blocks had a 96-byte SHA3 sig; they must still pass during transition.
+    fn test_legacy_signature_and_commitment_are_rejected() {
         let seed = [0x42u8; 32];
         let (sk, pk) = derive_block_keypair(&seed).unwrap();
         let mut b = Block::new(3, vec![], "0".to_string());
-        // Build a legacy 96-byte sig manually
+        // Build a legacy synthetic signature manually
         let mut h2 = Sha3_256::new();
         h2.update(b.compute_hash().as_bytes());
         let msg: [u8; 32] = h2.finalize().into();
@@ -884,12 +724,12 @@ mod tests {
         sig.extend_from_slice(&msg);
         sig.extend_from_slice(&prf);
         b.validator_signature = sig;
-        b.generate_zkp();
         assert!(
-            b.verify_signature(&pk).unwrap(),
-            "legacy sig should be accepted"
+            !b.verify_signature(&pk).unwrap(),
+            "legacy signature should be rejected"
         );
-        assert!(b.verify_zkp());
+        b.zk_proof = vec![0u8; 64];
+        assert!(!b.verify_zkp(), "legacy commitment should be rejected");
     }
 
     #[test]
