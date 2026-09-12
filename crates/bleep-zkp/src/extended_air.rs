@@ -230,8 +230,6 @@ impl Air for ExtendedBlockValidityAir {
         }
 
         // Group 3: processed_count evolution — 2 × degree 2
-        // C53a: is_active * (next_processed - cur_processed - 1) = 0
-        // C53b: (1 - is_active) * (next_processed - cur_processed) = 0
         degrees.push(TransitionConstraintDegree::new(2));
         degrees.push(TransitionConstraintDegree::new(2));
 
@@ -301,15 +299,17 @@ impl Air for ExtendedBlockValidityAir {
         }
 
         // ── Group 3: processed_count evolution (2 constraints) ─────────────
-        // result[53]: is_active * (next_processed - cur_processed - 1) = 0
-        // result[54]: (1 - is_active) * (next_processed - cur_processed) = 0
+        // result[53]: next_is_active * (next_processed - cur_processed - 1) = 0
+        // result[54]: (1 - next_is_active) * (next_processed - cur_processed) = 0
+        // The final active row transitions to padding without incrementing.
         let is_active       = cur[COL_IS_ACTIVE];
+        let next_is_active  = next[COL_IS_ACTIVE];
         let cur_processed   = cur[COL_PROCESSED_COUNT];
         let next_processed  = next[COL_PROCESSED_COUNT];
         let delta           = next_processed - cur_processed;
 
-        result[53] = is_active * (delta - one);          // active step: must increment by 1
-        result[54] = (one - is_active) * delta;           // inactive step: must stay constant
+        result[53] = next_is_active * (delta - one);     // active row: increment by 1
+        result[54] = (one - next_is_active) * delta;     // padding row: stay constant
 
         // ── Group 4: is_active state machine (1 constraint) ────────────────
         // result[55]: (1 - is_active[t]) * is_active[t+1] = 0
@@ -347,7 +347,15 @@ impl Air for ExtendedBlockValidityAir {
             Assertion::single(COL_BATCH_SEQ_ID,     0, self.pi_batch_seq_id),
             // SAL evolution — initial state
             Assertion::single(COL_PROCESSED_COUNT,  0, BaseElement::ZERO),
-            Assertion::single(COL_IS_ACTIVE,        0, BaseElement::ONE),
+            Assertion::single(
+                COL_IS_ACTIVE,
+                0,
+                if self.pi_sig_count == BaseElement::ZERO {
+                    BaseElement::ZERO
+                } else {
+                    BaseElement::ONE
+                },
+            ),
         ]
     }
 }
