@@ -70,6 +70,7 @@ mod tests {
         gossip::SigAvailabilityGossipHandler,
         TOPIC_SIG_AVAILABILITY,
     };
+    use crate::types::NodeId;
     use std::time::Duration;
     use tokio::time::timeout;
 

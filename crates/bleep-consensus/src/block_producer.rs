@@ -28,7 +28,7 @@
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use bleep_core::block::{Block, ConsensusMode, Transaction};
 use bleep_core::blockchain::Blockchain;
@@ -537,7 +537,14 @@ impl BlockProducer {
                         &self.config.validator_sk,
                         self.config.validator_pk.clone(),
                     ) {
-                        warn!("[BlockProducer] SAL announcement failed: {}", e);
+                        if e.ends_with("gossip mesh has no connected peers") {
+                            debug!(
+                                height = next_height,
+                                "[BlockProducer] SAL announcement skipped: no connected peers"
+                            );
+                        } else {
+                            warn!("[BlockProducer] SAL announcement failed: {}", e);
+                        }
                     }
                 }
             }
