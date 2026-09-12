@@ -567,15 +567,28 @@ pub fn rpc_routes_with_state(
         .and(warp::get())
         .and(with_rpc_state(rpc.clone()))
         .map(|st: RpcState| {
-            let h = match &st.state_mgr {
+            if let Some(blockchain) = &st.blockchain {
+                if let Ok(chain) = blockchain.read() {
+                    if let Some(block) = chain.latest_block() {
+                        return warp::reply::json(&BlockResp {
+                            height: block.index,
+                            hash: block.compute_hash(),
+                            tx_count: block.transactions.len(),
+                            epoch: block.epoch_id,
+                        });
+                    }
+                }
+            }
+
+            let height = match &st.state_mgr {
                 Some(mgr_arc) => mgr_arc.lock().block_height(),
                 None => st.chain_height.load(std::sync::atomic::Ordering::Relaxed),
             };
             warp::reply::json(&BlockResp {
-                height: h,
-                hash: format!("{:064x}", h),
+                height,
+                hash: format!("{:064x}", height),
                 tx_count: 0,
-                epoch: h / 1000,
+                epoch: height / 1000,
             })
         });
 
