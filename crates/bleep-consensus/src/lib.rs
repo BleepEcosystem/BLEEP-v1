@@ -5,12 +5,15 @@ pub mod consensus;
 pub mod engine;
 pub mod epoch;
 pub mod finality;
+pub mod incident_detector;
 pub mod networking;
 pub mod orchestrator;
 pub mod pbft_engine;
 pub mod pos_engine;
 pub mod pow_engine;
+pub mod recovery_controller;
 pub mod slashing_engine;
+pub mod self_healing_orchestrator;
 pub mod validator_identity;
 
 pub use blockchain_state::BlockchainState;

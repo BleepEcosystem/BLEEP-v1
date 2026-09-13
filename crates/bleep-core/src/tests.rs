@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::crypto::SphincsPlus;
+    use crate::block::Block;
+    use crate::blockchain::Blockchain;
     use crate::state::BlockchainState;
-    use std::sync::{Arc, RwLock};
+    use bleep_crypto::pq_crypto::SignatureScheme;
 
     #[test]
     fn test_block_creation() {
@@ -17,10 +17,11 @@ mod tests {
         let transactions = vec![];
         let mut block = Block::new(1, transactions, "genesis_hash".to_string());
 
-        let (public_key, private_key) = SphincsPlus::keypair();
-        block.sign_block(&private_key);
+        let seed = [7u8; 32];
+        let (public_key, private_key) = SignatureScheme::keygen_from_seed(&seed).unwrap();
+        block.sign_block_with_pk(private_key.as_bytes(), public_key.as_bytes()).unwrap();
 
-        assert!(block.verify_signature(&public_key));
+        assert!(block.verify_signature(public_key.as_bytes()).unwrap());
     }
 
     #[test]
@@ -29,7 +30,7 @@ mod tests {
         let genesis_block = Block::new(0, transactions.clone(), "".to_string());
 
         // Ensure BlockchainState is properly initialized
-        let state = BlockchainState::default();
+        let state = BlockchainState::new();
         let mut blockchain = Blockchain::new(genesis_block.clone(), state);
 
         let new_block = Block::new(1, transactions, genesis_block.compute_hash());

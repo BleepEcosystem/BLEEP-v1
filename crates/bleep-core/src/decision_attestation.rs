@@ -475,7 +475,7 @@ mod tests {
             new_mode: "PBFT".to_string(),
         };
 
-        let bytes = decision.to_bytes();
+        let bytes = decision.to_bytes().unwrap();
         assert!(!bytes.is_empty());
         assert_eq!(decision.decision_id().len(), 64); // hex-encoded SHA3-256
     }
