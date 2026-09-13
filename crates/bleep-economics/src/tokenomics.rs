@@ -353,6 +353,10 @@ impl CanonicalTokenomicsEngine {
             )));
         }
 
+        if amount > MAX_SUPPLY.saturating_sub(self.supply_state.total_minted) {
+            return Err(TokenomicsError::SupplyCapExceeded);
+        }
+
         // Record emission
         let key = (epoch, emission_type);
         let current = self.emission_records.get(&key).unwrap_or(&0);
@@ -362,10 +366,7 @@ impl CanonicalTokenomicsEngine {
         self.supply_state.total_minted = self.supply_state.total_minted.saturating_add(amount);
         self.supply_state.circulating_supply =
             self.supply_state.circulating_supply.saturating_add(amount);
-
-        if self.supply_state.circulating_supply > MAX_SUPPLY {
-            return Err(TokenomicsError::SupplyCapExceeded);
-        }
+        self.supply_state.state_hash = self.supply_state.compute_hash();
 
         Ok(())
     }
@@ -381,6 +382,12 @@ impl CanonicalTokenomicsEngine {
             return Err(TokenomicsError::BurnTooSmall);
         }
 
+        if amount > self.supply_state.circulating_supply {
+            return Err(TokenomicsError::InvalidSupplyState(
+                "burn amount exceeds circulating supply".to_string(),
+            ));
+        }
+
         // Record burn
         let key = (epoch, burn_type);
         let current = self.burn_records.get(&key).unwrap_or(&0);
@@ -390,6 +397,7 @@ impl CanonicalTokenomicsEngine {
         self.supply_state.total_burned = self.supply_state.total_burned.saturating_add(amount);
         self.supply_state.circulating_supply =
             self.supply_state.circulating_supply.saturating_sub(amount);
+        self.supply_state.state_hash = self.supply_state.compute_hash();
 
         Ok(())
     }
@@ -550,7 +558,7 @@ mod tests {
         let hash = match engine.finalize_epoch(0) {
             Ok(hash) => hash,
             Err(e) => {
-                error!("Failed to finalize epoch: {:?}", e);
+                tracing::error!("Failed to finalize epoch: {:?}", e);
                 return;
             }
         };

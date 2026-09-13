@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bleep_core::blockchain::BlockchainState;
 use bleep_p2p::p2p_node::{NodeHandle, P2PNode, P2PNodeConfig};
 
 async fn start_node(port: u16) -> (Arc<P2PNode>, NodeHandle) {

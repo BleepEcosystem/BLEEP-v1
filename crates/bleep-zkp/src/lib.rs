@@ -192,6 +192,10 @@ impl BlockVerifier {
         let proof = StarkProof::from_bytes(proof_bytes)
             .map_err(|e| format!("Failed to deserialize STARK proof: {:?}", e))?;
 
+        if proof.proof_bytes.is_empty() {
+            return Err("Deserialized STARK proof is empty".to_string());
+        }
+
         BlockValidityVerifier::verify(
             &proof,
             block_index,

@@ -352,7 +352,7 @@ mod tests {
         let fee = match market.calculate_fee(TransactionType::Transfer, usage, 0) {
             Ok(fee) => fee,
             Err(e) => {
-                error!("Failed to calculate fee: {:?}", e);
+                tracing::error!("Failed to calculate fee: {:?}", e);
                 return;
             }
         };
@@ -365,7 +365,7 @@ mod tests {
                 < *match market.fee_history.get(&0) {
                     Some(fee) => fee,
                     None => {
-                        error!("Fee history for epoch 0 not found.");
+                        tracing::error!("Fee history for epoch 0 not found.");
                         return;
                     }
                 }
@@ -388,7 +388,7 @@ mod tests {
                 < *match market.fee_history.get(&0) {
                     Some(fee) => fee,
                     None => {
-                        error!("Fee history for epoch 0 not found.");
+                        tracing::error!("Fee history for epoch 0 not found.");
                         return;
                     }
                 }

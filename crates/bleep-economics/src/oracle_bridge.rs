@@ -384,6 +384,7 @@ impl OracleBridgeEngine {
         // Update operator metrics
         if let Some(op) = self.operators.get_mut(&operator_id) {
             op.disputed_updates += 1;
+            op.accepted_updates = op.accepted_updates.saturating_sub(1);
             // Recalculate reputation
             op.reputation_score = (op.accuracy_rate() * 10000.0) as u16;
         }
@@ -552,7 +553,7 @@ mod tests {
         let agg = match engine.aggregate_prices("BTC/USD", ts, 1000) {
             Ok(agg) => agg,
             Err(e) => {
-                error!("Failed to aggregate prices: {:?}", e);
+                tracing::error!("Failed to aggregate prices: {:?}", e);
                 return;
             }
         };

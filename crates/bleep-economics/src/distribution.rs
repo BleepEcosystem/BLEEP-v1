@@ -949,7 +949,7 @@ mod tests {
         let mut sched = ValidatorEmissionSchedule::new();
         // Near exhaustion
         sched.record_emission(ALLOC_VALIDATOR_REWARDS - 1).unwrap();
-        let epoch_amt = sched.epoch_emission(5, EPOCHS_PER_YEAR);
+        let epoch_amt = sched.epoch_emission(5, EPOCHS_PER_YEAR as u128);
         assert_eq!(epoch_amt, 1, "must be capped at remaining 1 µBLEEP");
     }
 

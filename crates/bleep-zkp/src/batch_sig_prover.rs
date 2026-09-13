@@ -31,7 +31,7 @@ use winterfell::{
     crypto::{hashers::Blake3_256, DefaultRandomCoin},
     AuxRandElements, ConstraintCompositionCoefficients,
     DefaultConstraintEvaluator, DefaultTraceLde, PartitionOptions,
-    ProofOptions, Prover, Trace, TraceInfo, TracePolyTable, TraceTable,
+    ProofOptions, Prover, TraceInfo, TracePolyTable, TraceTable,
     StarkDomain, AcceptableOptions,
     verify as winterfell_verify,
 };

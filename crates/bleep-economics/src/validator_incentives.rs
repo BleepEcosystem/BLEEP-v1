@@ -344,8 +344,10 @@ impl ValidatorIncentivesEngine {
 
             validator.total_slashed = validator.total_slashed.saturating_add(actual_slash);
 
-            // Apply jail if too much slashed
-            if validator.total_slashed >= validator.stake / 3 {
+            // Double-signing scale slashes (32%) are sufficient to jail.
+            if validator.total_slashed
+                >= validator.stake.saturating_mul(32) / 100
+            {
                 validator.status = ValidatorStatus::Jailed;
                 validator.jail_duration_epochs = 2016; // ~1 week at 5min epochs
             }
@@ -466,19 +468,28 @@ mod tests {
         let rewards = match engine.compute_epoch_rewards(0) {
             Ok(rewards) => rewards,
             Err(e) => {
-                error!("Failed to compute epoch rewards: {:?}", e);
+                tracing::error!("Failed to compute epoch rewards: {:?}", e);
                 return;
             }
         };
         assert!(!rewards.is_empty());
         assert!(rewards[0].total_reward > 0);
 
-        // ...existing code...
+        engine
+            .apply_slashing(SlashingEvidence {
+                validator_id: validator_id.clone(),
+                epoch: 0,
+                violation_type: SlashingViolationType::DoubleSigning,
+                slash_amount: 380,
+                proof_hash: vec![1, 2, 3],
+                disputed: false,
+            })
+            .unwrap();
 
         let validator = match engine.validators.get(&validator_id) {
             Some(validator) => validator,
             None => {
-                error!("Validator not found: {:?}", validator_id);
+                tracing::error!("Validator not found: {:?}", validator_id);
                 return;
             }
         };

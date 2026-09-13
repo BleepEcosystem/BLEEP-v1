@@ -298,7 +298,7 @@ mod phase5_integration_tests {
         }
 
         // All cartel members propose blocks (unusual pattern)
-        for (i, vid) in cartel_ids.iter().enumerate() {
+        for vid in &cartel_ids {
             let metrics = validator_incentives::ValidatorMetrics {
                 validator_id: vid.clone(),
                 blocks_proposed: 100, // Extremely high
