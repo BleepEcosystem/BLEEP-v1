@@ -12,8 +12,8 @@ pub mod pbft_engine;
 pub mod pos_engine;
 pub mod pow_engine;
 pub mod recovery_controller;
-pub mod slashing_engine;
 pub mod self_healing_orchestrator;
+pub mod slashing_engine;
 pub mod validator_identity;
 
 pub use blockchain_state::BlockchainState;

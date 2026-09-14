@@ -235,8 +235,8 @@ impl MessageProtocol {
 
     /// Encode a `SecureMessage` as a length-prefixed frame: `[u32 BE length][bincode bytes]`.
     pub fn encode_frame(msg: &SecureMessage) -> P2PResult<Bytes> {
-        let encoded =
-            bincode::serde::encode_to_vec(msg, bincode::config::standard()).map_err(|e| P2PError::Serialization(e.to_string()))?;
+        let encoded = bincode::serde::encode_to_vec(msg, bincode::config::standard())
+            .map_err(|e| P2PError::Serialization(e.to_string()))?;
         if encoded.len() > MAX_FRAME_BYTES {
             return Err(P2PError::Serialization(format!(
                 "Frame too large: {} bytes",
@@ -276,7 +276,9 @@ impl MessageProtocol {
             })?
             .map_err(P2PError::Io)?;
 
-        bincode::serde::decode_from_slice::<SecureMessage, _>(&payload, bincode::config::standard()).map(|(v, _)| v).map_err(|e| P2PError::Serialization(e.to_string()))
+        bincode::serde::decode_from_slice::<SecureMessage, _>(&payload, bincode::config::standard())
+            .map(|(v, _)| v)
+            .map_err(|e| P2PError::Serialization(e.to_string()))
     }
 
     // ── SEND ─────────────────────────────────────────────────────────────────
@@ -313,33 +315,37 @@ impl MessageProtocol {
             socket2::Type::STREAM,
             None,
         )
-        .map_err(|e| P2PError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("socket2::Socket::new failed: {}", e),
-        )))?;
-        
-        socket.set_reuse_address(true)
-            .map_err(|e| P2PError::Io(std::io::Error::new(
+        .map_err(|e| {
+            P2PError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("socket2::Socket::new failed: {}", e),
+            ))
+        })?;
+
+        socket.set_reuse_address(true).map_err(|e| {
+            P2PError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("SO_REUSEADDR failed: {}", e),
-            )))?;
-        
-        socket.bind(&bind_addr.into())
-            .map_err(|e| P2PError::Io(std::io::Error::new(
+            ))
+        })?;
+
+        socket.bind(&bind_addr.into()).map_err(|e| {
+            P2PError::Io(std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
                 format!("socket bind failed: {}", e),
-            )))?;
-        
-        socket.listen(128)
-            .map_err(|e| P2PError::Io(std::io::Error::new(
+            ))
+        })?;
+
+        socket.listen(128).map_err(|e| {
+            P2PError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("socket listen failed: {}", e),
-            )))?;
-        
-        let listener = TcpListener::from_std(
-            std::net::TcpListener::from(socket)
-        ).map_err(P2PError::Io)?;
-        
+            ))
+        })?;
+
+        let listener =
+            TcpListener::from_std(std::net::TcpListener::from(socket)).map_err(P2PError::Io)?;
+
         info!(addr = %bind_addr, "MessageProtocol listening (SO_REUSEADDR enabled)");
 
         loop {

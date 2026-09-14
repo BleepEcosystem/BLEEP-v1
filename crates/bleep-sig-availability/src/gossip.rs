@@ -89,7 +89,7 @@ pub fn broadcast_sal_message(
     if payload.len() > MAX_SAL_MSG_BYTES {
         return Err(GossipError::MessageTooLarge {
             size: payload.len(),
-            max:  MAX_SAL_MSG_BYTES,
+            max: MAX_SAL_MSG_BYTES,
         });
     }
 
@@ -146,14 +146,14 @@ impl SigAvailabilityGossipHandler {
         if payload.len() > MAX_SAL_MSG_BYTES {
             warn!(
                 size = payload.len(),
-                max  = MAX_SAL_MSG_BYTES,
+                max = MAX_SAL_MSG_BYTES,
                 "SigAvailabilityGossipHandler: oversized message dropped"
             );
             return;
         }
 
         let msg = match bincode::deserialize::<SigAvailabilityMessage>(payload) {
-            Ok(m)  => m,
+            Ok(m) => m,
             Err(e) => {
                 warn!(%e, "SigAvailabilityGossipHandler: deserialisation failure");
                 return;
@@ -162,7 +162,7 @@ impl SigAvailabilityGossipHandler {
 
         // try_send is non-blocking; if the channel is full we log and drop.
         match self.tx.try_send(msg) {
-            Ok(_)  => debug!("SigAvailabilityGossipHandler: message forwarded"),
+            Ok(_) => debug!("SigAvailabilityGossipHandler: message forwarded"),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!("SigAvailabilityGossipHandler: inbound channel full — message dropped");
             }

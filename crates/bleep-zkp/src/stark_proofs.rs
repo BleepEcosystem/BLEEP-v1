@@ -51,13 +51,17 @@ pub struct StarkProof {
 impl StarkProof {
     /// Serialize to bytes for transmission
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let bytes = bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let bytes = bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(bytes)
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        let proof = bincode::serde::decode_from_slice::<Self, _>(bytes, bincode::config::standard()).map(|(v, _)| v).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let proof =
+            bincode::serde::decode_from_slice::<Self, _>(bytes, bincode::config::standard())
+                .map(|(v, _)| v)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(proof)
     }
 }

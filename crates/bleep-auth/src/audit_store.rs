@@ -253,7 +253,8 @@ impl AuditLogStore {
         let meta_cf = self.cf(CF_META)?;
 
         let key = entry.sequence.to_be_bytes();
-        let value = bincode::serde::encode_to_vec(entry, bincode::config::standard()).map_err(|e| format!("bincode serialise: {}", e))?;
+        let value = bincode::serde::encode_to_vec(entry, bincode::config::standard())
+            .map_err(|e| format!("bincode serialise: {}", e))?;
 
         let mut batch = WriteBatch::default();
         batch.put_cf(&log_cf, key, value);
@@ -318,7 +319,12 @@ impl AuditLogStore {
 
         for item in iter {
             let (_, value) = item.map_err(|e| e.to_string())?;
-            match bincode::serde::decode_from_slice::<StoredAuditEntry, _>(&value, bincode::config::standard()).map(|(v, _)| v) {
+            match bincode::serde::decode_from_slice::<StoredAuditEntry, _>(
+                &value,
+                bincode::config::standard(),
+            )
+            .map(|(v, _)| v)
+            {
                 Ok(entry) => {
                     cache.insert(entry.sequence, entry);
                 }

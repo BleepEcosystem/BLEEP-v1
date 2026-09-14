@@ -13,22 +13,22 @@ pub mod store;
 pub mod types;
 
 pub use availability::{
-    AvailabilityConfig, AvailabilityGate, MempoolSigCache, ValidatorRegistry,
-    SigAvailabilityLayer, broadcast_block_announcement,
+    broadcast_block_announcement, AvailabilityConfig, AvailabilityGate, MempoolSigCache,
+    SigAvailabilityLayer, ValidatorRegistry,
 };
 pub use gossip::{
-    GossipBroadcaster, GossipError, SigAvailabilityGossipHandler,
-    broadcast_sal_message, INBOUND_CHANNEL_CAPACITY, MAX_SAL_MSG_BYTES,
+    broadcast_sal_message, GossipBroadcaster, GossipError, SigAvailabilityGossipHandler,
+    INBOUND_CHANNEL_CAPACITY, MAX_SAL_MSG_BYTES,
 };
 pub use merkle::{
-    MerkleProof, SigCommitmentTree,
-    compute_sig_commitment, hash_sig, hash_sigs_parallel, verify_commitment_root,
+    compute_sig_commitment, hash_sig, hash_sigs_parallel, verify_commitment_root, MerkleProof,
+    SigCommitmentTree,
 };
 pub use store::SigAvailabilityStore;
 pub use types::{
-    BatchBlockAttestation, BlockId, BlockSigAvailabilityStatus,
-    SigAvailabilityMessage, SigCommitmentAnnouncement, SigCommitmentRoot,
-    SigHash, SigRetrievalRequest, SigRetrievalResponse, TxBitmap,
+    BatchBlockAttestation, BlockId, BlockSigAvailabilityStatus, SigAvailabilityMessage,
+    SigCommitmentAnnouncement, SigCommitmentRoot, SigHash, SigRetrievalRequest,
+    SigRetrievalResponse, TxBitmap,
 };
 
 /// P2P gossip topic byte for all SAL messages.

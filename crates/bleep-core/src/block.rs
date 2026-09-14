@@ -28,11 +28,11 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use bleep_zkp::{
-    EXTENDED_STARK_MAGIC, EXT_PUB_INPUTS_LEN,
-    ExtendedBlockPublicInputs, ParallelBatchSigProver, bleep_proof_options,
-};
 use bleep_sig_availability::compute_sig_commitment;
+use bleep_zkp::{
+    bleep_proof_options, ExtendedBlockPublicInputs, ParallelBatchSigProver, EXTENDED_STARK_MAGIC,
+    EXT_PUB_INPUTS_LEN,
+};
 
 // Transaction signature helpers used by block compaction and validation.
 use bleep_crypto::pq_crypto::SignatureScheme;
@@ -262,7 +262,9 @@ impl Block {
     /// `header.sig_commitment_root`, which is committed into the block's SPHINCS+
     /// signature and extended STARK proof.
     pub fn compact(&self) -> CompactBlock {
-        let raw_sigs: Vec<Vec<u8>> = self.transactions.iter()
+        let raw_sigs: Vec<Vec<u8>> = self
+            .transactions
+            .iter()
             .map(|tx| tx.signature.clone())
             .collect();
         let sig_hashes: Vec<[u8; 32]> = if raw_sigs.is_empty() {
@@ -274,15 +276,18 @@ impl Block {
         CompactBlock {
             header: BlockHeader::from_block(self),
             tx_hashes: self.transactions.iter().map(|tx| tx.tx_hash()).collect(),
-            transactions: self.transactions.iter().enumerate().map(|(i, tx)| {
-                CompactTransaction {
+            transactions: self
+                .transactions
+                .iter()
+                .enumerate()
+                .map(|(i, tx)| CompactTransaction {
                     sender: tx.sender.clone(),
                     receiver: tx.receiver.clone(),
                     amount: tx.amount,
                     timestamp: tx.timestamp,
                     sig_hash: sig_hashes.get(i).copied().unwrap_or([0u8; 32]),
-                }
-            }).collect(),
+                })
+                .collect(),
         }
     }
 
@@ -421,12 +426,14 @@ impl Block {
         )
         .map_err(|e| format!("Invalid SPHINCS+ signature: {:?}", e))?;
 
-        Ok(sphincsshake256fsimple::verify_detached_signature(
-            &sig,
-            &self.compute_hash_bytes(),
-            &pk,
+        Ok(
+            sphincsshake256fsimple::verify_detached_signature(
+                &sig,
+                &self.compute_hash_bytes(),
+                &pk,
+            )
+            .is_ok(),
         )
-        .is_ok())
     }
 
     /// Verify the extended Winterfell STARK proof.
@@ -434,8 +441,7 @@ impl Block {
         if self.zk_proof.is_empty() {
             return self.index == 0 && self.validator_signature.is_empty();
         }
-        self.zk_proof.starts_with(EXTENDED_STARK_MAGIC)
-            && self.verify_extended_stark_zkp()
+        self.zk_proof.starts_with(EXTENDED_STARK_MAGIC) && self.verify_extended_stark_zkp()
     }
 
     // ── Extended STARK verification ───────────────────────────────────────────
@@ -451,7 +457,10 @@ impl Block {
         let total_header = magic_len + EXT_PUB_INPUTS_LEN;
 
         if proof_bytes.len() <= total_header {
-            log::error!("Extended STARK proof too short: {} bytes", proof_bytes.len());
+            log::error!(
+                "Extended STARK proof too short: {} bytes",
+                proof_bytes.len()
+            );
             return false;
         }
 
@@ -468,7 +477,11 @@ impl Block {
         // ── Cross-check public inputs against block fields ─────────────────
         // These checks ensure the proof actually corresponds to this block.
         if pub_inputs.block_index != self.index {
-            log::error!("Extended STARK: block_index mismatch ({} vs {})", pub_inputs.block_index, self.index);
+            log::error!(
+                "Extended STARK: block_index mismatch ({} vs {})",
+                pub_inputs.block_index,
+                self.index
+            );
             return false;
         }
         if pub_inputs.epoch_id != self.epoch_id {
@@ -476,7 +489,11 @@ impl Block {
             return false;
         }
         if pub_inputs.tx_count as usize != self.transactions.len() {
-            log::error!("Extended STARK: tx_count mismatch ({} vs {})", pub_inputs.tx_count, self.transactions.len());
+            log::error!(
+                "Extended STARK: tx_count mismatch ({} vs {})",
+                pub_inputs.tx_count,
+                self.transactions.len()
+            );
             return false;
         }
         if pub_inputs.sig_count as usize != self.transactions.len() {
@@ -524,44 +541,62 @@ impl Block {
     ///   [168..200] smt_root ([u8;32])
     ///   [200..232] sig_commitment_root ([u8;32])
     fn decode_ext_pub_inputs(b: &[u8]) -> Option<ExtendedBlockPublicInputs> {
-        if b.len() < EXT_PUB_INPUTS_LEN { return None; }
+        if b.len() < EXT_PUB_INPUTS_LEN {
+            return None;
+        }
         let mut off = 0usize;
 
         macro_rules! read_u64 {
-            () => {{ let v = u64::from_le_bytes(b[off..off+8].try_into().ok()?); off += 8; v }};
+            () => {{
+                let v = u64::from_le_bytes(b[off..off + 8].try_into().ok()?);
+                off += 8;
+                v
+            }};
         }
         macro_rules! read_u32 {
-            () => {{ let v = u32::from_le_bytes(b[off..off+4].try_into().ok()?); off += 4; v }};
+            () => {{
+                let v = u32::from_le_bytes(b[off..off + 4].try_into().ok()?);
+                off += 4;
+                v
+            }};
         }
         macro_rules! read_hash {
             () => {{
                 let start = off;
-                let mut h = [0u8;32];
-                h.copy_from_slice(&b[start..start+32]);
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b[start..start + 32]);
                 off = start + 32;
                 h
             }};
         }
 
-        let block_index       = read_u64!();
-        let epoch_id          = read_u64!();
-        let tx_count          = read_u32!();
-        let blocks_per_epoch  = read_u64!();
-        let sig_count         = read_u32!();
-        let batch_seq_id      = read_u64!();
-        let merkle_root_hash  = read_hash!();
+        let block_index = read_u64!();
+        let epoch_id = read_u64!();
+        let tx_count = read_u32!();
+        let blocks_per_epoch = read_u64!();
+        let sig_count = read_u32!();
+        let batch_seq_id = read_u64!();
+        let merkle_root_hash = read_hash!();
         let validator_pk_hash = read_hash!();
-        let sk_seed_hash      = read_hash!();
-        let block_hash        = read_hash!();
-        let smt_root          = read_hash!();
+        let sk_seed_hash = read_hash!();
+        let block_hash = read_hash!();
+        let smt_root = read_hash!();
         let sig_commitment_root = read_hash!();
         let _ = off;
 
         Some(ExtendedBlockPublicInputs {
-            block_index, epoch_id, tx_count, blocks_per_epoch,
-            merkle_root_hash, validator_pk_hash, sk_seed_hash,
-            block_hash, smt_root, sig_commitment_root,
-            sig_count, batch_seq_id,
+            block_index,
+            epoch_id,
+            tx_count,
+            blocks_per_epoch,
+            merkle_root_hash,
+            validator_pk_hash,
+            sk_seed_hash,
+            block_hash,
+            smt_root,
+            sig_commitment_root,
+            sig_count,
+            batch_seq_id,
         })
     }
 
@@ -571,13 +606,22 @@ impl Block {
         let mut off = 0usize;
 
         macro_rules! write_u64 {
-            ($v:expr) => {{ b[off..off+8].copy_from_slice(&$v.to_le_bytes()); off += 8; }};
+            ($v:expr) => {{
+                b[off..off + 8].copy_from_slice(&$v.to_le_bytes());
+                off += 8;
+            }};
         }
         macro_rules! write_u32 {
-            ($v:expr) => {{ b[off..off+4].copy_from_slice(&$v.to_le_bytes()); off += 4; }};
+            ($v:expr) => {{
+                b[off..off + 4].copy_from_slice(&$v.to_le_bytes());
+                off += 4;
+            }};
         }
         macro_rules! write_hash {
-            ($v:expr) => {{ b[off..off+32].copy_from_slice(&$v[..]); off += 32; }};
+            ($v:expr) => {{
+                b[off..off + 32].copy_from_slice(&$v[..]);
+                off += 32;
+            }};
         }
 
         write_u64!(pi.block_index);

@@ -569,7 +569,8 @@ impl AIProposal {
     /// Get proposal ID (deterministic hash)
     pub fn compute_id(&self) -> String {
         use sha3::{Digest, Sha3_256};
-        let serialized = bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default();
+        let serialized =
+            bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default();
         let mut hasher = Sha3_256::new();
         hasher.update(&serialized);
         format!("{:x}", hasher.finalize())

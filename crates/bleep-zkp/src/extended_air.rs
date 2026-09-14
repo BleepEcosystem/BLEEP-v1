@@ -38,9 +38,9 @@
 
 use serde::{Deserialize, Serialize};
 use winterfell::{
-    Air, AirContext, Assertion, BatchingMethod, EvaluationFrame, FieldExtension,
-    ProofOptions, TraceInfo, TransitionConstraintDegree,
     math::{fields::f128::BaseElement, FieldElement, ToElements},
+    Air, AirContext, Assertion, BatchingMethod, EvaluationFrame, FieldExtension, ProofOptions,
+    TraceInfo, TransitionConstraintDegree,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,37 +58,37 @@ pub const MIN_TRACE_LENGTH: usize = 8;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Block validity — constant throughout trace
-pub const COL_BLOCK_INDEX:       usize =  0;
-pub const COL_EPOCH_ID:          usize =  1;
-pub const COL_TX_COUNT:          usize =  2;
-pub const COL_BLOCKS_PER_EPOCH:  usize =  3;
-pub const COL_MERKLE_ROOT_HI:    usize =  4;
-pub const COL_MERKLE_ROOT_LO:    usize =  5;
-pub const COL_VALIDATOR_PK_HI:   usize =  6;
-pub const COL_VALIDATOR_PK_LO:   usize =  7;
-pub const COL_SK_SEED_HASH_HI:   usize =  8;
-pub const COL_SK_SEED_HASH_LO:   usize =  9;
-pub const COL_SMT_ROOT_HI:       usize = 10;
-pub const COL_SMT_ROOT_LO:       usize = 11;
-pub const COL_BLOCK_HASH_HI:     usize = 12;
-pub const COL_BLOCK_HASH_LO:     usize = 13;
+pub const COL_BLOCK_INDEX: usize = 0;
+pub const COL_EPOCH_ID: usize = 1;
+pub const COL_TX_COUNT: usize = 2;
+pub const COL_BLOCKS_PER_EPOCH: usize = 3;
+pub const COL_MERKLE_ROOT_HI: usize = 4;
+pub const COL_MERKLE_ROOT_LO: usize = 5;
+pub const COL_VALIDATOR_PK_HI: usize = 6;
+pub const COL_VALIDATOR_PK_LO: usize = 7;
+pub const COL_SK_SEED_HASH_HI: usize = 8;
+pub const COL_SK_SEED_HASH_LO: usize = 9;
+pub const COL_SMT_ROOT_HI: usize = 10;
+pub const COL_SMT_ROOT_LO: usize = 11;
+pub const COL_BLOCK_HASH_HI: usize = 12;
+pub const COL_BLOCK_HASH_LO: usize = 13;
 // cols 14–47 reserved (always 0)
 pub const COL_BLOCK_RESERVED_START: usize = 14;
-pub const COL_BLOCK_RESERVED_END:   usize = 47; // inclusive
+pub const COL_BLOCK_RESERVED_END: usize = 47; // inclusive
 
 // Signature commitment — cols 48–67
-pub const COL_SIG_ROOT_HI:       usize = 48;
-pub const COL_SIG_ROOT_LO:       usize = 49;
-pub const COL_SIG_COUNT:         usize = 50;
-pub const COL_BATCH_SEQ_ID:      usize = 51;
-pub const COL_AVAIL_THRESHOLD:   usize = 52;
-pub const COL_PROCESSED_COUNT:   usize = 53;
-pub const COL_CURR_SIG_HI:       usize = 54;
-pub const COL_CURR_SIG_LO:       usize = 55;
-pub const COL_IS_ACTIVE:         usize = 56;
+pub const COL_SIG_ROOT_HI: usize = 48;
+pub const COL_SIG_ROOT_LO: usize = 49;
+pub const COL_SIG_COUNT: usize = 50;
+pub const COL_BATCH_SEQ_ID: usize = 51;
+pub const COL_AVAIL_THRESHOLD: usize = 52;
+pub const COL_PROCESSED_COUNT: usize = 53;
+pub const COL_CURR_SIG_HI: usize = 54;
+pub const COL_CURR_SIG_LO: usize = 55;
+pub const COL_IS_ACTIVE: usize = 56;
 // cols 57–67 padding / reserved
-pub const COL_PAD_START:         usize = 57;
-pub const COL_PAD_END:           usize = 67; // inclusive
+pub const COL_PAD_START: usize = 57;
+pub const COL_PAD_END: usize = 67; // inclusive
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constraint counts — must match evaluate_transition and get_assertions exactly
@@ -190,9 +190,9 @@ impl ToElements<BaseElement> for ExtendedBlockPublicInputs {
 pub struct ExtendedBlockValidityAir {
     context: AirContext<BaseElement>,
     // Public input field-element copies (pre-decoded for use in get_assertions).
-    pi_block_index:    BaseElement,
-    pi_epoch_id:       BaseElement,
-    pi_tx_count:       BaseElement,
+    pi_block_index: BaseElement,
+    pi_epoch_id: BaseElement,
+    pi_tx_count: BaseElement,
     pi_blocks_per_epoch: BaseElement,
     pi_merkle_root_hi: BaseElement,
     pi_merkle_root_lo: BaseElement,
@@ -200,24 +200,24 @@ pub struct ExtendedBlockValidityAir {
     pi_validator_pk_lo: BaseElement,
     _pi_sk_seed_hash_hi: BaseElement,
     _pi_sk_seed_hash_lo: BaseElement,
-    _pi_block_hash_hi:  BaseElement,
-    _pi_block_hash_lo:  BaseElement,
-    _pi_smt_root_hi:    BaseElement,
-    _pi_smt_root_lo:    BaseElement,
-    pi_sig_root_hi:    BaseElement,
-    pi_sig_root_lo:    BaseElement,
-    pi_sig_count:      BaseElement,
-    pi_batch_seq_id:   BaseElement,
+    _pi_block_hash_hi: BaseElement,
+    _pi_block_hash_lo: BaseElement,
+    _pi_smt_root_hi: BaseElement,
+    _pi_smt_root_lo: BaseElement,
+    pi_sig_root_hi: BaseElement,
+    pi_sig_root_lo: BaseElement,
+    pi_sig_count: BaseElement,
+    pi_batch_seq_id: BaseElement,
 }
 
 impl Air for ExtendedBlockValidityAir {
-    type BaseField   = BaseElement;
+    type BaseField = BaseElement;
     type PublicInputs = ExtendedBlockPublicInputs;
 
     fn new(
         trace_info: TraceInfo,
         pub_inputs: ExtendedBlockPublicInputs,
-        options:    ProofOptions,
+        options: ProofOptions,
     ) -> Self {
         // ── Transition constraint degrees ─────────────────────────────────
         // Group 1: block validity cols 0–47 constant (48 × degree 1)
@@ -242,31 +242,34 @@ impl Air for ExtendedBlockValidityAir {
             degrees.push(TransitionConstraintDegree::new(1));
         }
 
-        assert_eq!(degrees.len(), NUM_TRANSITION_CONSTRAINTS,
-            "constraint degree list length must equal NUM_TRANSITION_CONSTRAINTS");
+        assert_eq!(
+            degrees.len(),
+            NUM_TRANSITION_CONSTRAINTS,
+            "constraint degree list length must equal NUM_TRANSITION_CONSTRAINTS"
+        );
 
         let context = AirContext::new(trace_info, degrees, NUM_ASSERTIONS, options);
 
         Self {
             context,
-            pi_block_index:      BaseElement::new(pub_inputs.block_index as u128),
-            pi_epoch_id:         BaseElement::new(pub_inputs.epoch_id as u128),
-            pi_tx_count:         BaseElement::new(pub_inputs.tx_count as u128),
+            pi_block_index: BaseElement::new(pub_inputs.block_index as u128),
+            pi_epoch_id: BaseElement::new(pub_inputs.epoch_id as u128),
+            pi_tx_count: BaseElement::new(pub_inputs.tx_count as u128),
             pi_blocks_per_epoch: BaseElement::new(pub_inputs.blocks_per_epoch as u128),
-            pi_merkle_root_hi:   bytes_hi(&pub_inputs.merkle_root_hash),
-            pi_merkle_root_lo:   bytes_lo(&pub_inputs.merkle_root_hash),
-            pi_validator_pk_hi:  bytes_hi(&pub_inputs.validator_pk_hash),
-            pi_validator_pk_lo:  bytes_lo(&pub_inputs.validator_pk_hash),
-            _pi_sk_seed_hash_hi:  bytes_hi(&pub_inputs.sk_seed_hash),
-            _pi_sk_seed_hash_lo:  bytes_lo(&pub_inputs.sk_seed_hash),
-            _pi_block_hash_hi:    bytes_hi(&pub_inputs.block_hash),
-            _pi_block_hash_lo:    bytes_lo(&pub_inputs.block_hash),
-            _pi_smt_root_hi:      bytes_hi(&pub_inputs.smt_root),
-            _pi_smt_root_lo:      bytes_lo(&pub_inputs.smt_root),
-            pi_sig_root_hi:      bytes_hi(&pub_inputs.sig_commitment_root),
-            pi_sig_root_lo:      bytes_lo(&pub_inputs.sig_commitment_root),
-            pi_sig_count:        BaseElement::new(pub_inputs.sig_count as u128),
-            pi_batch_seq_id:     BaseElement::new(pub_inputs.batch_seq_id as u128),
+            pi_merkle_root_hi: bytes_hi(&pub_inputs.merkle_root_hash),
+            pi_merkle_root_lo: bytes_lo(&pub_inputs.merkle_root_hash),
+            pi_validator_pk_hi: bytes_hi(&pub_inputs.validator_pk_hash),
+            pi_validator_pk_lo: bytes_lo(&pub_inputs.validator_pk_hash),
+            _pi_sk_seed_hash_hi: bytes_hi(&pub_inputs.sk_seed_hash),
+            _pi_sk_seed_hash_lo: bytes_lo(&pub_inputs.sk_seed_hash),
+            _pi_block_hash_hi: bytes_hi(&pub_inputs.block_hash),
+            _pi_block_hash_lo: bytes_lo(&pub_inputs.block_hash),
+            _pi_smt_root_hi: bytes_hi(&pub_inputs.smt_root),
+            _pi_smt_root_lo: bytes_lo(&pub_inputs.smt_root),
+            pi_sig_root_hi: bytes_hi(&pub_inputs.sig_commitment_root),
+            pi_sig_root_lo: bytes_lo(&pub_inputs.sig_commitment_root),
+            pi_sig_count: BaseElement::new(pub_inputs.sig_count as u128),
+            pi_batch_seq_id: BaseElement::new(pub_inputs.batch_seq_id as u128),
         }
     }
 
@@ -278,13 +281,13 @@ impl Air for ExtendedBlockValidityAir {
 
     fn evaluate_transition<E: FieldElement<BaseField = BaseElement>>(
         &self,
-        frame:           &EvaluationFrame<E>,
+        frame: &EvaluationFrame<E>,
         _periodic_values: &[E],
-        result:          &mut [E],
+        result: &mut [E],
     ) {
-        let cur  = frame.current();
+        let cur = frame.current();
         let next = frame.next();
-        let one  = E::ONE;
+        let one = E::ONE;
 
         // ── Group 1: block validity cols 0–47 must not change (48 constraints) ─
         // result[0..48]
@@ -302,14 +305,14 @@ impl Air for ExtendedBlockValidityAir {
         // result[53]: next_is_active * (next_processed - cur_processed - 1) = 0
         // result[54]: (1 - next_is_active) * (next_processed - cur_processed) = 0
         // The final active row transitions to padding without incrementing.
-        let is_active       = cur[COL_IS_ACTIVE];
-        let next_is_active  = next[COL_IS_ACTIVE];
-        let cur_processed   = cur[COL_PROCESSED_COUNT];
-        let next_processed  = next[COL_PROCESSED_COUNT];
-        let delta           = next_processed - cur_processed;
+        let is_active = cur[COL_IS_ACTIVE];
+        let next_is_active = next[COL_IS_ACTIVE];
+        let cur_processed = cur[COL_PROCESSED_COUNT];
+        let next_processed = next[COL_PROCESSED_COUNT];
+        let delta = next_processed - cur_processed;
 
-        result[53] = next_is_active * (delta - one);     // active row: increment by 1
-        result[54] = (one - next_is_active) * delta;     // padding row: stay constant
+        result[53] = next_is_active * (delta - one); // active row: increment by 1
+        result[54] = (one - next_is_active) * delta; // padding row: stay constant
 
         // ── Group 4: is_active state machine (1 constraint) ────────────────
         // result[55]: (1 - is_active[t]) * is_active[t+1] = 0
@@ -332,21 +335,21 @@ impl Air for ExtendedBlockValidityAir {
         // All 14 assertions are at row 0 (boundary of the trace).
         vec![
             // Block validity — match public inputs
-            Assertion::single(COL_BLOCK_INDEX,      0, self.pi_block_index),
-            Assertion::single(COL_EPOCH_ID,         0, self.pi_epoch_id),
-            Assertion::single(COL_TX_COUNT,         0, self.pi_tx_count),
+            Assertion::single(COL_BLOCK_INDEX, 0, self.pi_block_index),
+            Assertion::single(COL_EPOCH_ID, 0, self.pi_epoch_id),
+            Assertion::single(COL_TX_COUNT, 0, self.pi_tx_count),
             Assertion::single(COL_BLOCKS_PER_EPOCH, 0, self.pi_blocks_per_epoch),
-            Assertion::single(COL_MERKLE_ROOT_HI,   0, self.pi_merkle_root_hi),
-            Assertion::single(COL_MERKLE_ROOT_LO,   0, self.pi_merkle_root_lo),
-            Assertion::single(COL_VALIDATOR_PK_HI,  0, self.pi_validator_pk_hi),
-            Assertion::single(COL_VALIDATOR_PK_LO,  0, self.pi_validator_pk_lo),
+            Assertion::single(COL_MERKLE_ROOT_HI, 0, self.pi_merkle_root_hi),
+            Assertion::single(COL_MERKLE_ROOT_LO, 0, self.pi_merkle_root_lo),
+            Assertion::single(COL_VALIDATOR_PK_HI, 0, self.pi_validator_pk_hi),
+            Assertion::single(COL_VALIDATOR_PK_LO, 0, self.pi_validator_pk_lo),
             // Signature commitment — match public inputs
-            Assertion::single(COL_SIG_ROOT_HI,      0, self.pi_sig_root_hi),
-            Assertion::single(COL_SIG_ROOT_LO,      0, self.pi_sig_root_lo),
-            Assertion::single(COL_SIG_COUNT,        0, self.pi_sig_count),
-            Assertion::single(COL_BATCH_SEQ_ID,     0, self.pi_batch_seq_id),
+            Assertion::single(COL_SIG_ROOT_HI, 0, self.pi_sig_root_hi),
+            Assertion::single(COL_SIG_ROOT_LO, 0, self.pi_sig_root_lo),
+            Assertion::single(COL_SIG_COUNT, 0, self.pi_sig_count),
+            Assertion::single(COL_BATCH_SEQ_ID, 0, self.pi_batch_seq_id),
             // SAL evolution — initial state
-            Assertion::single(COL_PROCESSED_COUNT,  0, BaseElement::ZERO),
+            Assertion::single(COL_PROCESSED_COUNT, 0, BaseElement::ZERO),
             Assertion::single(
                 COL_IS_ACTIVE,
                 0,
@@ -370,12 +373,12 @@ impl Air for ExtendedBlockValidityAir {
 /// Adjust `blowup_factor` or `num_queries` to trade proof size vs. generation time.
 pub fn bleep_proof_options() -> ProofOptions {
     ProofOptions::new(
-        27,                       // num_queries       → ~96-bit security
-        8,                        // blowup_factor     (must be power of 2)
-        16,                       // grinding_factor
+        27, // num_queries       → ~96-bit security
+        8,  // blowup_factor     (must be power of 2)
+        16, // grinding_factor
         FieldExtension::None,
-        8,                        // FRI folding factor
-        127,                      // FRI max remainder degree
+        8,   // FRI folding factor
+        127, // FRI max remainder degree
         BatchingMethod::Linear,
         BatchingMethod::Linear,
     )

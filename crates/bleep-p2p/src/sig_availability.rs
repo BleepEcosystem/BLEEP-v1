@@ -32,7 +32,11 @@ impl SigAvailabilityBridge {
         };
 
         if topic != TOPIC_SIG_AVAILABILITY {
-            warn!(topic, expected = TOPIC_SIG_AVAILABILITY, "SIG-AVAIL: unexpected topic");
+            warn!(
+                topic,
+                expected = TOPIC_SIG_AVAILABILITY,
+                "SIG-AVAIL: unexpected topic"
+            );
             return;
         }
 
@@ -66,11 +70,8 @@ impl GossipBroadcaster for SigAvailabilityBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_sig_availability::{
-        gossip::SigAvailabilityGossipHandler,
-        TOPIC_SIG_AVAILABILITY,
-    };
     use crate::types::NodeId;
+    use bleep_sig_availability::{gossip::SigAvailabilityGossipHandler, TOPIC_SIG_AVAILABILITY};
     use std::time::Duration;
     use tokio::time::timeout;
 

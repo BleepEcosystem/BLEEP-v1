@@ -183,7 +183,8 @@ impl PATStateDiff {
     pub fn finalise(&mut self) {
         // Zero out hash field so the hash is deterministic.
         self.diff_hash = [0u8; 32];
-        let bytes = bincode::serde::encode_to_vec(&*self, bincode::config::standard()).unwrap_or_default();
+        let bytes =
+            bincode::serde::encode_to_vec(&*self, bincode::config::standard()).unwrap_or_default();
         self.diff_hash = Sha256::digest(&bytes).into();
     }
 

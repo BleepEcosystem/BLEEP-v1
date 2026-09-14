@@ -165,8 +165,9 @@ impl OnionRouter {
 
             // The payload for the next (outer) layer includes this encrypted layer
             let last_layer = layers.last().expect("just pushed a layer, cannot be empty");
-            current_payload = bincode::serde::encode_to_vec(last_layer, bincode::config::standard())
-                .map_err(|e| P2PError::Serialization(e.to_string()))?;
+            current_payload =
+                bincode::serde::encode_to_vec(last_layer, bincode::config::standard())
+                    .map_err(|e| P2PError::Serialization(e.to_string()))?;
         }
 
         // Layers are currently innermost-first; reverse so [0] is the outermost
@@ -223,8 +224,9 @@ impl OnionRouter {
                 peer_id: first_hop_id.to_string(),
             })?;
 
-        let outer_bytes = bincode::serde::encode_to_vec(&circuit.layers[0], bincode::config::standard())
-            .map_err(|e| P2PError::Serialization(e.to_string()))?;
+        let outer_bytes =
+            bincode::serde::encode_to_vec(&circuit.layers[0], bincode::config::standard())
+                .map_err(|e| P2PError::Serialization(e.to_string()))?;
 
         if !self.message_protocol.has_session(first_hop_id) {
             return Err(P2PError::PeerNotFound {
@@ -310,7 +312,10 @@ mod tests {
         let decrypted_outer = aes_gcm_decrypt(&key1, &outer.encrypted_payload).unwrap();
 
         // The decrypted outer contains the inner OnionLayer serialised
-        let inner_layer: OnionLayer = bincode::serde::decode_from_slice(&decrypted_outer, bincode::config::standard()).map(|(v, _)| v).unwrap();
+        let inner_layer: OnionLayer =
+            bincode::serde::decode_from_slice(&decrypted_outer, bincode::config::standard())
+                .map(|(v, _)| v)
+                .unwrap();
 
         // Peel inner layer (relay2 peels it)
         let key2 = hop_key(&secrets[1], &relay2, 1);

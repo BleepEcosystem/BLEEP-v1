@@ -15,12 +15,12 @@ use blake3::Hasher as Blake3Hasher;
 use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 
-use crate::types::{SigHash, SigCommitmentRoot};
+use crate::types::{SigCommitmentRoot, SigHash};
 
 // Domain separators prevent second-preimage attacks across layers.
-const DOMAIN_LEAF:   &[u8] = b"bleep_sal_leaf_v1";
-const DOMAIN_NODE:   &[u8] = b"bleep_sal_node_v1";
-const DOMAIN_EMPTY:  &[u8] = b"bleep_sal_empty_v1";
+const DOMAIN_LEAF: &[u8] = b"bleep_sal_leaf_v1";
+const DOMAIN_NODE: &[u8] = b"bleep_sal_node_v1";
+const DOMAIN_EMPTY: &[u8] = b"bleep_sal_empty_v1";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Leaf hashing — SHA3-256
@@ -40,9 +40,7 @@ pub fn hash_sig(sig_bytes: &[u8]) -> SigHash {
 /// Parallel variant — hashes all signatures in `sigs` using Rayon.
 /// Allocation cost: one `Vec<SigHash>` with `sigs.len()` elements.
 pub fn hash_sigs_parallel(sigs: &[Vec<u8>]) -> Vec<SigHash> {
-    sigs.par_iter()
-        .map(|s| hash_sig(s.as_slice()))
-        .collect()
+    sigs.par_iter().map(|s| hash_sig(s.as_slice())).collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,11 +98,14 @@ impl SigCommitmentTree {
     /// # Panics
     /// Panics if `sig_hashes` is empty.
     pub fn new(sig_hashes: Vec<SigHash>) -> Self {
-        assert!(!sig_hashes.is_empty(), "SigCommitmentTree: leaf list must not be empty");
+        assert!(
+            !sig_hashes.is_empty(),
+            "SigCommitmentTree: leaf list must not be empty"
+        );
 
         let leaf_count = sig_hashes.len();
-        let padded_n   = leaf_count.next_power_of_two();
-        let total      = 2 * padded_n; // level-order array size (we skip index 0 for 1-based math)
+        let padded_n = leaf_count.next_power_of_two();
+        let total = 2 * padded_n; // level-order array size (we skip index 0 for 1-based math)
 
         let mut nodes: Vec<[u8; 32]> = vec![[0u8; 32]; total];
 
@@ -122,7 +123,11 @@ impl SigCommitmentTree {
             nodes[i] = hash_node(&nodes[2 * i], &nodes[2 * i + 1]);
         }
 
-        Self { leaf_count, nodes, padded_n }
+        Self {
+            leaf_count,
+            nodes,
+            padded_n,
+        }
     }
 
     /// Root of the Merkle tree — the value bound into the STARK proof.
@@ -152,9 +157,9 @@ impl SigCommitmentTree {
 
         MerkleProof {
             leaf_index: leaf_idx,
-            leaf:       self.nodes[self.padded_n + leaf_idx],
+            leaf: self.nodes[self.padded_n + leaf_idx],
             path,
-            padded_n:   self.padded_n,
+            padded_n: self.padded_n,
         }
     }
 
@@ -208,13 +213,13 @@ pub struct MerkleProof {
 /// 8-core validator: **~45 ms** (dominated by SHA3-256 bandwidth, ~24.8 MB
 /// of input data).
 pub fn compute_sig_commitment(sigs: &[Vec<u8>]) -> (SigCommitmentRoot, Vec<SigHash>) {
-    assert!(!sigs.is_empty(), "compute_sig_commitment: at least one signature required");
+    assert!(
+        !sigs.is_empty(),
+        "compute_sig_commitment: at least one signature required"
+    );
 
     // Parallel SHA3-256 leaf hashing
-    let sig_hashes: Vec<SigHash> = sigs
-        .par_iter()
-        .map(|s| hash_sig(s.as_slice()))
-        .collect();
+    let sig_hashes: Vec<SigHash> = sigs.par_iter().map(|s| hash_sig(s.as_slice())).collect();
 
     let root = SigCommitmentTree::new(sig_hashes.clone()).root();
     (root, sig_hashes)
@@ -260,10 +265,10 @@ mod tests {
 
     #[test]
     fn merkle_proof_all_leaves() {
-        let sigs  = fake_sigs(8, 0x55);
+        let sigs = fake_sigs(8, 0x55);
         let (_root, hashes) = compute_sig_commitment(&sigs);
-        let tree  = SigCommitmentTree::new(hashes);
-        let root  = tree.root();
+        let tree = SigCommitmentTree::new(hashes);
+        let root = tree.root();
         for i in 0..8 {
             let proof = tree.generate_proof(i);
             assert!(
@@ -283,10 +288,10 @@ mod tests {
 
     #[test]
     fn tampered_proof_fails_verify() {
-        let sigs  = fake_sigs(4, 0x22);
+        let sigs = fake_sigs(4, 0x22);
         let (_root, hashes) = compute_sig_commitment(&sigs);
-        let tree  = SigCommitmentTree::new(hashes);
-        let root  = tree.root();
+        let tree = SigCommitmentTree::new(hashes);
+        let root = tree.root();
         let mut proof = tree.generate_proof(0);
         proof.path[0][0] ^= 0xFF; // corrupt first sibling
         assert!(!SigCommitmentTree::verify_proof(&root, &proof));
@@ -295,7 +300,7 @@ mod tests {
     #[test]
     fn non_power_of_two_leaf_count() {
         // 7 leaves should pad to 8 and still produce a valid root
-        let sigs  = fake_sigs(7, 0x11);
+        let sigs = fake_sigs(7, 0x11);
         let (root, hashes) = compute_sig_commitment(&sigs);
         assert!(verify_commitment_root(&root, &hashes));
         let tree = SigCommitmentTree::new(hashes);
@@ -307,9 +312,11 @@ mod tests {
     fn empty_leaf_distinguishable() {
         // A genuine all-zero signature must NOT collide with the empty-pad leaf.
         let genuine_zero_sig = vec![0u8; 49_856];
-        let genuine_hash     = hash_sig(&genuine_zero_sig);
-        let canonical_empty  = empty_leaf();
-        assert_ne!(genuine_hash, canonical_empty,
-            "genuine zero-sig must be distinguishable from canonical empty leaf");
+        let genuine_hash = hash_sig(&genuine_zero_sig);
+        let canonical_empty = empty_leaf();
+        assert_ne!(
+            genuine_hash, canonical_empty,
+            "genuine zero-sig must be distinguishable from canonical empty leaf"
+        );
     }
 }

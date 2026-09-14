@@ -87,7 +87,9 @@ impl BlockValidator {
         }
 
         // Count how many transactions have real signatures.
-        let sig_count = block.transactions.iter()
+        let sig_count = block
+            .transactions
+            .iter()
             .filter(|tx| !tx.signature.is_empty())
             .count();
 
@@ -99,7 +101,9 @@ impl BlockValidator {
         }
 
         // Proposer path: we have the raw signatures; recompute and compare.
-        let raw_sigs: Vec<Vec<u8>> = block.transactions.iter()
+        let raw_sigs: Vec<Vec<u8>> = block
+            .transactions
+            .iter()
             .map(|tx| tx.signature.clone())
             .collect();
 

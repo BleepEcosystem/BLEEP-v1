@@ -50,7 +50,6 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v1
         with:
           command: check all
-          arguments: --config .cargo-deny.toml
         continue-on-error: true   # Report but don't block until deny.toml is tuned
 
   # ------------------------------------------------------------------ #

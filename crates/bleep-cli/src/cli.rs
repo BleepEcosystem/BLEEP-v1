@@ -45,9 +45,9 @@ use bleep_core::transaction::ZKTransaction;
 use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
 use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
 use bleep_governance::governance_core::{GovernanceEngine, Proposal, ProposalType, Vote};
+use bleep_p2p::p2p_node::{P2PNode, P2PNodeConfig};
 use bleep_state::state_manager::StateManager;
 use bleep_wallet_core::wallet::WalletManager;
-use bleep_p2p::p2p_node::{P2PNode, P2PNodeConfig};
 use bleep_zkp::Verifier as ZkVerifier;
 
 /// Default RPC endpoint (override via BLEEP_RPC env var).
@@ -90,8 +90,7 @@ async fn run(cmd: Commands) -> Result<()> {
             let (node, handle) = P2PNode::start(config).await?;
             println!(
                 "✅ P2P node started: node_id={} listen={}",
-                node.node_id,
-                listen_addr
+                node.node_id, listen_addr
             );
             println!("   Press Ctrl-C to shut it down.");
 

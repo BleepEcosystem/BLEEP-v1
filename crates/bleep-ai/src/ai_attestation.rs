@@ -288,7 +288,8 @@ impl AIOutputCommitment {
     }
 
     fn compute_proposal_hash(proposal: &AIProposal) -> String {
-        let serialized = bincode::serde::encode_to_vec(proposal, bincode::config::standard()).unwrap_or_default();
+        let serialized = bincode::serde::encode_to_vec(proposal, bincode::config::standard())
+            .unwrap_or_default();
         let mut hasher = Sha3_256::new();
         hasher.update(&serialized);
         format!("{:x}", hasher.finalize())

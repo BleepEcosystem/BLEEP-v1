@@ -8,7 +8,10 @@
 // 4. Proofs are deterministic (same input → same proof)
 // 5. Proofs can be stored on-chain or in light client proofs
 
-use blst::{BLST_ERROR, min_sig::{PublicKey, Signature}};
+use blst::{
+    min_sig::{PublicKey, Signature},
+    BLST_ERROR,
+};
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,8 +32,7 @@ const BLS_DST: &[u8] = b"BLEEP-BLS-AGGREGATE-SIG";
 fn generate_bls_keypair() -> Result<(Vec<u8>, Vec<u8>), String> {
     let mut ikm = [0u8; 32];
     OsRng.fill_bytes(&mut ikm);
-    let sk = SecretKey::key_gen(&ikm, &[])
-        .map_err(|_| "BLS key generation failed".to_string())?;
+    let sk = SecretKey::key_gen(&ikm, &[]).map_err(|_| "BLS key generation failed".to_string())?;
     let pk = sk.sk_to_pk();
     Ok((pk.to_bytes().to_vec(), sk.to_bytes().to_vec()))
 }
@@ -77,8 +79,8 @@ fn verify_bls_aggregate_signature(
 
     let mut pks = Vec::with_capacity(public_keys.len());
     for pk_bytes in public_keys {
-        let pk = PublicKey::from_bytes(pk_bytes)
-            .map_err(|_| "Invalid BLS public key".to_string())?;
+        let pk =
+            PublicKey::from_bytes(pk_bytes).map_err(|_| "Invalid BLS public key".to_string())?;
         pks.push(pk);
     }
 
@@ -208,8 +210,7 @@ impl FinalizyCertificate {
     ) -> Result<(), String> {
         if !self.validator_signatures.is_empty() {
             return Err(
-                "Cannot set aggregate signature when individual signatures are present"
-                    .to_string(),
+                "Cannot set aggregate signature when individual signatures are present".to_string(),
             );
         }
         if !self.aggregate_signature.is_empty() {
@@ -272,7 +273,11 @@ impl FinalizyCertificate {
             .map(|s| s.public_key.clone())
             .collect();
 
-        verify_bls_aggregate_signature(self.block_hash.as_bytes(), &self.aggregate_signature, &signers)
+        verify_bls_aggregate_signature(
+            self.block_hash.as_bytes(),
+            &self.aggregate_signature,
+            &signers,
+        )
     }
 
     /// Get the block hash bytes used for signing.
@@ -619,8 +624,8 @@ mod tests {
             signatures.push(signature);
         }
 
-        let aggregate_signature = aggregate_bls_signatures(&signatures)
-            .expect("BLS aggregate signing failed");
+        let aggregate_signature =
+            aggregate_bls_signatures(&signatures).expect("BLS aggregate signing failed");
         cert.set_aggregate_signature(aggregate_signers, aggregate_signature)
             .expect("set aggregate signature failed");
 

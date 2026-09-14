@@ -8,8 +8,8 @@
 //! * `AvailabilityGate::query_availability` enforces dual-dimension coverage:
 //!   both validator fraction AND transaction fraction must clear the threshold.
 
-use std::sync::Arc;
 use dashmap::DashSet;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
@@ -22,9 +22,8 @@ use crate::{
     merkle::{hash_sig, verify_commitment_root},
     store::SigAvailabilityStore,
     types::{
-        BatchBlockAttestation, BlockId, BlockSigAvailabilityStatus,
-        SigAvailabilityMessage, SigCommitmentAnnouncement,
-        SigRetrievalRequest, SigRetrievalResponse, TxBitmap,
+        BatchBlockAttestation, BlockId, BlockSigAvailabilityStatus, SigAvailabilityMessage,
+        SigCommitmentAnnouncement, SigRetrievalRequest, SigRetrievalResponse, TxBitmap,
     },
     AVAILABILITY_THRESHOLD_BPS,
 };
@@ -59,14 +58,14 @@ pub struct AvailabilityConfig {
     /// Default: 6,667 bps = 66.67% (BFT safety threshold).
     pub required_threshold_bps: u32,
     /// Maximum inbound messages processed per event-loop tick.
-    pub max_messages_per_tick:  usize,
+    pub max_messages_per_tick: usize,
 }
 
 impl Default for AvailabilityConfig {
     fn default() -> Self {
         Self {
             required_threshold_bps: AVAILABILITY_THRESHOLD_BPS,
-            max_messages_per_tick:  64,
+            max_messages_per_tick: 64,
         }
     }
 }
@@ -97,15 +96,20 @@ pub trait MempoolSigCache: Send + Sync {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn sign_sphincs(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, String> {
-    let sk  = sphincs::SecretKey::from_bytes(sk_bytes)
-        .map_err(|e| format!("invalid SK: {e:?}"))?;
+    let sk = sphincs::SecretKey::from_bytes(sk_bytes).map_err(|e| format!("invalid SK: {e:?}"))?;
     let sig = sphincs::detached_sign(msg, &sk);
     Ok(pqcrypto_traits::sign::DetachedSignature::as_bytes(&sig).to_vec())
 }
 
 fn verify_sphincs(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> bool {
-    let pk  = match sphincs::PublicKey::from_bytes(pk_bytes)  { Ok(k) => k, Err(_) => return false };
-    let sig = match sphincs::DetachedSignature::from_bytes(sig_bytes) { Ok(s) => s, Err(_) => return false };
+    let pk = match sphincs::PublicKey::from_bytes(pk_bytes) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let sig = match sphincs::DetachedSignature::from_bytes(sig_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
     sphincs::verify_detached_signature(&sig, msg, &pk).is_ok()
 }
 
@@ -122,25 +126,25 @@ fn pk_to_hash(pk_bytes: &[u8]) -> [u8; 32] {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct SigAvailabilityLayer {
-    store:              SigAvailabilityStore,
-    broadcaster:        Arc<dyn GossipBroadcaster>,
-    validator_pk:       Vec<u8>,
-    validator_pk_hash:  [u8; 32],
-    validator_sk:       Arc<Zeroizing<Vec<u8>>>,
+    store: SigAvailabilityStore,
+    broadcaster: Arc<dyn GossipBroadcaster>,
+    validator_pk: Vec<u8>,
+    validator_pk_hash: [u8; 32],
+    validator_sk: Arc<Zeroizing<Vec<u8>>>,
     validator_registry: Arc<dyn ValidatorRegistry>,
-    config:             AvailabilityConfig,
+    config: AvailabilityConfig,
     /// Blocks for which we have already broadcast our batch attestation.
-    attested_blocks:    Arc<DashSet<(u64, [u8; 32])>>,
+    attested_blocks: Arc<DashSet<(u64, [u8; 32])>>,
 }
 
 impl SigAvailabilityLayer {
     pub fn new(
-        validator_sk:       Vec<u8>,
-        validator_pk:       Vec<u8>,
-        broadcaster:        Arc<dyn GossipBroadcaster>,
+        validator_sk: Vec<u8>,
+        validator_pk: Vec<u8>,
+        broadcaster: Arc<dyn GossipBroadcaster>,
         validator_registry: Arc<dyn ValidatorRegistry>,
-        current_epoch:      u64,
-        config:             AvailabilityConfig,
+        current_epoch: u64,
+        config: AvailabilityConfig,
     ) -> Self {
         let validator_pk_hash = pk_to_hash(&validator_pk);
         Self {
@@ -157,8 +161,8 @@ impl SigAvailabilityLayer {
 
     /// Spawn the SAL event loop as a long-running Tokio task.
     pub fn start(
-        self:          Arc<Self>,
-        mut rx:        mpsc::Receiver<SigAvailabilityMessage>,
+        self: Arc<Self>,
+        mut rx: mpsc::Receiver<SigAvailabilityMessage>,
         mempool_cache: Arc<dyn MempoolSigCache>,
     ) {
         tokio::spawn(async move {
@@ -171,7 +175,7 @@ impl SigAvailabilityLayer {
                             self.handle_message(msg, &mempool_cache).await;
                             processed += 1;
                         }
-                        Err(mpsc::error::TryRecvError::Empty)       => break,
+                        Err(mpsc::error::TryRecvError::Empty) => break,
                         Err(mpsc::error::TryRecvError::Disconnected) => {
                             error!("SigAvailabilityLayer: inbound channel closed");
                             return;
@@ -189,13 +193,17 @@ impl SigAvailabilityLayer {
 
     async fn handle_message(
         &self,
-        msg:           SigAvailabilityMessage,
+        msg: SigAvailabilityMessage,
         mempool_cache: &Arc<dyn MempoolSigCache>,
     ) {
         match msg {
-            SigAvailabilityMessage::Announcement(ann)      => self.handle_announcement(ann, mempool_cache).await,
-            SigAvailabilityMessage::BatchAttestation(att)  => self.handle_batch_attestation(att),
-            SigAvailabilityMessage::RetrievalRequest(req)  => self.handle_retrieval_request(req).await,
+            SigAvailabilityMessage::Announcement(ann) => {
+                self.handle_announcement(ann, mempool_cache).await
+            }
+            SigAvailabilityMessage::BatchAttestation(att) => self.handle_batch_attestation(att),
+            SigAvailabilityMessage::RetrievalRequest(req) => {
+                self.handle_retrieval_request(req).await
+            }
             SigAvailabilityMessage::RetrievalResponse(rsp) => self.handle_retrieval_response(rsp),
         }
     }
@@ -204,12 +212,14 @@ impl SigAvailabilityLayer {
 
     async fn handle_announcement(
         &self,
-        ann:           SigCommitmentAnnouncement,
+        ann: SigCommitmentAnnouncement,
         mempool_cache: &Arc<dyn MempoolSigCache>,
     ) {
         // 1. Verify proposer SPHINCS+ signature.
         let payload = SigCommitmentAnnouncement::signing_payload(
-            &ann.block_id, &ann.sig_commitment_root, ann.sig_count,
+            &ann.block_id,
+            &ann.sig_commitment_root,
+            ann.sig_count,
         );
         if !verify_sphincs(&ann.proposer_pk, &payload, &ann.proposer_sig) {
             warn!(block = %ann.block_id, "announcement: invalid proposer signature — discarded");
@@ -228,7 +238,9 @@ impl SigAvailabilityLayer {
 
         // 4. Only attest once per block per validator.
         let block_key = (ann.block_id.height, ann.block_id.block_hash);
-        if self.attested_blocks.contains(&block_key) { return; }
+        if self.attested_blocks.contains(&block_key) {
+            return;
+        }
 
         // 5. Build the bitmap: one bit per tx we can verify from the mempool cache.
         let mut bitmap = TxBitmap::new(ann.sig_count);
@@ -239,7 +251,7 @@ impl SigAvailabilityLayer {
 
             let full_sig = match mempool_cache.get_sig(committed_hash) {
                 Some(s) => s,
-                None    => continue,
+                None => continue,
             };
 
             // Verify the cached sig matches the committed hash.
@@ -253,7 +265,8 @@ impl SigAvailabilityLayer {
 
             // Cache the full sig for slashing-evidence retrieval.
             if let Some(signer_pk) = mempool_cache.get_signer_pk(committed_hash) {
-                self.store.cache_full_sig(&ann.block_id, tx_index, full_sig, signer_pk);
+                self.store
+                    .cache_full_sig(&ann.block_id, tx_index, full_sig, signer_pk);
             }
 
             bitmap.set(tx_index);
@@ -289,25 +302,28 @@ impl SigAvailabilityLayer {
 
     fn build_batch_attestation(
         &self,
-        block_id:            &BlockId,
+        block_id: &BlockId,
         sig_commitment_root: &[u8; 32],
-        bitmap:              TxBitmap,
+        bitmap: TxBitmap,
     ) -> Result<BatchBlockAttestation, String> {
         let attested_count = bitmap.count_set();
-        let bitmap_hash    = bitmap.hash();
-        let payload        = BatchBlockAttestation::signing_payload(
-            block_id, sig_commitment_root, attested_count, &bitmap_hash,
+        let bitmap_hash = bitmap.hash();
+        let payload = BatchBlockAttestation::signing_payload(
+            block_id,
+            sig_commitment_root,
+            attested_count,
+            &bitmap_hash,
         );
         let sig = sign_sphincs(&self.validator_sk, &payload)?;
 
         Ok(BatchBlockAttestation {
-            block_id:            block_id.clone(),
+            block_id: block_id.clone(),
             sig_commitment_root: *sig_commitment_root,
-            attested_bitmap:     bitmap,
+            attested_bitmap: bitmap,
             attested_count,
-            validator_pk_hash:   self.validator_pk_hash,
-            attestation_sig:     sig,
-            validator_pk:        self.validator_pk.clone(),
+            validator_pk_hash: self.validator_pk_hash,
+            attestation_sig: sig,
+            validator_pk: self.validator_pk.clone(),
         })
     }
 
@@ -325,8 +341,11 @@ impl SigAvailabilityLayer {
 
         // 2. Verify the SPHINCS+ signature over (block_id, root, count, bitmap_hash).
         let bitmap_hash = att.attested_bitmap.hash();
-        let payload     = BatchBlockAttestation::signing_payload(
-            &att.block_id, &att.sig_commitment_root, att.attested_count, &bitmap_hash,
+        let payload = BatchBlockAttestation::signing_payload(
+            &att.block_id,
+            &att.sig_commitment_root,
+            att.attested_count,
+            &bitmap_hash,
         );
         if !verify_sphincs(&att.validator_pk, &payload, &att.attestation_sig) {
             warn!(
@@ -370,12 +389,15 @@ impl SigAvailabilityLayer {
     async fn handle_retrieval_request(&self, req: SigRetrievalRequest) {
         let entry = match self.store.get_full_sig(&req.block_id, req.tx_index) {
             Some(e) => e,
-            None    => { debug!(block = %req.block_id, tx = req.tx_index, "retrieval: not in cache"); return; }
+            None => {
+                debug!(block = %req.block_id, tx = req.tx_index, "retrieval: not in cache");
+                return;
+            }
         };
         let resp = SigRetrievalResponse {
-            block_id:     req.block_id,
-            tx_index:     req.tx_index,
-            full_sig:     entry.full_sig,
+            block_id: req.block_id,
+            tx_index: req.tx_index,
+            full_sig: entry.full_sig,
             tx_signer_pk: entry.tx_signer_pk,
         };
         if let Err(e) = broadcast_sal_message(
@@ -387,9 +409,15 @@ impl SigAvailabilityLayer {
     }
 
     fn handle_retrieval_response(&self, resp: SigRetrievalResponse) {
-        let committed = match self.store.get_committed_sig_hash(&resp.block_id, resp.tx_index) {
+        let committed = match self
+            .store
+            .get_committed_sig_hash(&resp.block_id, resp.tx_index)
+        {
             Some(h) => h,
-            None    => { debug!(block = %resp.block_id, "retrieval response: no committed hash"); return; }
+            None => {
+                debug!(block = %resp.block_id, "retrieval response: no committed hash");
+                return;
+            }
         };
         if hash_sig(&resp.full_sig) != committed {
             warn!(block = %resp.block_id, tx = resp.tx_index, "retrieval response: hash mismatch");
@@ -411,7 +439,8 @@ impl SigAvailabilityLayer {
 impl AvailabilityGate for SigAvailabilityLayer {
     fn query_availability(&self, block_id: &BlockId) -> BlockSigAvailabilityStatus {
         let active = self.validator_registry.active_validator_count();
-        self.store.availability_status(block_id, active, self.config.required_threshold_bps)
+        self.store
+            .availability_status(block_id, active, self.config.required_threshold_bps)
     }
 
     fn on_epoch_advance(&self, new_epoch: u64) {
@@ -426,19 +455,25 @@ impl AvailabilityGate for SigAvailabilityLayer {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn broadcast_block_announcement(
-    broadcaster:         &dyn GossipBroadcaster,
-    block_id:            BlockId,
+    broadcaster: &dyn GossipBroadcaster,
+    block_id: BlockId,
     sig_commitment_root: [u8; 32],
-    sig_hashes:          Vec<[u8; 32]>,
-    proposer_sk:         &[u8],
-    proposer_pk:         Vec<u8>,
+    sig_hashes: Vec<[u8; 32]>,
+    proposer_sk: &[u8],
+    proposer_pk: Vec<u8>,
 ) -> Result<(), String> {
     let sig_count = sig_hashes.len() as u32;
-    let payload   = SigCommitmentAnnouncement::signing_payload(&block_id, &sig_commitment_root, sig_count);
+    let payload =
+        SigCommitmentAnnouncement::signing_payload(&block_id, &sig_commitment_root, sig_count);
     let proposer_sig = sign_sphincs(proposer_sk, &payload)?;
 
     let ann = SigCommitmentAnnouncement {
-        block_id, sig_commitment_root, sig_count, sig_hashes, proposer_sig, proposer_pk,
+        block_id,
+        sig_commitment_root,
+        sig_count,
+        sig_hashes,
+        proposer_sig,
+        proposer_pk,
     };
     broadcast_sal_message(broadcaster, &SigAvailabilityMessage::Announcement(ann))
         .map_err(|e| format!("announcement broadcast failed: {e}"))

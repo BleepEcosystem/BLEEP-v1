@@ -37,8 +37,8 @@ use bleep_core::ZKTransaction;
 use bleep_sig_availability::{broadcast_block_announcement, BlockId, GossipBroadcaster};
 use bleep_state::state_manager::StateManager;
 use bleep_zkp::{
-    ParallelBatchSigProver, ExtendedBlockPublicInputs,
-    bleep_proof_options, EXTENDED_STARK_MAGIC, EXT_PUB_INPUTS_LEN,
+    bleep_proof_options, ExtendedBlockPublicInputs, ParallelBatchSigProver, EXTENDED_STARK_MAGIC,
+    EXT_PUB_INPUTS_LEN,
 };
 use parking_lot::Mutex as PLMutex;
 
@@ -465,9 +465,7 @@ impl BlockProducer {
         // ── 7a: Compute sig_commitment_root from raw signatures ───────────────
         // Must happen BEFORE signing so the commitment is bound into the
         // SPHINCS+ block signature (via compute_hash) and the STARK proof.
-        let raw_sigs: Vec<Vec<u8>> = block_txs.iter()
-            .map(|tx| tx.signature.clone())
-            .collect();
+        let raw_sigs: Vec<Vec<u8>> = block_txs.iter().map(|tx| tx.signature.clone()).collect();
 
         let (sal_commitment_root, sal_sig_hashes) = if raw_sigs.is_empty() {
             ([0u8; 32], vec![])
@@ -477,7 +475,8 @@ impl BlockProducer {
         block.sig_commitment_root = sal_commitment_root;
 
         // Every non-genesis block must carry a real SPHINCS+ signature.
-        block.sign_block_with_pk(&self.config.validator_sk, &self.config.validator_pk)
+        block
+            .sign_block_with_pk(&self.config.validator_sk, &self.config.validator_pk)
             .map_err(|e| format!("Block {} signing failed: {}", next_height, e))?;
 
         // Every produced block, including empty blocks, must carry an extended
@@ -528,7 +527,10 @@ impl BlockProducer {
                 let mut block_hash = [0u8; 32];
                 let hash_hex = block.compute_hash();
                 if hex::decode_to_slice(&hash_hex[..64], &mut block_hash).is_ok() {
-                    let block_id = BlockId { height: next_height, block_hash };
+                    let block_id = BlockId {
+                        height: next_height,
+                        block_hash,
+                    };
                     if let Err(e) = broadcast_block_announcement(
                         broadcaster.as_ref(),
                         block_id,
@@ -631,18 +633,18 @@ impl BlockProducer {
         };
 
         let pub_inputs = ExtendedBlockPublicInputs {
-            block_index:         block.index,
-            epoch_id:            block.epoch_id,
-            tx_count:            block.transactions.len() as u32,
+            block_index: block.index,
+            epoch_id: block.epoch_id,
+            tx_count: block.transactions.len() as u32,
             blocks_per_epoch,
             merkle_root_hash,
             validator_pk_hash,
             sk_seed_hash,
-            block_hash:          block_hash_bytes,
+            block_hash: block_hash_bytes,
             smt_root,
             sig_commitment_root,
-            sig_count:           sig_hashes.len() as u32,
-            batch_seq_id:        block.index, // use block index as monotonic seq id
+            sig_count: sig_hashes.len() as u32,
+            batch_seq_id: block.index, // use block index as monotonic seq id
         };
 
         // ── Convert sig_hashes to raw_signatures for ParallelBatchSigProver ─
@@ -663,7 +665,8 @@ impl BlockProducer {
         // (sig_commitment_root already set from the earlier compute_sig_commitment call)
         use winterfell::Prover;
         let trace = prover.build_trace(&pub_inputs, sig_hashes);
-        let stark_proof = prover.prove(trace)
+        let stark_proof = prover
+            .prove(trace)
             .map_err(|e| format!("Extended STARK prove failed: {:?}", e))?;
 
         // ── Serialise: magic | pub_inputs (232 bytes) | proof bytes ──────
@@ -671,20 +674,21 @@ impl BlockProducer {
 
         let pi_encoded = Block::encode_ext_pub_inputs(&pub_inputs);
 
-        let mut out = Vec::with_capacity(
-            EXTENDED_STARK_MAGIC.len() + EXT_PUB_INPUTS_LEN + proof_bytes.len()
-        );
+        let mut out =
+            Vec::with_capacity(EXTENDED_STARK_MAGIC.len() + EXT_PUB_INPUTS_LEN + proof_bytes.len());
         out.extend_from_slice(EXTENDED_STARK_MAGIC);
         out.extend_from_slice(&pi_encoded);
         out.extend_from_slice(&proof_bytes);
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
-        info!("[BlockProducer] Extended STARK proof generated in {} ms ({} bytes)",
-              elapsed_ms, out.len());
+        info!(
+            "[BlockProducer] Extended STARK proof generated in {} ms ({} bytes)",
+            elapsed_ms,
+            out.len()
+        );
 
         Ok((out, elapsed_ms))
     }
-
 }
 
 // ── Legacy shim ───────────────────────────────────────────────────────────────
@@ -807,7 +811,10 @@ mod real_transaction_benchmark {
             }
         }
         let admission_ms = admission_start.elapsed().as_secs_f64() * 1_000.0;
-        assert_eq!(admitted, TRANSACTION_COUNT, "transaction admission health failed");
+        assert_eq!(
+            admitted, TRANSACTION_COUNT,
+            "transaction admission health failed"
+        );
 
         let genesis = Block::new(0, vec![], "0".to_string());
         let blockchain = Arc::new(RwLock::new(Blockchain::new(

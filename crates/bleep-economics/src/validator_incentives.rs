@@ -345,9 +345,7 @@ impl ValidatorIncentivesEngine {
             validator.total_slashed = validator.total_slashed.saturating_add(actual_slash);
 
             // Double-signing scale slashes (32%) are sufficient to jail.
-            if validator.total_slashed
-                >= validator.stake.saturating_mul(32) / 100
-            {
+            if validator.total_slashed >= validator.stake.saturating_mul(32) / 100 {
                 validator.status = ValidatorStatus::Jailed;
                 validator.jail_duration_epochs = 2016; // ~1 week at 5min epochs
             }

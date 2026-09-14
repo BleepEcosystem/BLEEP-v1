@@ -170,7 +170,8 @@ impl PATIntent {
     /// Used for deduplication in the execution layer:
     /// `SHA-256(bincode(self))`
     pub fn canonical_hash(&self) -> [u8; 32] {
-        let bytes = bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default();
+        let bytes =
+            bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default();
         Sha256::digest(&bytes).into()
     }
 

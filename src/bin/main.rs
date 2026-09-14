@@ -455,7 +455,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     );
 
     let (sal_handler, sal_rx) = SigAvailabilityGossipHandler::new();
-    let sal_bridge = Arc::new(SigAvailabilityBridge::new(sal_handler.clone(), Some(Arc::clone(&p2p_node))));
+    let sal_bridge = Arc::new(SigAvailabilityBridge::new(
+        sal_handler.clone(),
+        Some(Arc::clone(&p2p_node)),
+    ));
     let sal_layer = Arc::new(SigAvailabilityLayer::new(
         sphincs_sk.clone(),
         sphincs_pk.clone(),
@@ -466,7 +469,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         0,
         AvailabilityConfig::default(),
     ));
-    let sal_mempool_cache = Arc::new(TxPoolSigCache { tx_pool: Arc::clone(&tx_pool) });
+    let sal_mempool_cache = Arc::new(TxPoolSigCache {
+        tx_pool: Arc::clone(&tx_pool),
+    });
     sal_layer.start(sal_rx, sal_mempool_cache);
     info!("  ✅ Signature Availability Layer connected to P2P and consensus");
 
@@ -772,9 +777,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("");
     info!("🚀 ════════════════════════════════════════════════════════════════");
     info!("   BLEEP Node LIVE — Protocol Version 5 · Sprint 9 · Audit Complete");
-    info!(
-        "   Chain: BLEEP-PreTestnet-001  |  10 shards  |  1 validator (genesis)"
-    );
+    info!("   Chain: BLEEP-PreTestnet-001  |  10 shards  |  1 validator (genesis)");
     info!("══ Core RPC ═════════════════════════════════════════════════════════");
     info!("   Health:       http://0.0.0.0:8545/rpc/health");
     info!("   State:        http://0.0.0.0:8545/rpc/state/{{address}}");

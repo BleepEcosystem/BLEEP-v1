@@ -82,8 +82,12 @@ impl ChainStorage {
             .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?
         {
             Some(bytes) => {
-                let block = bincode::serde::decode_from_slice::<CommitmentBlock, _>(&bytes, bincode::config::standard()).map(|(v, _)| v)
-                    .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
+                let block = bincode::serde::decode_from_slice::<CommitmentBlock, _>(
+                    &bytes,
+                    bincode::config::standard(),
+                )
+                .map(|(v, _)| v)
+                .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?;
                 Ok(Some(block))
             }
             None => Ok(None),
@@ -132,11 +136,14 @@ impl ChainStorage {
             .get_cf(&cf, id)
             .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?
         {
-            Some(bytes) => {
-                Ok(Some(bincode::serde::decode_from_slice::<StateCommitment, _>(&bytes, bincode::config::standard()).map(|(v, _)| v).map_err(|e| {
-                    BleepConnectError::SerializationError(e.to_string())
-                })?))
-            }
+            Some(bytes) => Ok(Some(
+                bincode::serde::decode_from_slice::<StateCommitment, _>(
+                    &bytes,
+                    bincode::config::standard(),
+                )
+                .map(|(v, _)| v)
+                .map_err(|e| BleepConnectError::SerializationError(e.to_string()))?,
+            )),
             None => Ok(None),
         }
     }

@@ -34,13 +34,18 @@ pub type SigCommitmentRoot = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockId {
-    pub height:     u64,
+    pub height: u64,
     pub block_hash: [u8; 32],
 }
 
 impl std::fmt::Display for BlockId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "block@{}:{}", self.height, hex::encode(&self.block_hash[..4]))
+        write!(
+            f,
+            "block@{}:{}",
+            self.height,
+            hex::encode(&self.block_hash[..4])
+        )
     }
 }
 
@@ -57,7 +62,7 @@ impl std::fmt::Display for BlockId {
 /// 64-byte field rather than one attestation message per transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxBitmap {
-    bits:     Vec<u8>,
+    bits: Vec<u8>,
     capacity: u32,
 }
 
@@ -65,22 +70,29 @@ impl TxBitmap {
     /// Create a zeroed bitmap for `tx_count` transactions.
     pub fn new(tx_count: u32) -> Self {
         let byte_count = ((tx_count as usize) + 7) / 8;
-        Self { bits: vec![0u8; byte_count], capacity: tx_count }
+        Self {
+            bits: vec![0u8; byte_count],
+            capacity: tx_count,
+        }
     }
 
     /// Mark transaction `tx_index` as verified. No-op if out of range.
     pub fn set(&mut self, tx_index: u32) {
-        if tx_index >= self.capacity { return; }
+        if tx_index >= self.capacity {
+            return;
+        }
         let byte = tx_index as usize / 8;
-        let bit  = tx_index as usize % 8;
+        let bit = tx_index as usize % 8;
         self.bits[byte] |= 1 << bit;
     }
 
     /// Returns `true` if transaction `tx_index` is marked verified.
     pub fn is_set(&self, tx_index: u32) -> bool {
-        if tx_index >= self.capacity { return false; }
+        if tx_index >= self.capacity {
+            return false;
+        }
         let byte = tx_index as usize / 8;
-        let bit  = tx_index as usize % 8;
+        let bit = tx_index as usize % 8;
         (self.bits[byte] >> bit) & 1 == 1
     }
 
@@ -92,7 +104,9 @@ impl TxBitmap {
 
     /// Maximum number of transactions this bitmap can represent.
     #[inline]
-    pub fn capacity(&self) -> u32 { self.capacity }
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
 
     /// Returns `true` iff no transaction has been marked.
     #[inline]
@@ -123,7 +137,9 @@ impl TxBitmap {
     }
 
     /// Raw bitmap bytes for serialisation.
-    pub fn as_bytes(&self) -> &[u8] { &self.bits }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bits
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,23 +151,19 @@ impl TxBitmap {
 /// that is bound inside the STARK proof.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigCommitmentAnnouncement {
-    pub block_id:            BlockId,
+    pub block_id: BlockId,
     pub sig_commitment_root: SigCommitmentRoot,
-    pub sig_count:           u32,
+    pub sig_count: u32,
     /// `sig_hashes[i] = SHA3-256(tx[i].signature)` — 32 bytes per tx.
-    pub sig_hashes:          Vec<SigHash>,
+    pub sig_hashes: Vec<SigHash>,
     /// SPHINCS+ sig over `signing_payload(...)`.
-    pub proposer_sig:        Vec<u8>,
+    pub proposer_sig: Vec<u8>,
     /// Proposer SPHINCS+ public key (64 bytes).
-    pub proposer_pk:         Vec<u8>,
+    pub proposer_pk: Vec<u8>,
 }
 
 impl SigCommitmentAnnouncement {
-    pub fn signing_payload(
-        block_id: &BlockId,
-        root:     &SigCommitmentRoot,
-        count:    u32,
-    ) -> Vec<u8> {
+    pub fn signing_payload(block_id: &BlockId, root: &SigCommitmentRoot, count: u32) -> Vec<u8> {
         let mut h = Sha3_256::new();
         h.update(b"bleep_sal_announcement_v1");
         h.update(block_id.height.to_le_bytes());
@@ -185,29 +197,29 @@ impl SigCommitmentAnnouncement {
 /// Compare to v1 per-tx design: 7 × 512 × ~50 KB = ~174 MB at N=7.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchBlockAttestation {
-    pub block_id:            BlockId,
+    pub block_id: BlockId,
     /// The sig_commitment_root this validator confirmed against its mempool.
     pub sig_commitment_root: SigCommitmentRoot,
     /// Compact bitfield: bit i = 1 means this validator verified tx[i].
-    pub attested_bitmap:     TxBitmap,
+    pub attested_bitmap: TxBitmap,
     /// `attested_bitmap.count_set()` — cached for fast threshold checks.
-    pub attested_count:      u32,
+    pub attested_count: u32,
     /// SHA3-256 of this validator's SPHINCS+ public key.
-    pub validator_pk_hash:   [u8; 32],
+    pub validator_pk_hash: [u8; 32],
     /// ONE 49,856-byte SPHINCS+ sig over `signing_payload(...)`.
-    pub attestation_sig:     Vec<u8>,
+    pub attestation_sig: Vec<u8>,
     /// SPHINCS+ public key (64 bytes) for verification.
-    pub validator_pk:        Vec<u8>,
+    pub validator_pk: Vec<u8>,
 }
 
 impl BatchBlockAttestation {
     /// Canonical signing payload — covers block identity, commitment root,
     /// attested count, and a hash of the bitmap to prevent bitmap substitution.
     pub fn signing_payload(
-        block_id:            &BlockId,
+        block_id: &BlockId,
         sig_commitment_root: &SigCommitmentRoot,
-        attested_count:      u32,
-        bitmap_hash:         &[u8; 32],
+        attested_count: u32,
+        bitmap_hash: &[u8; 32],
     ) -> Vec<u8> {
         let mut h = Sha3_256::new();
         h.update(b"bleep_batch_attestation_v1");
@@ -226,21 +238,23 @@ impl BatchBlockAttestation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigRetrievalRequest {
-    pub block_id:           BlockId,
-    pub tx_index:           u32,
-    pub requester_pk_hash:  [u8; 32],
+    pub block_id: BlockId,
+    pub tx_index: u32,
+    pub requester_pk_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigRetrievalResponse {
-    pub block_id:      BlockId,
-    pub tx_index:      u32,
-    pub full_sig:      Vec<u8>,
-    pub tx_signer_pk:  Vec<u8>,
+    pub block_id: BlockId,
+    pub tx_index: u32,
+    pub full_sig: Vec<u8>,
+    pub tx_signer_pk: Vec<u8>,
 }
 
 impl Drop for SigRetrievalResponse {
-    fn drop(&mut self) { self.full_sig.zeroize(); }
+    fn drop(&mut self) {
+        self.full_sig.zeroize();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -257,8 +271,12 @@ pub enum SigAvailabilityMessage {
 }
 
 impl SigAvailabilityMessage {
-    pub fn encode(&self) -> Result<Vec<u8>, bincode::Error> { bincode::serialize(self) }
-    pub fn decode(bytes: &[u8]) -> Result<Self, bincode::Error> { bincode::deserialize(bytes) }
+    pub fn encode(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,31 +295,33 @@ impl SigAvailabilityMessage {
 /// Both must reach `required_threshold_bps` for `threshold_met = true`.
 #[derive(Debug, Clone)]
 pub struct BlockSigAvailabilityStatus {
-    pub block_id:                   BlockId,
-    pub sig_commitment_root:        SigCommitmentRoot,
+    pub block_id: BlockId,
+    pub sig_commitment_root: SigCommitmentRoot,
 
     // ── Transaction dimension ─────────────────────────────────────────────
     /// Total transactions in the block.
-    pub total_txs:                  u32,
+    pub total_txs: u32,
     /// Transactions covered by ≥ 1 validator's attestation bitmap.
-    pub covered_txs:                u32,
+    pub covered_txs: u32,
     /// `covered_txs / total_txs` in basis points (0–10,000).
-    pub tx_coverage_bps:            u32,
+    pub tx_coverage_bps: u32,
 
     // ── Validator dimension ───────────────────────────────────────────────
     /// Validators currently in the active set (from `ValidatorRegistry`).
-    pub active_validator_count:     u32,
+    pub active_validator_count: u32,
     /// Validators that submitted a valid `BatchBlockAttestation`.
-    pub attesting_validator_count:  u32,
+    pub attesting_validator_count: u32,
     /// `attesting_validator_count / active_validator_count` in basis points.
-    pub validator_coverage_bps:     u32,
+    pub validator_coverage_bps: u32,
 
     // ── Threshold gate ────────────────────────────────────────────────────
     /// `true` iff BOTH `tx_coverage_bps` AND `validator_coverage_bps` >= threshold.
-    pub threshold_met:              bool,
+    pub threshold_met: bool,
 }
 
 impl BlockSigAvailabilityStatus {
     #[inline]
-    pub fn is_available(&self) -> bool { self.threshold_met }
+    pub fn is_available(&self) -> bool {
+        self.threshold_met
+    }
 }

@@ -73,14 +73,17 @@ impl BlockchainState {
 
     /// **Quantum-secure encryption of blockchain state**
     pub fn encrypt_state(&self, kyber: &Kyber) -> Vec<u8> {
-        let serialized = bincode::serde::encode_to_vec(self, bincode::config::standard()).expect("Serialization failed");
+        let serialized = bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .expect("Serialization failed");
         kyber.encrypt(&serialized)
     }
 
     /// **Quantum-secure decryption of blockchain state**
     pub fn decrypt_state(encrypted_data: &[u8], sphincs: &SphincsPlus) -> Self {
         let decrypted = sphincs.decrypt(encrypted_data);
-        bincode::serde::decode_from_slice::<Self, _>(&decrypted, bincode::config::standard()).map(|(v, _)| v).expect("Deserialization failed")
+        bincode::serde::decode_from_slice::<Self, _>(&decrypted, bincode::config::standard())
+            .map(|(v, _)| v)
+            .expect("Deserialization failed")
     }
 
     /// **Verifies a transaction using ZKP**
@@ -96,7 +99,8 @@ impl BlockchainState {
 
     /// **Generates a cryptographic fingerprint of the state**
     pub fn compute_fingerprint(&self) -> String {
-        let serialized_state = bincode::serde::encode_to_vec(self, bincode::config::standard()).expect("Serialization failed");
+        let serialized_state = bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .expect("Serialization failed");
         hex::encode(blake3_hash(&serialized_state).as_bytes())
     }
 

@@ -248,7 +248,7 @@ jobs:
         run: |
           cargo test \
             --workspace \
-            --test '*' \
+            --tests \
             --all-features \
             -- \
             --nocapture
