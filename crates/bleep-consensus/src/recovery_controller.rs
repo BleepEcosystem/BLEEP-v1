@@ -10,7 +10,7 @@
 // 6. Rollback capability always exists (snapshot available)
 
 use crate::incident_detector::{IncidentReport, IncidentType, RecoveryAction};
-use log::{error, info, warn};
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

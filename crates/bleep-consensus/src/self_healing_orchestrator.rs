@@ -9,13 +9,12 @@
 // 5. Safety > Liveness (prefer stall over divergence)
 // 6. Recovery actions respect Byzantine thresholds
 
-use crate::incident_detector::{DetectionParams, IncidentDetector, IncidentReport, IncidentType};
+use crate::incident_detector::{DetectionParams, IncidentDetector, IncidentReport};
 use crate::recovery_controller::{
     ProtocolParams, RecoveryController, RecoveryLog, RecoveryPreconditions,
 };
-use log::{error, info, warn};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,7 +25,7 @@ pub enum OrchestratorState {
     Recovering,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealingCycle {
     /// Epoch of this cycle
     pub epoch: u64,
