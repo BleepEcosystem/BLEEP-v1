@@ -9,7 +9,7 @@
 // 5. False positives are impossible (rules are conservative)
 // 6. No detection is lost (events are persisted)
 
-use log::{error, info, warn};
+use log::info;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -188,6 +188,7 @@ pub struct IncidentDetector {
     finality_history: VecDeque<FinalityRecord>,
 
     /// Validator behavior tracking
+    #[allow(dead_code)]
     validator_behavior: HashMap<String, ValidatorBehavior>,
 
     /// Detection parameters (thresholds)
