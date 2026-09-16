@@ -8,7 +8,7 @@
 //! receives the sequence number.
 //!
 //! ## Column-family layout
-//! ```
+//! ```text
 //! CF: "audit_log"
 //!   key:   seq as 8-byte big-endian
 //!   value: bincode-serialised StoredAuditEntry

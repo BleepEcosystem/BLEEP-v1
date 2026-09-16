@@ -46,7 +46,7 @@ tracing     = "0.1"
 
 # BLEEP workspace
 bleep-crypto = { path = "../bleep-crypto" }
-rocksdb      = "0.21.0"
+rocksdb      = { version = "0.21.0", features = ["multi-threaded-cf"] }
 
 [dev-dependencies]
 tokio-test  = "0.4"
