@@ -391,13 +391,13 @@ mod tests {
     fn create_test_features(anomaly_score_base: f64) -> ExtractedFeatures {
         ExtractedFeatures {
             features: vec![
-                20.0,                     // network_health
-                0.0,                      // validator_downtime
+                anomaly_score_base,       // network_health
+                anomaly_score_base,       // validator_downtime
                 anomaly_score_base,       // consensus_latency
-                anomaly_score_base * 0.5, // finality_lag
-                100.0,                    // proposal_success_rate
-                10.0,                     // stake_concentration
-                90.0,                     // block_production_rate
+                anomaly_score_base,       // finality_lag
+                anomaly_score_base,       // proposal_success_rate
+                anomaly_score_base,       // stake_concentration
+                anomaly_score_base,       // block_production_rate
             ],
             feature_names: vec![
                 "network_health".to_string(),
@@ -441,7 +441,7 @@ mod tests {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
         let features = create_test_features(30.0);
 
-        let (assessment, sig) = module.analyze(&features).unwrap();
+        let (_assessment, sig) = module.analyze(&features).unwrap();
 
         // Verify signature
         assert!(sig.verify());

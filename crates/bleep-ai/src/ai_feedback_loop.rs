@@ -314,7 +314,9 @@ impl ModelPerformance {
         confidence: f32,
     ) -> FeedbackResult<()> {
         // Update latency
-        self.avg_latency_ms = (self.avg_latency_ms + latency_ms) / 2.0;
+        let inference_count = self.accuracy.total_predictions;
+        self.avg_latency_ms = (self.avg_latency_ms * inference_count as f32 + latency_ms)
+            / (inference_count + 1) as f32;
         self.min_latency_ms = self.min_latency_ms.min(latency_ms);
         self.max_latency_ms = self.max_latency_ms.max(latency_ms);
 

@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_orchestrator_basic_flow() {
-        let mut orchestrator = AIConsensusOrchestrator::new(0);
+        let orchestrator = AIConsensusOrchestrator::new(0);
 
         let stats = orchestrator.get_stats();
         assert_eq!(stats.total_proposals, 0);
