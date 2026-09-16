@@ -7,7 +7,7 @@
 //! cannot race past the uniqueness check.
 //!
 //! ## Column-family layout
-//! ```
+//! ```text
 //! CF: "nullifier_store"
 //!   key:   nullifier bytes   (32 bytes, big-endian)
 //!   value: b"1"              (single sentinel byte; presence = spent)
