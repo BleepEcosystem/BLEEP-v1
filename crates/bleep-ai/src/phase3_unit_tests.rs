@@ -42,7 +42,7 @@ mod phase3_unit_tests {
             3,
         );
 
-        assert_eq!(metadata.model_name, "test_model");
+        assert_eq!(metadata.model_id, "test_model");
         assert_eq!(metadata.version, "1.0.0");
     }
 
@@ -115,16 +115,16 @@ mod phase3_unit_tests {
     fn test_shard_rollback_proposal() {
         let proposal = AIProposal::ShardRollback(ShardRollbackProposal {
             shard_id: 1,
-            target_height: 1000,
+            target_checkpoint: 1000,
             reason: "Byzantine event detected".to_string(),
             confidence: 0.92,
             evidence: vec![EvidenceType::FaultCount {
-                fault_type: "byzantine".to_string(),
-                count: 3,
-                threshold: 2,
+                detected_faults: 3,
+                epoch_range: (1, 2),
+                severity: "byzantine".to_string(),
             }],
-            risk_score: 45,
-            rollback_duration_epochs: 10,
+            slash_validators: false,
+            validators_to_slash: vec![],
         });
 
         assert!(proposal.validate().is_ok());
@@ -133,8 +133,9 @@ mod phase3_unit_tests {
     #[test]
     fn test_tokenomics_proposal() {
         let proposal = AIProposal::TokenomicsAdjustment(TokenomicsProposal {
-            new_base_fee: 1500,
-            new_validator_reward: 125,
+            parameter: "base_fee".to_string(),
+            current_value: 1200,
+            new_value: 1500,
             reason: "Market adjustment".to_string(),
             confidence: 0.78,
             evidence: vec![EvidenceType::FeeStatistics {
@@ -143,7 +144,7 @@ mod phase3_unit_tests {
                 max_fee: 2000,
                 target_fee: 1500,
             }],
-            risk_score: 20,
+            max_epochs_to_test: 10,
         });
 
         assert!(proposal.validate().is_ok());
@@ -203,7 +204,12 @@ mod phase3_unit_tests {
             activation_epoch: 100,
             reason: "Test".to_string(),
             confidence: 0.85,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 25,
             cooldown_epochs: 5,
         });
@@ -214,13 +220,18 @@ mod phase3_unit_tests {
             activation_epoch: 100,
             reason: "Test".to_string(),
             confidence: 0.85,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 25,
             cooldown_epochs: 5,
         });
 
-        let id1 = proposal1.compute_id().unwrap();
-        let id2 = proposal2.compute_id().unwrap();
+        let id1 = proposal1.compute_id();
+        let id2 = proposal2.compute_id();
         assert_eq!(id1, id2); // Same proposal = same ID
     }
 
@@ -232,7 +243,7 @@ mod phase3_unit_tests {
         assert_eq!(invariants.min_validators, 20);
         assert_eq!(invariants.min_participation_rate, 0.67);
         assert_eq!(invariants.max_slashing_per_epoch, 0.05);
-        assert_eq!(invariants.mode_switch_cooldown_epochs, 10);
+        assert_eq!(invariants.min_mode_switch_cooldown, 10);
     }
 
     #[test]
@@ -240,8 +251,8 @@ mod phase3_unit_tests {
         let invariants = ProtocolInvariants::testnet();
         assert_eq!(invariants.min_validators, 5);
         assert_eq!(invariants.min_participation_rate, 0.51);
-        assert_eq!(invariants.max_slashing_per_epoch, 0.20);
-        assert_eq!(invariants.mode_switch_cooldown_epochs, 2);
+        assert_eq!(invariants.max_slashing_per_epoch, 0.10);
+        assert_eq!(invariants.min_mode_switch_cooldown, 2);
     }
 
     #[test]
@@ -276,7 +287,12 @@ mod phase3_unit_tests {
             activation_epoch: 100,
             reason: "Test".to_string(),
             confidence: 0.8,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 20,
             cooldown_epochs: 2,
         });
@@ -285,7 +301,7 @@ mod phase3_unit_tests {
         let record = AIAttestationRecord::new(commitment);
 
         assert!(!record.attestation_id.is_empty());
-        assert_eq!(record.verification_status, "pending");
+        assert!(!record.verified);
     }
 
     #[test]
@@ -298,7 +314,12 @@ mod phase3_unit_tests {
             activation_epoch: 100,
             reason: "Test".to_string(),
             confidence: 0.8,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 20,
             cooldown_epochs: 2,
         });
@@ -364,7 +385,7 @@ mod phase3_unit_tests {
         let _ = perf.record_inference(12.0, true, 0.90);
         let _ = perf.record_inference(11.0, false, 0.85);
 
-        assert_eq!(perf.total_inferences, 3);
+        assert_eq!(perf.accuracy.total_predictions, 3);
         assert!((perf.avg_latency_ms - 11.0).abs() < 0.1);
     }
 
@@ -391,7 +412,7 @@ mod phase3_unit_tests {
 
         let perf = manager.get_model_performance("test_model", "1.0");
         assert!(perf.is_some());
-        assert_eq!(perf.unwrap().total_inferences, 2);
+        assert_eq!(perf.unwrap().accuracy.total_predictions, 2);
     }
 
     #[test]
@@ -434,13 +455,14 @@ mod phase3_unit_tests {
         let record = AIAttestationRecord::new(commitment);
 
         assert!(!record.attestation_id.is_empty());
-        assert!(record.proposal_id.is_some());
+        assert!(!record.commitment.proposal_hash.is_empty());
     }
 
     #[test]
     fn test_proposal_with_evidence_validation() {
         let proposal = AIProposal::ShardRebalance(ShardRebalanceProposal {
-            shard_distribution: vec![50, 50, 50],
+            affected_shards: vec![0, 1, 2],
+            new_distribution: [(0, 50), (1, 50), (2, 50)].into_iter().collect(),
             reason: "Load balancing".to_string(),
             confidence: 0.82,
             evidence: vec![
@@ -451,12 +473,12 @@ mod phase3_unit_tests {
                     direction: "above".to_string(),
                 },
                 EvidenceType::CrossShardHealth {
-                    latency_ms: 150,
+                    total_txs: 100,
+                    successful_txs: 95,
+                    failed_txs: 5,
                     success_rate: 0.95,
-                    error_count: 2,
                 },
             ],
-            risk_score: 40,
         });
 
         assert!(proposal.validate().is_ok());

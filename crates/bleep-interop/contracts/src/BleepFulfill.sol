@@ -48,27 +48,27 @@ contract BleepFulfill {
         address recipient,
         uint256 minAmount,
         uint256 deadline
-    ) external payable onlySepolia {
+    ) external payable onlyOwner onlySepolia {
         require(recipient != address(0), "BleepFulfill: invalid recipient");
         require(!fulfilled[intentId], "BleepFulfill: intent already filled");
         require(msg.value >= minAmount, "BleepFulfill: amount below minimum");
+        // forge-lint: disable-next-line(block-timestamp)
         require(deadline == 0 || block.timestamp <= deadline, "BleepFulfill: deadline passed");
 
         fulfilled[intentId] = true;
+        emit IntentFulfilled(intentId, recipient, msg.value, deadline, block.timestamp);
 
         (bool success, ) = recipient.call{value: msg.value}("");
         require(success, "BleepFulfill: transfer failed");
-
-        emit IntentFulfilled(intentId, recipient, msg.value, deadline, block.timestamp);
     }
 
     /// @notice Recover any accidentally sent ETH held in the contract.
     function emergencyWithdraw() external onlyOwner onlySepolia {
         uint256 balance = address(this).balance;
         require(balance > 0, "BleepFulfill: no balance to withdraw");
+        emit EmergencyWithdraw(owner, balance);
         (bool success, ) = owner.call{value: balance}("");
         require(success, "BleepFulfill: withdraw failed");
-        emit EmergencyWithdraw(owner, balance);
     }
 
     receive() external payable {

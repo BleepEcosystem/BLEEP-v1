@@ -37,7 +37,7 @@ pub struct SessionToken {
 }
 
 /// JWT claims payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionClaims {
     /// Subject — the authenticated identity ID
     pub sub: String,

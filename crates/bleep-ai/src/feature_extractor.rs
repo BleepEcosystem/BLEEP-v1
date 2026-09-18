@@ -298,7 +298,11 @@ impl FeatureExtractor {
         let recomputed = self.extract(telemetry)?;
 
         // Compare hashes
-        Ok(recomputed.feature_hash == features.feature_hash)
+        Ok(recomputed.feature_hash == features.feature_hash
+            && recomputed.features == features.features
+            && recomputed.feature_names == features.feature_names
+            && recomputed.epoch == features.epoch
+            && recomputed.input_hash == features.input_hash)
     }
 }
 
@@ -396,7 +400,7 @@ mod tests {
     fn test_input_hash_changes_with_data() {
         let extractor = FeatureExtractor::new();
         let telemetry1 = create_test_telemetry(1, 4);
-        let mut telemetry2 = create_test_telemetry(1, 3); // Different healthy count
+        let telemetry2 = create_test_telemetry(1, 3); // Different healthy count
 
         let features1 = extractor.extract(&telemetry1).unwrap();
         let features2 = extractor.extract(&telemetry2).unwrap();

@@ -257,7 +257,7 @@ pub struct ExecutionProof {
 }
 
 impl ExecutionProof {
-    pub fn verify_signature(&self, executor_pk: &[u8; 32]) -> bool {
+    pub fn verify_signature(&self, executor_pk: &[u8]) -> bool {
         let mut data = self.intent_id.to_vec();
         data.extend_from_slice(self.dest_tx_hash.as_bytes());
         data.extend_from_slice(&self.dest_amount_delivered.to_be_bytes());

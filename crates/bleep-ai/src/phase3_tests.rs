@@ -15,7 +15,6 @@ mod tests {
         ai_attestation::*, ai_consensus_integration::*, ai_constraint_validator::*,
         ai_feedback_loop::*, ai_proposal_types::*, deterministic_inference::*,
     };
-    use std::collections::BTreeMap;
 
     // ==================== DETERMINISTIC INFERENCE TESTS ====================
 
@@ -55,8 +54,6 @@ mod tests {
         let mut engine = DeterministicInferenceEngine::new(0);
 
         let correct_hash = "correct_hash";
-        let incorrect_hash = "wrong_hash";
-
         let metadata = ModelMetadata::new(
             "test".to_string(),
             "1.0".to_string(),
@@ -299,7 +296,12 @@ mod tests {
             activation_epoch: 101,
             reason: "Test".to_string(),
             confidence: 0.85,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 25,
             cooldown_epochs: 5,
         });
@@ -320,7 +322,12 @@ mod tests {
             activation_epoch: 100,
             reason: "Test".to_string(),
             confidence: 0.8,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 20,
             cooldown_epochs: 2,
         });
@@ -371,7 +378,7 @@ mod tests {
         let mut perf = ModelPerformance::new("test_model".to_string(), "1.0".to_string());
 
         // Simulate many incorrect predictions
-        for _ in 0..100 {
+        for _ in 0..101 {
             let _ = perf.record_inference(10.0, false, 0.5);
         }
 

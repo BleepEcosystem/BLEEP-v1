@@ -634,7 +634,7 @@ mod tests {
         let result2 = config.round(&output).unwrap();
 
         assert_eq!(result1, result2);
-        assert_eq!(result1[0].round(), 1.23 * 100.0); // 2 decimal places
+        assert_eq!(result1[0], 1.23); // 2 decimal places
     }
 
     #[test]

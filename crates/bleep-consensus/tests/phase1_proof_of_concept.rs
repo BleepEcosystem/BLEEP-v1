@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+
+// PHASE 1
 // PHASE 1 - COMPLETE STANDALONE PROOF OF CONCEPT
 // This file demonstrates all Phase 1 consensus layer concepts
 // working end-to-end WITHOUT any external module dependencies.

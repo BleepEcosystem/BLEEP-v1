@@ -11,7 +11,7 @@
 
 use crate::incident_detector::{DetectionParams, IncidentDetector, IncidentReport};
 use crate::recovery_controller::{
-    ProtocolParams, RecoveryController, RecoveryLog, RecoveryPreconditions,
+    ProtocolParams, RecoveryController, RecoveryLog, RecoveryPreconditions, RecoveryStatus,
 };
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -146,7 +146,15 @@ impl SelfHealingOrchestrator {
                     }
                     Err(e) => {
                         warn!("Recovery failed: {:?}", e);
-                        // Continue with next incident
+                        if let Some(action) = incident.proposed_recovery.first() {
+                            recovery_actions.push(RecoveryLog {
+                                action: *action,
+                                execution_epoch: epoch,
+                                status: RecoveryStatus::Failed,
+                                result: e.to_string(),
+                                action_hash: incident.incident_id.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -290,6 +298,11 @@ impl SelfHealingOrchestrator {
     pub fn get_params(&self) -> &ProtocolParams {
         self.recovery.get_params()
     }
+
+    /// Get the configured recovery strategy.
+    pub fn get_strategy(&self) -> &RecoveryStrategy {
+        &self.strategy
+    }
 }
 
 /// Health report: comprehensive system status
@@ -352,7 +365,7 @@ impl SelfHealingOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incident_detector::DetectionParams;
+    use crate::incident_detector::{DetectionParams, IncidentType};
     use crate::recovery_controller::RecoveryPreconditions;
 
     #[test]

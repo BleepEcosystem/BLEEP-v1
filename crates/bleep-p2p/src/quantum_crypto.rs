@@ -3,7 +3,7 @@
 //! Algorithms used:
 //! - Key encapsulation : Kyber-768 (NIST PQC round 3 winner)
 //! - Signatures        : SPHINCS+-SHA2-128s (stateless hash-based, NIST PQC winner)
-//! - Classical signing : Ed25519 (for EVM / off-chain compatibility)
+//! - Signatures        : SPHINCS+-SHA2-128s for all protocol authentication
 //! - Symmetric         : AES-256-GCM with random 12-byte nonce prepended
 //! - KDF               : HKDF-SHA256
 
@@ -11,7 +11,6 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng as AeadOsRng},
     Aes256Gcm, Key, Nonce,
 };
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use pqcrypto_kyber::kyber768;
 use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
@@ -98,6 +97,14 @@ impl SphincsKeypair {
             secret_key: SphincsSecretKey(sk.as_bytes().to_vec()),
         }
     }
+
+    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
+        sphincs_sign(message, &self.secret_key.0).expect("SPHINCS+ signing failed")
+    }
+
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        self.public_key.0.clone()
+    }
 }
 
 /// Sign `message` with SPHINCS+ and return the detached signature bytes.
@@ -124,62 +131,25 @@ pub fn sphincs_verify(message: &[u8], signature_bytes: &[u8], pk_bytes: &[u8]) -
         .map_err(|_| P2PError::AuthenticationFailed)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ED25519 CLASSICAL SIGNATURES
-// ─────────────────────────────────────────────────────────────────────────────
+/// Compatibility alias for callers that used the pre-PQ P2P API.
+pub type Ed25519Keypair = SphincsKeypair;
 
-/// Ed25519 keypair for classical (EVM-compatible) signing.
-pub struct Ed25519Keypair {
-    signing_key: SigningKey,
-    pub verifying_key: VerifyingKey,
+/// Verify a SPHINCS+ signature.
+pub fn sphincs_verify_message(
+    message: &[u8],
+    signature_bytes: &[u8],
+    public_key_bytes: &[u8],
+) -> P2PResult<()> {
+    sphincs_verify(message, signature_bytes, public_key_bytes)
 }
 
-impl Ed25519Keypair {
-    pub fn generate() -> Self {
-        let mut rng = rand::thread_rng();
-        let signing_key = SigningKey::generate(&mut rng);
-        let verifying_key = signing_key.verifying_key();
-        Ed25519Keypair {
-            signing_key,
-            verifying_key,
-        }
-    }
-
-    pub fn from_bytes(secret_bytes: &[u8; 32]) -> P2PResult<Self> {
-        let signing_key = SigningKey::from_bytes(secret_bytes);
-        let verifying_key = signing_key.verifying_key();
-        Ok(Ed25519Keypair {
-            signing_key,
-            verifying_key,
-        })
-    }
-
-    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        self.signing_key.sign(message).to_bytes().to_vec()
-    }
-
-    pub fn public_key_bytes(&self) -> Vec<u8> {
-        self.verifying_key.to_bytes().to_vec()
-    }
-}
-
-/// Verify an Ed25519 signature.
+/// Compatibility alias for the pre-PQ verifier API.
 pub fn ed25519_verify(
     message: &[u8],
     signature_bytes: &[u8],
     public_key_bytes: &[u8],
 ) -> P2PResult<()> {
-    let vk_bytes: &[u8; 32] = public_key_bytes
-        .try_into()
-        .map_err(|_| P2PError::Crypto("Ed25519 pk must be 32 bytes".into()))?;
-    let vk = VerifyingKey::from_bytes(vk_bytes)
-        .map_err(|e| P2PError::Crypto(format!("Ed25519 pk parse: {e}")))?;
-    let sig_bytes: &[u8; 64] = signature_bytes
-        .try_into()
-        .map_err(|_| P2PError::Crypto("Ed25519 sig must be 64 bytes".into()))?;
-    let sig = Signature::from_bytes(sig_bytes);
-    vk.verify(message, &sig)
-        .map_err(|_| P2PError::AuthenticationFailed)
+    sphincs_verify_message(message, signature_bytes, public_key_bytes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -257,22 +227,18 @@ impl SessionKey {
 // PROOF OF IDENTITY (ZK-lite Schnorr-like commitment)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A non-interactive proof-of-identity built on Ed25519 + SHA-256 Fiat-Shamir.
+/// A non-interactive proof-of-identity built on SPHINCS+ + SHA-256 Fiat-Shamir.
 ///
 /// The prover demonstrates knowledge of the signing key for `public_key` by:
 /// 1. Generating a random commitment `R = r·G`.
 /// 2. Computing challenge `c = SHA-256(R ‖ public_key ‖ context)`.
-/// 3. Computing response `s = r + c·sk` (mod ℓ, handled by ed25519-dalek internally
-///    via signing a deterministic message).
-///
-/// In practice we use Ed25519's deterministic signing of a challenge-derived message,
-/// which is cryptographically equivalent and simpler to implement correctly.
+/// 3. Signing the challenge with the node's SPHINCS+ secret key.
 pub struct ProofOfIdentity {
     /// The challenge that was signed.
     pub challenge: Vec<u8>,
-    /// The Ed25519 signature over the challenge.
+    /// The SPHINCS+ signature over the challenge.
     pub signature: Vec<u8>,
-    /// The signer's Ed25519 public key.
+    /// The signer's SPHINCS+ public key.
     pub public_key: Vec<u8>,
 }
 
@@ -303,7 +269,7 @@ impl ProofOfIdentity {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HYBRID IDENTITY — Ed25519 + SPHINCS+
+// NODE IDENTITY — SPHINCS+ + KYBER
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A complete node identity that holds both classical and post-quantum keys.
@@ -322,12 +288,12 @@ impl NodeIdentity {
         }
     }
 
-    /// Derive the NodeId from the Ed25519 public key.
+    /// Derive the NodeId from the SPHINCS+ public key.
     pub fn node_id(&self) -> crate::types::NodeId {
         crate::types::NodeId::from_bytes(&self.ed_keypair.public_key_bytes())
     }
 
-    /// Sign message with Ed25519 (fast, small signature — used for gossip).
+    /// Sign message with SPHINCS+ for quantum-safe gossip authentication.
     pub fn sign_ed(&self, message: &[u8]) -> Vec<u8> {
         self.ed_keypair.sign(message)
     }

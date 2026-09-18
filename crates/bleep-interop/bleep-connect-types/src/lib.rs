@@ -60,7 +60,7 @@ impl ChainId {
             ChainId::Sui => "sui",
             ChainId::Aptos => "aptos",
             ChainId::BLEEP => "bleep",
-            ChainId::Custom(id) => return Box::leak(format!("custom-{}", id).into_boxed_str()),
+            ChainId::Custom(id) => Box::leak(format!("custom-{}", id).into_boxed_str()),
         }
     }
 
@@ -151,7 +151,7 @@ impl UniversalAddress {
 
     pub fn hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(&self.to_bytes());
+        hasher.update(self.to_bytes());
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&result);
@@ -207,15 +207,23 @@ impl AssetId {
         }
     }
 
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
+        format!("{self}")
+    }
+}
+
+impl fmt::Display for AssetId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.contract_address {
-            Some(addr) => format!(
+            Some(addr) => write!(
+                f,
                 "{}:{}:{}",
                 self.chain.canonical_name(),
                 addr,
                 self.token_id.as_deref().unwrap_or("0")
             ),
-            None => format!("{}:native", self.chain.canonical_name()),
+            None => write!(f, "{}:native", self.chain.canonical_name()),
         }
     }
 }
@@ -259,13 +267,13 @@ impl InstantIntent {
     pub fn calculate_id(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BLEEP-CONNECT-INTENT-V1:");
-        hasher.update(&self.source_chain.to_u32().to_be_bytes());
-        hasher.update(&self.dest_chain.to_u32().to_be_bytes());
-        hasher.update(&self.source_amount.to_be_bytes());
-        hasher.update(&self.sender.to_bytes());
-        hasher.update(&self.recipient.to_bytes());
-        hasher.update(&self.nonce.to_be_bytes());
-        hasher.update(&self.created_at.to_be_bytes());
+        hasher.update(self.source_chain.to_u32().to_be_bytes());
+        hasher.update(self.dest_chain.to_u32().to_be_bytes());
+        hasher.update(self.source_amount.to_be_bytes());
+        hasher.update(self.sender.to_bytes());
+        hasher.update(self.recipient.to_bytes());
+        hasher.update(self.nonce.to_be_bytes());
+        hasher.update(self.created_at.to_be_bytes());
 
         let result = hasher.finalize();
         let mut id = [0u8; 32];
@@ -523,9 +531,9 @@ impl ProofBatch {
         let mut hasher = Sha256::new();
         hasher.update(b"BLEEP-CONNECT-BATCH-V1:");
         for proof in &self.proofs {
-            hasher.update(&proof.proof_id);
+            hasher.update(proof.proof_id);
         }
-        hasher.update(&self.created_at.to_be_bytes());
+        hasher.update(self.created_at.to_be_bytes());
 
         let result = hasher.finalize();
         let mut id = [0u8; 32];
@@ -695,12 +703,12 @@ impl CommitmentBlock {
     pub fn calculate_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BLEEP-CONNECT-BLOCK-V1:");
-        hasher.update(&self.block_number.to_be_bytes());
-        hasher.update(&self.timestamp.to_be_bytes());
-        hasher.update(&self.previous_hash);
+        hasher.update(self.block_number.to_be_bytes());
+        hasher.update(self.timestamp.to_be_bytes());
+        hasher.update(self.previous_hash);
 
         for commitment in &self.commitments {
-            hasher.update(&commitment.commitment_id);
+            hasher.update(commitment.commitment_id);
         }
 
         let result = hasher.finalize();

@@ -12,7 +12,6 @@
 mod phase4_ai_integration_tests {
     use bleep_consensus::incident_detector::*;
     use bleep_consensus::recovery_controller::*;
-    use bleep_consensus::self_healing_orchestrator::*;
 
     use bleep_ai::ai_decision_module::*;
     use bleep_ai::feature_extractor::*;
@@ -63,7 +62,7 @@ mod phase4_ai_integration_tests {
         let mut module = AIDecisionModule::new(b"ai_key".to_vec());
         let features = create_test_features(30.0);
 
-        let (assessment, signature) = module.analyze(&features).unwrap();
+        let (_assessment, signature) = module.analyze(&features).unwrap();
 
         // Try to verify with tampered signature
         let mut bad_signature = signature.clone();
@@ -75,8 +74,6 @@ mod phase4_ai_integration_tests {
     #[test]
     fn test_04_proposal_signature_verification() {
         // Governance rejects proposal with invalid signature
-        let mut gov = GovernanceIntegration::new();
-
         let mut assessment = AnomalyAssessment {
             anomaly_score: 30.0,
             classification: AnomalyClass::Degraded,
@@ -87,7 +84,7 @@ mod phase4_ai_integration_tests {
         };
 
         // Create valid signature
-        let mut signature = AISignature::sign(b"ai_key", &assessment.assessment_hash, 1);
+        let signature = AISignature::sign(b"ai_key", &assessment.assessment_hash, 1);
 
         // Tamper with assessment after signing
         assessment.anomaly_score = 70.0;
@@ -108,8 +105,6 @@ mod phase4_ai_integration_tests {
         let telemetry = create_test_telemetry(10);
 
         let mut features = extractor.extract(&telemetry).unwrap();
-        let original_hash = features.feature_hash.clone();
-
         // Tamper with feature value
         features.features[0] = 50.0; // Changed!
 
@@ -306,11 +301,15 @@ mod phase4_ai_integration_tests {
 
         let detector = IncidentDetector::new(DetectionParams::default());
 
-        let controller = RecoveryController::new();
+        let controller = RecoveryController::new(
+            vec!["validator-1".to_string(), "validator-2".to_string(), "validator-3".to_string(), "validator-4".to_string()],
+            ProtocolParams::default(),
+            RecoveryPreconditions::default(),
+        );
 
-        // Both components work independently
-        assert_ne!(detector.get_incidents().len(), 0); // Can detect
-        assert_ne!(controller.get_recovery_log().len(), 0); // Can recover
+        // Both components are available independently and start with clean state.
+        assert!(detector.get_incidents().is_empty());
+        assert!(controller.get_recovery_log().is_empty());
     }
 
     // ============================================================================
@@ -418,7 +417,6 @@ mod phase4_ai_integration_tests {
 
     #[test]
     fn test_21_ai_key_mismatch_detection() {
-        let mut gov = GovernanceIntegration::new();
         let mut module = AIDecisionModule::new(b"legitimate_ai".to_vec());
 
         let features = create_test_features(50.0);
@@ -567,13 +565,13 @@ mod phase4_ai_integration_tests {
 
         ExtractedFeatures {
             features: vec![
-                50.0,               // network_health
-                0.0,                // validator_downtime
-                anomaly_base,       // consensus_latency
-                anomaly_base * 0.5, // finality_lag
-                100.0,              // proposal_success_rate
-                10.0,               // stake_concentration
-                90.0,               // block_production_rate
+                anomaly_base, // network_health
+                anomaly_base, // validator_downtime
+                anomaly_base, // consensus_latency
+                anomaly_base, // finality_lag
+                anomaly_base, // proposal_success_rate
+                anomaly_base, // stake_concentration
+                anomaly_base, // block_production_rate
             ],
             feature_names: vec![
                 "network_health".to_string(),

@@ -79,6 +79,7 @@ pub struct ProofOfInference {
     pub attestation_timestamp: u64,
 
     /// Nonce for replay protection
+        // Determine constraint approval from proof
     pub attestation_nonce: Vec<u8>,
 
     /// Constraints evaluated (what was checked)
@@ -99,6 +100,7 @@ pub struct ProofOfInference {
 pub enum ConstraintOutcome {
     /// All constraints passed
     Approved,
+
 
     /// Some constraints failed - proposal rejected
     Rejected {
@@ -489,7 +491,7 @@ pub struct AttestationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_proposal_types::ConsensusModeProposal;
+    use crate::ai_proposal_types::{ConsensusModeProposal, EvidenceType};
 
     #[test]
     fn test_proof_of_inference_consistency() {
@@ -536,7 +538,12 @@ mod tests {
             activation_epoch: 100,
             reason: "Test".to_string(),
             confidence: 0.8,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 20,
             cooldown_epochs: 2,
         });
@@ -545,8 +552,8 @@ mod tests {
             AIOutputCommitment::new(proposal.clone(), 10, vec![1, 2, 3], None).unwrap();
         let commitment2 = AIOutputCommitment::new(proposal, 10, vec![1, 2, 3], None).unwrap();
 
-        let hash1 = commitment1.compute_hash();
-        let hash2 = commitment2.compute_hash();
+        let _hash1 = commitment1.compute_hash();
+        let _hash2 = commitment2.compute_hash();
 
         // Same inputs -> same commitment hash
         // (Nonces differ, so hashes will differ - that's expected)
@@ -562,7 +569,12 @@ mod tests {
             activation_epoch: 100,
             reason: "Test".to_string(),
             confidence: 0.8,
-            evidence: vec![],
+            evidence: vec![EvidenceType::Metric {
+                name: "test".to_string(),
+                value: 1.0,
+                threshold: 2.0,
+                direction: "below".to_string(),
+            }],
             risk_score: 20,
             cooldown_epochs: 2,
         });

@@ -5,7 +5,7 @@
 //! ## Algorithms
 //! - **SPHINCS+**: Hash-based post-quantum signature scheme (signing/verification)
 //! - **Kyber1024**: Post-quantum key encapsulation mechanism (encryption)
-//! - **Ed25519**: Classical elliptic-curve signatures (for EVM interop)
+//! - **SPHINCS+**: Hash-based post-quantum signatures for all signing paths
 //! - **AES-256-GCM**: Authenticated symmetric encryption
 //! - **BLAKE2b / SHA-256 / SHA-3**: Hashing
 
@@ -14,14 +14,12 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use blake2::Blake2b512;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use pqcrypto_kyber::kyber1024;
 use pqcrypto_sphincsplus::sphincssha2256ssimple;
 use pqcrypto_traits::kem::{Ciphertext, PublicKey as KemPk, SecretKey as KemSk, SharedSecret};
 use pqcrypto_traits::sign::{DetachedSignature, PublicKey as SignPk, SecretKey as SignSk};
 use rand::rngs::OsRng;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 use sha3::Sha3_256;
@@ -43,8 +41,8 @@ pub enum CryptoError {
     InvalidCiphertext,
     #[error("Random number generation failed")]
     RngFailed,
-    #[error("Ed25519 error: {0}")]
-    Ed25519Error(String),
+    #[error("SPHINCS+ error: {0}")]
+    SphincsError(String),
 }
 
 pub type CryptoResult<T> = Result<T, CryptoError>;
@@ -178,56 +176,72 @@ impl QuantumVerifier {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CLASSICAL ED25519 (for EVM interoperability)
+// POST-QUANTUM SIGNING (legacy type name retained for API compatibility)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// An Ed25519 keypair for compatibility with EVM chains.
+/// A SPHINCS+-SHA2-256s-simple keypair.
+///
+/// The legacy `ClassicalKeyPair` name remains source-compatible, but this type
+/// creates and verifies only SPHINCS+ signatures.
 pub struct ClassicalKeyPair {
-    signing_key: SigningKey,
+    signing_key: Vec<u8>,
+    verifying_key: Vec<u8>,
 }
 
 impl ClassicalKeyPair {
     pub fn generate() -> Self {
-        let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        let (verifying_key, signing_key) = sphincssha2256ssimple::keypair();
         Self {
-            signing_key: SigningKey::from_bytes(&bytes),
+            signing_key: signing_key.as_bytes().to_vec(),
+            verifying_key: verifying_key.as_bytes().to_vec(),
         }
     }
 
-    pub fn from_bytes(bytes: &[u8; 32]) -> CryptoResult<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
+        let secret_len = sphincssha2256ssimple::secret_key_bytes();
+        let public_len = sphincssha2256ssimple::public_key_bytes();
+        if bytes.len() != secret_len + public_len {
+            return Err(CryptoError::InvalidKeyLength {
+                expected: secret_len + public_len,
+                got: bytes.len(),
+            });
+        }
+        let signing_key = sphincssha2256ssimple::SecretKey::from_bytes(&bytes[..secret_len])
+            .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
+        let verifying_key = sphincssha2256ssimple::PublicKey::from_bytes(&bytes[secret_len..])
+            .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
         Ok(Self {
-            signing_key: SigningKey::from_bytes(bytes),
+            signing_key: signing_key.as_bytes().to_vec(),
+            verifying_key: verifying_key.as_bytes().to_vec(),
         })
     }
 
-    pub fn public_key_bytes(&self) -> [u8; 32] {
-        self.signing_key.verifying_key().to_bytes()
+    /// Serialize the secret and public key together for persistence.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.signing_key.len() + self.verifying_key.len());
+        bytes.extend_from_slice(&self.signing_key);
+        bytes.extend_from_slice(&self.verifying_key);
+        bytes
+    }
+
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        self.verifying_key.clone()
     }
 
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        let sig = self.signing_key.sign(message);
-        sig.to_bytes().to_vec()
+        let signing_key = sphincssha2256ssimple::SecretKey::from_bytes(&self.signing_key)
+            .expect("SPHINCS+ keypair contains a valid secret key");
+        sphincssha2256ssimple::detached_sign(message, &signing_key)
+            .as_bytes()
+            .to_vec()
     }
 
-    pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8]) -> CryptoResult<bool> {
-        let vk = VerifyingKey::from_bytes(public_key)
-            .map_err(|e| CryptoError::Ed25519Error(e.to_string()))?;
-        if signature.len() != 64 {
-            return Err(CryptoError::InvalidKeyLength {
-                expected: 64,
-                got: signature.len(),
-            });
-        }
-        let sig_bytes: [u8; 64] =
-            signature
-                .try_into()
-                .map_err(|_| CryptoError::InvalidKeyLength {
-                    expected: 64,
-                    got: signature.len(),
-                })?;
-        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-        Ok(vk.verify(message, &sig).is_ok())
+    pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> CryptoResult<bool> {
+        let vk = sphincssha2256ssimple::PublicKey::from_bytes(public_key)
+            .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
+        let sig = sphincssha2256ssimple::DetachedSignature::from_bytes(signature)
+            .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
+        Ok(sphincssha2256ssimple::verify_detached_signature(&sig, message, &vk).is_ok())
     }
 }
 
@@ -334,12 +348,12 @@ fn aes_gcm_decrypt(key: &[u8; 32], data: &[u8]) -> CryptoResult<Vec<u8>> {
 // VALIDATOR MULTI-SIG AGGREGATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Aggregate multiple Ed25519 validator signatures into a compact representation.
+/// Aggregate multiple SPHINCS+ validator signatures into a compact representation.
 /// Returns the concatenated signatures and public keys; verification checks
 /// that at least `threshold` out of `total` validators signed correctly.
 pub struct ValidatorMultiSig {
     pub signatures: Vec<Vec<u8>>,
-    pub public_keys: Vec<[u8; 32]>,
+    pub public_keys: Vec<Vec<u8>>,
     pub message_hash: [u8; 32],
 }
 
@@ -352,7 +366,7 @@ impl ValidatorMultiSig {
         }
     }
 
-    pub fn add_signature(&mut self, public_key: [u8; 32], signature: Vec<u8>) {
+    pub fn add_signature(&mut self, public_key: Vec<u8>, signature: Vec<u8>) {
         self.public_keys.push(public_key);
         self.signatures.push(signature);
     }
@@ -395,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classical_ed25519() {
+    fn test_quantum_signing_keypair() {
         let kp = ClassicalKeyPair::generate();
         let msg = b"evm compatible message";
         let sig = kp.sign(msg);

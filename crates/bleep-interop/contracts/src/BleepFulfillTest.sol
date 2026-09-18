@@ -40,27 +40,27 @@ contract BleepFulfillTest {
         address recipient,
         uint256 minAmount,
         uint256 deadline
-    ) external payable {
+    ) external payable onlyOwner {
         require(recipient != address(0), "BleepFulfillTest: invalid recipient");
         require(!fulfilled[intentId], "BleepFulfillTest: intent already filled");
         require(msg.value >= minAmount, "BleepFulfillTest: amount below minimum");
+        // forge-lint: disable-next-line(block-timestamp)
         require(deadline == 0 || block.timestamp <= deadline, "BleepFulfillTest: deadline passed");
 
         fulfilled[intentId] = true;
+        emit IntentFulfilled(intentId, recipient, msg.value, deadline, block.timestamp);
 
         (bool success, ) = recipient.call{value: msg.value}("");
         require(success, "BleepFulfillTest: transfer failed");
-
-        emit IntentFulfilled(intentId, recipient, msg.value, deadline, block.timestamp);
     }
 
     /// @notice Recover any accidentally sent ETH held in the contract.
     function emergencyWithdraw() external onlyOwner {
         uint256 balance = address(this).balance;
         require(balance > 0, "BleepFulfillTest: no balance to withdraw");
+        emit EmergencyWithdraw(owner, balance);
         (bool success, ) = owner.call{value: balance}("");
         require(success, "BleepFulfillTest: withdraw failed");
-        emit EmergencyWithdraw(owner, balance);
     }
 
     receive() external payable {

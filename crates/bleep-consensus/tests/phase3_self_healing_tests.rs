@@ -10,13 +10,19 @@
 //
 // Total: 32 comprehensive integration tests
 
+mod incident_detector {
+    pub use bleep_consensus::incident_detector::*;
+}
+
 #[cfg(test)]
 mod phase3_self_healing_tests {
-    use crate::incident_detector::{
-        DetectionParams, IncidentDetector, IncidentEvidence, IncidentType,
+    use bleep_consensus::incident_detector::{
+            DetectionParams, IncidentDetector, IncidentType,
     };
-    use crate::recovery_controller::{ProtocolParams, RecoveryController, RecoveryPreconditions};
-    use crate::self_healing_orchestrator::{
+    use bleep_consensus::recovery_controller::{
+        ProtocolParams, RecoveryController, RecoveryPreconditions,
+    };
+    use bleep_consensus::self_healing_orchestrator::{
         OrchestratorState, RecoveryStrategy, SelfHealingOrchestrator,
     };
 
@@ -37,7 +43,7 @@ mod phase3_self_healing_tests {
         assert_eq!(incidents[0].incident_type, IncidentType::FinalityDelay);
         assert_eq!(
             incidents[0].severity,
-            crate::incident_detector::IncidentSeverity::Critical
+            bleep_consensus::incident_detector::IncidentSeverity::Critical
         );
     }
 
@@ -160,7 +166,7 @@ mod phase3_self_healing_tests {
 
         // Simulate recovery success (timeout, recovery works)
         orchestrator.observe_finality(10, 6, 6);
-        let cycle3 = orchestrator.execute_cycle(7).unwrap();
+        let _cycle3 = orchestrator.execute_cycle(7).unwrap();
 
         // Should transition back toward healthy (or at least not worse)
         assert!(orchestrator.get_validators().len() >= 1);
@@ -437,8 +443,7 @@ mod phase3_self_healing_tests {
 
         // Take snapshot and modify params
         recovery.take_snapshot(1, vec![1, 2, 3]).unwrap();
-        let original_threshold = recovery.get_params().finality_delay_threshold;
-        recovery.current_params.finality_delay_threshold = 100;
+        recovery.get_params_mut().finality_delay_threshold = 100;
 
         // Create rollback incident
         let incident = crate::incident_detector::IncidentReport {
@@ -572,13 +577,13 @@ mod phase3_self_healing_tests {
             incident_hash: vec![1],
         };
 
-        recovery.last_recovery_epoch = 0;
+        recovery.set_last_recovery_epoch(0);
         let _ = recovery.execute_recovery(&incident1, 5);
 
         let log1_len = recovery.get_recovery_log().len();
 
         // Second incident
-        recovery.last_recovery_epoch = 5;
+        recovery.set_last_recovery_epoch(5);
         let incident2 = crate::incident_detector::IncidentReport {
             incident_id: vec![2],
             incident_type: crate::incident_detector::IncidentType::ValidatorDowntime,
@@ -631,7 +636,7 @@ mod phase3_self_healing_tests {
         );
 
         // With safety_over_liveness=true, should stall rather than diverge
-        assert!(orchestrator.strategy.safety_over_liveness);
+        assert!(orchestrator.get_strategy().safety_over_liveness);
     }
 
     #[test]
@@ -670,7 +675,7 @@ mod phase3_self_healing_tests {
         );
 
         recovery.take_snapshot(1, vec![1, 2, 3]).unwrap();
-        recovery.last_recovery_epoch = 10;
+        recovery.set_last_recovery_epoch(10);
 
         let incident = crate::incident_detector::IncidentReport {
             incident_id: vec![1],
@@ -928,6 +933,6 @@ mod phase3_self_healing_tests {
         assert!(orchestrator.get_validators().len() <= 4);
 
         // Health score should improve
-        assert!(final_cycle.health_score >= 0);
+        assert!(final_cycle.health_score <= 100);
     }
 }

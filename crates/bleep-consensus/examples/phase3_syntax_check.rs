@@ -1,9 +1,6 @@
 // Quick syntax verification for Phase 3 modules
 // This file validates that the Phase 3 code is syntactically correct
 
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-
 // Simplified version of IncidentDetector to test syntax
 #[derive(Debug)]
 pub enum IncidentType {
@@ -12,7 +9,6 @@ pub enum IncidentType {
     ValidatorDowntime,
 }
 
-#[derive(Debug)]
 pub struct IncidentReport {
     pub incident_type: IncidentType,
     pub detected_epoch: u64,
