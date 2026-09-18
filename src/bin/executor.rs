@@ -19,7 +19,7 @@
 //! | Variable                     | Default                    | Description                         |
 //! |------------------------------|----------------------------|-------------------------------------|
 //! | BLEEP_RPC                    | http://127.0.0.1:8545      | BLEEP node RPC base URL             |
-//! | BLEEP_EXECUTOR_KEY           | (random)                   | Hex-encoded 32-byte Ed25519 seed    |
+//! | BLEEP_EXECUTOR_KEY           | (random)                   | Hex-encoded SPHINCS+ key bundle     |
 //! | BLEEP_EXECUTOR_CAPITAL_BLEEP | 10_000_000                 | µBLEEP capital deposited on BLEEP   |
 //! | BLEEP_EXECUTOR_CAPITAL_ETH   | 5_000_000_000_000_000_000  | Wei capital deposited on Ethereum   |
 //! | BLEEP_EXECUTOR_POLL_MS       | 500                        | Intent poll interval in ms          |
@@ -96,12 +96,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Keypair ───────────────────────────────────────────────────────────────
     let keypair = if let Ok(hex_seed) = std::env::var("BLEEP_EXECUTOR_KEY") {
-        let bytes = hex::decode(&hex_seed).map_err(|_| "BLEEP_EXECUTOR_KEY must be 64-char hex")?;
-        if bytes.len() != 32 {
-            return Err("BLEEP_EXECUTOR_KEY must be exactly 32 bytes".into());
-        }
-        let arr: [u8; 32] = bytes.try_into().unwrap();
-        ClassicalKeyPair::from_bytes(&arr)?
+        let bytes = hex::decode(&hex_seed)
+            .map_err(|_| "BLEEP_EXECUTOR_KEY must be valid hex-encoded SPHINCS+ key bundle")?;
+        ClassicalKeyPair::from_bytes(&bytes)?
     } else {
         let kp = ClassicalKeyPair::generate();
         info!("🔑 Generated ephemeral keypair (set BLEEP_EXECUTOR_KEY to persist)");

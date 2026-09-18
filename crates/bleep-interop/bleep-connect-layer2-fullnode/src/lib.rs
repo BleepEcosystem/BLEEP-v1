@@ -30,7 +30,7 @@ use bleep_connect_types::{
 #[derive(Debug, Clone)]
 pub struct VerifierNode {
     pub node_id: [u8; 32],
-    pub public_key: [u8; 32],
+    pub public_key: Vec<u8>,
     pub client: ClientImplementation,
     pub endpoint: String,
     pub tee_enabled: bool,
@@ -38,7 +38,7 @@ pub struct VerifierNode {
 
 impl VerifierNode {
     pub fn new(
-        public_key: [u8; 32],
+        public_key: Vec<u8>,
         client: ClientImplementation,
         endpoint: String,
         tee_enabled: bool,

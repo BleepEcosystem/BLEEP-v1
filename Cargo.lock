@@ -1107,7 +1107,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "blake2",
- "ed25519-dalek",
  "hex",
  "hkdf",
  "pqcrypto-kyber",
@@ -1448,7 +1447,6 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap 5.5.3",
- "ed25519-dalek",
  "futures",
  "hex",
  "hkdf",

@@ -96,14 +96,6 @@ impl P2PNode {
         let (peer_manager, mut event_rx) =
             PeerManager::new(node_id.clone(), config.peer_manager_config.clone());
 
-        // Message protocol
-        let _ed_kp = Ed25519Keypair::from_bytes(
-            identity.ed_keypair.sign(b"derived").as_slice()[..32]
-                .try_into()
-                .unwrap_or(&[0u8; 32]),
-        )
-        .unwrap_or_else(|_| Ed25519Keypair::generate());
-
         // Simpler: just generate fresh transport keys (separate from identity)
         let transport_ed = Ed25519Keypair::generate();
         let transport_kyber = KyberKeypair::generate();

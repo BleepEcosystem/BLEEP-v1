@@ -156,13 +156,13 @@ impl ChainStorage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Validator {
     pub id: [u8; 32],
-    pub public_key: [u8; 32],
+    pub public_key: Vec<u8>,
     pub stake: u128,
     pub registered_at: u64,
 }
 
 impl Validator {
-    pub fn new(public_key: [u8; 32], stake: u128) -> Self {
+    pub fn new(public_key: Vec<u8>, stake: u128) -> Self {
         Self {
             id: sha256(&public_key),
             public_key,

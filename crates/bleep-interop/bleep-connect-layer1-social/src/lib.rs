@@ -60,7 +60,7 @@ pub struct RegisteredVoter {
     pub address: UniversalAddress,
     pub voter_type: VoterType,
     pub voting_power: u128,
-    pub public_key: [u8; 32],
+    pub public_key: Vec<u8>,
 }
 
 pub struct VoterRegistry {
