@@ -232,11 +232,7 @@ impl SessionKey {
 /// The prover demonstrates knowledge of the signing key for `public_key` by:
 /// 1. Generating a random commitment `R = r·G`.
 /// 2. Computing challenge `c = SHA-256(R ‖ public_key ‖ context)`.
-/// 3. Computing response `s = r + c·sk` (mod ℓ, handled by ed25519-dalek internally
-///    via signing a deterministic message).
-///
-/// In practice we use Ed25519's deterministic signing of a challenge-derived message,
-/// which is cryptographically equivalent and simpler to implement correctly.
+/// 3. Signing the challenge with the node's SPHINCS+ secret key.
 pub struct ProofOfIdentity {
     /// The challenge that was signed.
     pub challenge: Vec<u8>,
