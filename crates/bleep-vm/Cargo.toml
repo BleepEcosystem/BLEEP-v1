@@ -18,7 +18,7 @@ futures      = "0.3"
 async-trait  = "0.1"
 
 # ── WebAssembly ────────────────────────────────────────────────────────────────
-wasmer       = { version = "4.4.0", features = ["cranelift"] }
+wasmer       = { version = "7.4.2", features = ["cranelift"] }
 wasmparser   = "0.118"
 wasm-encoder = "0.38"
 

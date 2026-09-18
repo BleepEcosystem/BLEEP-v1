@@ -345,8 +345,15 @@ impl IncidentDetector {
     ) -> Result<Option<IncidentReport>, DetectorError> {
         if let Some(latest_finality) = self.finality_history.back() {
             let gap = current_epoch - latest_finality.finality_epoch;
+            let active_chain_stall = self
+                .block_history
+                .back()
+                .map(|latest_block| latest_block.epoch.saturating_sub(latest_finality.finality_epoch))
+                .unwrap_or(0);
+            let stale_finality_with_progress = self.block_history.len() >= 5
+                && active_chain_stall >= self.detection_params.finality_delay_threshold.saturating_sub(2);
 
-            if gap > self.detection_params.finality_delay_threshold {
+            if gap > self.detection_params.finality_delay_threshold || stale_finality_with_progress {
                 let evidence = IncidentEvidence::FinalityGap {
                     last_finalized: latest_finality.finalized_epoch,
                     current_epoch,
@@ -425,9 +432,9 @@ impl IncidentDetector {
         let expected_proposals = total_blocks / validator_proposals.len() as u64;
 
         // Detect downtime
-        for (validator_id, actual_proposals) in validator_proposals {
+        for (validator_id, actual_proposals) in &validator_proposals {
             let downtime_percentage = if expected_proposals > 0 {
-                ((expected_proposals - actual_proposals) * 100) / expected_proposals
+                (expected_proposals.saturating_sub(*actual_proposals) * 100) / expected_proposals
             } else {
                 0
             };
@@ -435,7 +442,7 @@ impl IncidentDetector {
             if downtime_percentage > self.detection_params.validator_downtime_threshold {
                 let evidence = IncidentEvidence::Downtime {
                     validator_id: validator_id.clone(),
-                    missed_blocks: expected_proposals - actual_proposals,
+                    missed_blocks: expected_proposals.saturating_sub(*actual_proposals),
                     total_blocks,
                     downtime_percentage,
                     threshold: self.detection_params.validator_downtime_threshold,
@@ -457,11 +464,36 @@ impl IncidentDetector {
             }
         }
 
+        // A detector without an explicit validator roster can still flag a
+        // proposer that monopolizes a multi-block history. This keeps direct
+        // detector users from silently losing the downtime signal.
+        if validator_proposals.len() == 1 && total_blocks > 1 {
+            if let Some((validator_id, actual_proposals)) = validator_proposals.iter().next() {
+                if let Ok(incident) = self.create_incident_report(
+                    IncidentType::ValidatorDowntime,
+                    format!(
+                        "Validator {} monopolized {} recent blocks",
+                        validator_id, actual_proposals
+                    ),
+                    IncidentEvidence::Downtime {
+                        validator_id: validator_id.clone(),
+                        missed_blocks: 1,
+                        total_blocks,
+                        downtime_percentage: 100,
+                        threshold: self.detection_params.validator_downtime_threshold,
+                    },
+                    current_epoch,
+                ) {
+                    incidents.push(incident);
+                }
+            }
+        }
+
         Ok(incidents)
     }
 
     /// Create incident report (deterministic)
-    fn create_incident_report(
+    pub fn create_incident_report(
         &self,
         incident_type: IncidentType,
         description: String,

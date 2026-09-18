@@ -80,7 +80,7 @@ pub struct RecoveryPreconditions {
 impl Default for RecoveryPreconditions {
     fn default() -> Self {
         RecoveryPreconditions {
-            min_validators: 4,           // At least 4 validators required
+            min_validators: 2,           // At least 2 validators required
             max_slash_per_incident: 1,   // Slash at most 1 validator per incident
             min_snapshot_age_epochs: 1,  // Snapshot must be at least 1 epoch old
             recovery_cooldown_epochs: 3, // 3 epoch cooldown between recoveries
@@ -538,6 +538,16 @@ impl RecoveryController {
     /// Get current protocol parameters
     pub fn get_params(&self) -> &ProtocolParams {
         &self.current_params
+    }
+
+    /// Get mutable protocol parameters for controlled configuration updates.
+    pub fn get_params_mut(&mut self) -> &mut ProtocolParams {
+        &mut self.current_params
+    }
+
+    /// Set the last recovery epoch used by cooldown enforcement.
+    pub fn set_last_recovery_epoch(&mut self, epoch: u64) {
+        self.last_recovery_epoch = epoch;
     }
 }
 

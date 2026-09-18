@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+
+// PHASE 1
 // PHASE 1: STANDALONE INTEGRATION TESTS FOR CONSENSUS MODULES
 // This test file demonstrates that the Phase 1 consensus modules
 // (validator_identity, slashing_engine, finality) compile and function correctly.
