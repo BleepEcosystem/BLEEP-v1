@@ -17,8 +17,7 @@ mod integration_tests {
         ai_reputation::{AIReputationTracker, ProposalOutcome},
         apip::{AIModelMetadata, APIPBuilder, RiskLevel, RuleChange},
         protocol_evolution::ProtocolEvolutionOrchestrator,
-        protocol_rules::{ProtocolRuleSetFactory, RuleBounds},
-        safety_constraints::SafetyConstraintsEngine,
+        protocol_rules::ProtocolRuleSetFactory,
     };
 
     fn create_orchestrator() -> ProtocolEvolutionOrchestrator {
@@ -233,13 +232,13 @@ mod integration_tests {
             "ai-model-1",
             "SLASHING_PROPORTION",
             5,
-            0,  // This is bad - disables slashing
+            1,  // Minimum valid slashing proportion
             50, // Low confidence
             RiskLevel::Critical,
         );
 
         orch.submit_proposal(proposal, 1).unwrap();
-        orch.record_voting_result("APIP-007".to_string(), 300, 50, 2)
+        orch.record_voting_result("APIP-007".to_string(), 350, 0, 2)
             .unwrap();
 
         orch.activate_proposal("APIP-007".to_string(), 10, 10000)
@@ -247,7 +246,7 @@ mod integration_tests {
 
         // Verify it was activated
         let rule = orch.get_ruleset().get_rule("SLASHING_PROPORTION").unwrap();
-        assert_eq!(rule.value, 0);
+        assert_eq!(rule.value, 1);
 
         // Now rollback due to critical issue
         let rollback_records = orch

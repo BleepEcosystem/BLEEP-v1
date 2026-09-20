@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn test_ruleset_hash_commitment() {
-        let mut ruleset = ProtocolRuleSetFactory::create_genesis().unwrap();
+        let ruleset = ProtocolRuleSetFactory::create_genesis().unwrap();
 
         // Verify hash is computed
         assert!(!ruleset.commitment_hash.is_empty());

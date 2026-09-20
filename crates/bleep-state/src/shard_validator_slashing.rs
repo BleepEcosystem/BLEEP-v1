@@ -382,6 +382,7 @@ impl ValidatorReassignmentPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shard_fault_detection::FaultSeverity;
 
     #[test]
     fn test_slashing_record_creation() {
@@ -396,7 +397,7 @@ mod tests {
             epoch_id: crate::shard_registry::EpochId(0),
             severity: FaultSeverity::Critical,
             detection_height: 100,
-            proof: vec![],
+            proof: vec![1],
             details: "test".to_string(),
         };
 
@@ -420,7 +421,7 @@ mod tests {
             epoch_id: crate::shard_registry::EpochId(0),
             severity: FaultSeverity::Critical,
             detection_height: 100,
-            proof: vec![],
+            proof: vec![1],
             details: "test".to_string(),
         };
 

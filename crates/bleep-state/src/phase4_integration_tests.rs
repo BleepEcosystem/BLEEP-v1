@@ -18,14 +18,14 @@ mod phase4_integration_tests {
     use crate::phase4_recovery_orchestrator::{RecoveryOrchestrator, RecoveryStage};
     use crate::phase4_safety_invariants::{InvariantViolation, SafetyInvariantChecker};
     use crate::shard_checkpoint::{
-        CheckpointConfig, CheckpointId, ShardCheckpointManager, ShardStateRoot,
+        CheckpointConfig, CheckpointId, CheckpointStatus, ShardCheckpointManager,
     };
     use crate::shard_fault_detection::{
         FaultDetectionConfig, FaultDetector, FaultEvidence, FaultSeverity, FaultType,
     };
     use crate::shard_healing::ShardHealingManager;
     use crate::shard_isolation::ShardIsolationManager;
-    use crate::shard_registry::{EpochId, ShardId};
+    use crate::shard_registry::{EpochId, ShardId, ShardStateRoot};
     use crate::shard_rollback::RollbackEngine;
     use crate::shard_validator_slashing::{
         ReassignmentStrategy, ValidatorReassignmentManager, ValidatorSlashingManager,
@@ -221,6 +221,15 @@ mod phase4_integration_tests {
             )
             .unwrap();
 
+        manager
+            .get_checkpoint_mut(ShardId(0), CheckpointId(1))
+            .unwrap()
+            .add_signature(vec![1], vec![1]);
+        manager
+            .get_checkpoint_mut(ShardId(0), CheckpointId(1))
+            .unwrap()
+            .status = CheckpointStatus::Signed;
+
         // Try to get rollback target way past the window
         let target = manager.get_rollback_target(ShardId(0), 3000);
         assert!(target.is_none()); // Outside window
@@ -248,13 +257,22 @@ mod phase4_integration_tests {
             )
             .unwrap();
 
+        manager
+            .get_checkpoint_mut(ShardId(0), CheckpointId(1))
+            .unwrap()
+            .add_signature(vec![1], vec![1]);
+        manager
+            .get_checkpoint_mut(ShardId(0), CheckpointId(1))
+            .unwrap()
+            .status = CheckpointStatus::Signed;
+
         // Finalize checkpoint
         manager
             .finalize_checkpoint(ShardId(0), CheckpointId(1))
             .unwrap();
 
         // Get rollback target within window
-        let target = manager.get_rollback_target(ShardId(0), 1500);
+        let target = manager.get_rollback_target(ShardId(0), 1000);
         assert!(target.is_some());
         assert_eq!(target.unwrap().shard_height, 100);
     }
@@ -274,7 +292,7 @@ mod phase4_integration_tests {
         rollback_engine.add_state_lock(ShardId(1), "lock2".to_string());
 
         // Create fault evidence
-        let fault = FaultEvidence {
+        let _fault = FaultEvidence {
             fault_type: FaultType::StateRootMismatch {
                 expected_root: "root_a".to_string(),
                 observed_root: "root_b".to_string(),
@@ -284,7 +302,7 @@ mod phase4_integration_tests {
             epoch_id: EpochId(0),
             severity: FaultSeverity::Critical,
             detection_height: 100,
-            proof: vec![],
+            proof: vec![1],
             details: "test".to_string(),
         };
 
@@ -310,7 +328,7 @@ mod phase4_integration_tests {
             epoch_id: EpochId(0),
             severity: FaultSeverity::Critical,
             detection_height: 100,
-            proof: vec![],
+            proof: vec![1],
             details: "test".to_string(),
         };
 
@@ -344,7 +362,7 @@ mod phase4_integration_tests {
                 epoch_id: EpochId(0),
                 severity: FaultSeverity::Critical,
                 detection_height: 100,
-                proof: vec![],
+                proof: vec![1],
                 details: "test".to_string(),
             };
 

@@ -140,61 +140,53 @@ impl SparseMerkleTrie {
             return EMPTY;
         }
 
-        // Sort leaves by path so left-to-right order is guaranteed.
-        let mut sorted: Vec<([u8; 32], NodeHash)> =
-            self.leaves.iter().map(|(k, v)| (*k, *v)).collect();
-        sorted.sort_by_key(|(k, _)| *k);
-
-        // Stack entries: (depth, rep_path, hash).
-        // rep_path = the leftmost leaf path in the subtree (invariant).
-        let mut stack: Vec<(usize, [u8; 32], NodeHash)> = Vec::new();
-
-        for (path, leaf) in &sorted {
-            // Record leaf at depth = TRIE_DEPTH
-            self.interior_cache.insert((TRIE_DEPTH, *path), *leaf);
-            stack.push((TRIE_DEPTH, *path, *leaf));
-
-            // Bubble up: merge siblings while the top two share the same depth.
-            loop {
-                let n = stack.len();
-                if n < 2 {
-                    break;
+        fn masked(path: &[u8; 32], depth: usize) -> [u8; 32] {
+            let mut result = *path;
+            let byte = depth / 8;
+            let bit = depth % 8;
+            if byte < 32 {
+                if bit != 0 {
+                    result[byte] &= 0xFF << (8 - bit);
                 }
-                let (d1, p1, h1) = stack[n - 2];
-                let (d2, p2, h2) = stack[n - 1];
-                if d1 != d2 {
-                    break;
+                for value in result.iter_mut().skip(byte + usize::from(bit != 0)) {
+                    *value = 0;
                 }
-
-                stack.pop();
-                stack.pop();
-
-                // Determine which child is left/right by the bit at depth (d1-1).
-                let (left_h, right_h, rep) = if bit_at(&p1, d1 - 1) == 0 {
-                    // p1 is in the left subtree, p2 is in the right subtree
-                    (h1, h2, p1)
-                } else {
-                    (h2, h1, p2)
-                };
-
-                let parent = interior_hash(&left_h, &right_h);
-                self.interior_cache.insert((d1 - 1, rep), parent);
-                stack.push((d1 - 1, rep, parent));
             }
+            result
         }
 
-        // Collapse any remaining unpaired nodes to the root.
-        while stack.len() > 1 {
-            let (_, _p2, h2) = stack.pop().unwrap();
-            let (d, p1, h1) = stack.pop().unwrap();
-            let merged = interior_hash(&h1, &h2);
-            let rep = p1; // leftmost path wins
-            self.interior_cache
-                .insert((d.saturating_sub(1), rep), merged);
-            stack.push((d.saturating_sub(1), rep, merged));
+        let mut level: HashMap<[u8; 32], NodeHash> = self
+            .leaves
+            .iter()
+            .map(|(path, hash)| {
+                self.interior_cache.insert((TRIE_DEPTH, *path), *hash);
+                (*path, *hash)
+            })
+            .collect();
+
+        for depth in (0..TRIE_DEPTH).rev() {
+            let mut parents: HashMap<[u8; 32], (NodeHash, NodeHash)> = HashMap::new();
+            for (path, hash) in &level {
+                let parent = masked(path, depth);
+                let entry = parents.entry(parent).or_insert((EMPTY, EMPTY));
+                if bit_at(path, depth) == 0 {
+                    entry.0 = *hash;
+                } else {
+                    entry.1 = *hash;
+                }
+            }
+
+            level = parents
+                .into_iter()
+                .map(|(path, (left, right))| {
+                    let hash = interior_hash(&left, &right);
+                    self.interior_cache.insert((depth, path), hash);
+                    (path, hash)
+                })
+                .collect();
         }
 
-        stack.pop().map(|(_, _, h)| h).unwrap_or(EMPTY)
+        level.get(&[0u8; 32]).copied().unwrap_or(EMPTY)
     }
 
     // ── Merkle Proofs ─────────────────────────────────────────────────────────
@@ -351,11 +343,13 @@ impl MerkleProof {
         for (depth_rev, node) in self.path.iter().enumerate() {
             let depth = TRIE_DEPTH - 1 - depth_rev;
             let bit = bit_at(&key_path, depth);
-            current = if bit == 0 {
-                interior_hash(&current, &node.sibling) // node on left
+            if current == EMPTY && node.sibling == EMPTY {
+                current = EMPTY;
+            } else if bit == 0 {
+                current = interior_hash(&current, &node.sibling); // node on left
             } else {
-                interior_hash(&node.sibling, &current) // node on right
-            };
+                current = interior_hash(&node.sibling, &current); // node on right
+            }
         }
 
         &current == expected_root

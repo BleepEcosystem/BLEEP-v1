@@ -544,6 +544,10 @@ impl ProtocolUpgradeManager {
             return Err(UpgradeError::UpgradeNotApproved);
         }
 
+        if !Version::is_valid_upgrade(self.current_version, version) {
+            return Err(UpgradeError::VersionMismatch);
+        }
+
         self.current_version = version;
         self.executed_upgrades.insert(version, execution_result);
 

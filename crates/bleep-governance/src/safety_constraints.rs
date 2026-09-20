@@ -472,7 +472,6 @@ impl SafetyConstraintsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol_rules::{ProtocolRuleSetFactory, RuleBounds};
     use crate::SafetyBounds;
 
     #[test]

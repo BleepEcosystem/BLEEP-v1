@@ -376,12 +376,6 @@ impl ZKVotingEngine {
             return Err(ZKVotingError::VotingWindowClosed);
         }
 
-        // Verify nonce hasn't been used (replay resistance)
-        let nonce = ballot.encrypted_ballot.vote_commitment.nonce;
-        if self.used_nonces.contains(&nonce) {
-            return Err(ZKVotingError::VoteReplayDetected);
-        }
-
         // Check for double voting (same voter commits twice)
         let commitment_hash = &ballot.encrypted_ballot.vote_commitment.commitment_hash;
         let voters = self
@@ -391,6 +385,12 @@ impl ZKVotingEngine {
 
         if voters.contains(commitment_hash) {
             return Err(ZKVotingError::DoubleVoteDetected);
+        }
+
+        // Verify nonce hasn't been used (replay resistance)
+        let nonce = ballot.encrypted_ballot.vote_commitment.nonce;
+        if self.used_nonces.contains(&nonce) {
+            return Err(ZKVotingError::VoteReplayDetected);
         }
 
         // Record vote

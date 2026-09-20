@@ -167,9 +167,9 @@ impl AIHooks {
             let first = data_points[0].1;
             let last = data_points[data_points.len() - 1].1;
 
-            if last > first * 1.1 {
+            if last * 10.0 >= first * 11.0 {
                 "POSITIVE"
-            } else if last < first * 0.9 {
+            } else if last * 10.0 <= first * 9.0 {
                 "NEGATIVE"
             } else {
                 "STABLE"
@@ -444,7 +444,6 @@ impl AIHooksValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apip::APIPBuilder;
     use crate::protocol_rules::ProtocolRuleSetFactory;
 
     #[test]

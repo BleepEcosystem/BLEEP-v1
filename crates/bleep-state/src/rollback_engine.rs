@@ -281,7 +281,7 @@ impl RollbackRecord {
 /// that preserve all blockchain invariants.
 pub struct RollbackEngine {
     /// Snapshot engine (source of rollback targets)
-    snapshot_engine: SnapshotEngine,
+    pub(crate) snapshot_engine: SnapshotEngine,
 
     /// Active rollback operations
     active_rollbacks: HashMap<ShardId, RollbackRecord>,
@@ -666,6 +666,7 @@ impl RollbackEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shard_registry::ShardStateRoot;
     use crate::snapshot_engine::SnapshotConfig;
 
     fn create_test_engine() -> RollbackEngine {

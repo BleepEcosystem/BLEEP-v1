@@ -707,7 +707,6 @@ pub fn derive_block_keypair(seed: &[u8]) -> Result<([u8; 32], [u8; 32]), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_crypto::tx_signer::generate_tx_keypair;
 
     #[test]
     fn test_genesis_block_no_sig_required() {
@@ -718,9 +717,10 @@ mod tests {
 
     #[test]
     fn test_sphincs_sign_and_verify_zkp() {
-        let (pk_bytes, sk_bytes) = generate_tx_keypair();
+        let (pk_bytes, sk_bytes) = sphincsshake256fsimple::keypair();
         let mut b = Block::new(1, vec![], "abc".to_string());
-        b.sign_block(&sk_bytes).expect("sign_block failed");
+        b.sign_block_with_pk(sk_bytes.as_bytes(), pk_bytes.as_bytes())
+            .expect("sign_block failed");
 
         // validator_signature should be pk_hash(32) + sphincs_sig
         assert!(
@@ -732,20 +732,18 @@ mod tests {
         // Signing alone must not satisfy the STARK requirement.
         assert!(!b.verify_zkp(), "missing STARK proof should fail");
 
-        // verify_signature with the SHA3 pk fingerprint
-        let (_, pk_fp) = derive_block_keypair(&sk_bytes).unwrap();
-        assert!(b.verify_signature(&pk_fp).unwrap());
-        let _ = pk_bytes;
+        assert!(b.verify_signature(pk_bytes.as_bytes()).unwrap());
     }
 
     #[test]
     fn test_zkp_tamper_detection() {
-        let (_pk, sk) = generate_tx_keypair();
+        let (pk, sk) = sphincsshake256fsimple::keypair();
         let mut b = Block::new(2, vec![], "prev".to_string());
-        b.sign_block(&sk).unwrap();
+        b.sign_block_with_pk(sk.as_bytes(), pk.as_bytes()).unwrap();
         assert!(!b.verify_zkp(), "missing STARK proof should fail");
 
         // Tamper with one byte of the proof
+        b.zk_proof = vec![0u8; 64];
         b.zk_proof[0] ^= 0xFF;
         assert!(!b.verify_zkp(), "tampered ZKP should fail");
     }

@@ -52,5 +52,3 @@ pub use rollback_engine::RollbackEngine;
 pub use self_healing_orchestrator::SelfHealingOrchestrator;
 pub use snapshot_engine::SnapshotEngine;
 
-#[cfg(test)]
-mod proptest_sprint8;

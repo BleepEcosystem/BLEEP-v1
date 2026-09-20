@@ -27,7 +27,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_addition() {
+    fn test_block_without_zkp_is_rejected() {
         let transactions = vec![];
         let genesis_block = Block::new(0, transactions.clone(), "".to_string());
 
@@ -45,8 +45,8 @@ mod tests {
             .unwrap();
         let added = blockchain.add_block(new_block, public_key.as_bytes());
 
-        // ✅ Ensure the block was successfully added
-        assert!(added);
-        assert_eq!(blockchain.chain.len(), 2);
+        // Non-genesis blocks require an extended STARK proof.
+        assert!(!added);
+        assert_eq!(blockchain.chain.len(), 1);
     }
 }

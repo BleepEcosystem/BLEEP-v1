@@ -16,15 +16,11 @@
 mod phase5_comprehensive_tests {
     use crate::{
         ai_reputation::{AIReputationTracker, ProposalOutcome},
-        apip::{AIModelMetadata, APIPBuilder, RiskLevel, RuleChange, SafetyBounds},
+        apip::{AIModelMetadata, APIPBuilder, RiskLevel, RuleChange},
         deterministic_activation::DeterministicActivationManager,
-        governance_voting::{GovernanceVotingEngine, ValidatorVote},
-        invariant_monitoring::{
-            GlobalInvariantMonitor, InvariantSeverity, InvariantThreshold, InvariantType,
-        },
+        governance_voting::GovernanceVotingEngine,
         protocol_evolution::ProtocolEvolutionOrchestrator,
-        protocol_rules::{ProtocolRule, ProtocolRuleSetFactory, RuleBounds},
-        safety_constraints::SafetyConstraintsEngine,
+        protocol_rules::ProtocolRuleSetFactory,
     };
     use std::collections::HashMap;
 
@@ -150,9 +146,9 @@ mod phase5_comprehensive_tests {
         let mut voting_engine = setup_voting_engine();
 
         // Create dummy signatures for testing
-        let mut sig1_sig2 = vec![1u8, 2u8];
-        let mut sig3_sig4 = vec![3u8, 4u8];
-        let mut sig5_sig6 = vec![5u8, 6u8];
+        let sig1_sig2 = vec![1u8, 2u8];
+        let sig3_sig4 = vec![3u8, 4u8];
+        let sig5_sig6 = vec![5u8, 6u8];
 
         // Start voting
         voting_engine
@@ -303,7 +299,7 @@ mod phase5_comprehensive_tests {
         .unwrap();
 
         // Create and activate
-        let plan = activation_mgr
+        let _plan = activation_mgr
             .create_activation_plan(&proposal, 2, 4)
             .unwrap();
         activation_mgr
