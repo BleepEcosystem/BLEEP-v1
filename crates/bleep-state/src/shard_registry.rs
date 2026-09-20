@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_shard_keyspace_containment() {
-        let mut shard = Shard::new(
+        let shard = Shard::new(
             ShardId(0),
             EpochId(0),
             ValidatorAssignment {

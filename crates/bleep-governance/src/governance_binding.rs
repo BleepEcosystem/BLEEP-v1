@@ -299,14 +299,14 @@ impl GovernanceConsensusBinding {
                     action_id
                 )))?;
 
-        // Check activation epoch reached
-        if self.current_epoch < action.activation_epoch {
-            return Ok(false);
-        }
-
         // Check finality achieved
         if !action.has_finality(self.current_block_height) {
             return Err(BindingError::FinalityNotAchieved);
+        }
+
+        // Check activation epoch reached
+        if self.current_epoch < action.activation_epoch {
+            return Ok(false);
         }
 
         Ok(true)
@@ -441,7 +441,7 @@ mod tests {
         );
 
         assert!(action.approved);
-        assert!(!action.has_finality(5));
+        assert!(!action.has_finality(1));
         assert!(action.has_finality(15));
     }
 

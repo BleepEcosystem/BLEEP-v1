@@ -172,7 +172,7 @@ pub struct HealingStatistics {
 /// and ensures they are consensus-verified.
 pub struct SelfHealingOrchestrator {
     /// Snapshot engine
-    snapshot_engine: SnapshotEngine,
+    pub(crate) snapshot_engine: SnapshotEngine,
 
     /// Rollback engine
     rollback_engine: RollbackEngine,

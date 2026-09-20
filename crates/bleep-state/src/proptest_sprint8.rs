@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod proptest_merkle {
-    use crate::state_merkle::{MerkleProof, MerkleTrie};
+    use crate::state_merkle::{MerkleProof, MerkleTrie, ProofNode};
     use proptest::prelude::*;
 
     // Arbitrary key/value pair strategy
@@ -91,9 +91,16 @@ mod proptest_merkle {
         ) {
             let trie = MerkleTrie::new();  // empty trie
             let bad_proof = MerkleProof {
-                sibling_hashes: vec![garbage.clone(), garbage.clone()],
-                leaf_hash:       garbage,
-                path_bits:       vec![false, true],
+                address: hex::encode(&key),
+                exists: false,
+                leaf: [0u8; 32],
+                path: (0..256)
+                    .map(|_| ProofNode {
+                        sibling: garbage.clone().try_into().unwrap(),
+                        is_right: false,
+                    })
+                    .collect(),
+                root: [0u8; 32],
             };
             // Garbage proof on empty trie must not verify
             prop_assert!(
@@ -150,12 +157,12 @@ mod proptest_state {
             nonce    in 0u64..=1000u64,
         ) {
             let mut mgr = StateManager::new();
-            mgr.set_balance(&sender, initial);
+            mgr.set_balance(&sender, initial.into());
 
             let total_before = mgr.get_balance(&sender)
                 .saturating_add(mgr.get_balance(&receiver));
 
-            let result = mgr.apply_transfer(&sender, &receiver, amount, nonce);
+            let result = mgr.apply_transfer(&sender, &receiver, amount.into());
 
             // If same address, balance is unchanged regardless
             if sender == receiver {

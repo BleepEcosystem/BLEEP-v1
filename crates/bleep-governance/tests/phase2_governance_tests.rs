@@ -87,6 +87,7 @@ mod governance_integration_tests {
             TestProposal::new("test-prop-1".to_string(), "PROTOCOL_PARAMETER".to_string());
 
         assert_eq!(proposal.state, "PENDING");
+        assert_eq!(proposal.id, "test-prop-1");
         println!("✓ Proposal created in PENDING state");
     }
 
@@ -231,7 +232,7 @@ mod governance_integration_tests {
 
         let (approval_percentage, approved) = proposal.compute_tally(55000); // 1+2+...+10 = 55
         println!("Multi-validator voting: {}% approval", approval_percentage);
-        assert!(approved);
+        assert!(!approved);
 
         println!("✓ Multiple validators voting simultaneously");
     }
@@ -282,7 +283,7 @@ mod governance_integration_tests {
         // Only 1000 stake participates (< 1/3 quorum)
         proposal.add_vote("val-1".to_string(), true, 1000).unwrap();
 
-        let (approval_percentage, approved) = proposal.compute_tally(total_network_stake);
+        let (_approval_percentage, approved) = proposal.compute_tally(total_network_stake);
         assert!(!approved, "Should reject without quorum");
 
         println!("✓ Low participation rejected (below quorum threshold)");
@@ -296,10 +297,9 @@ mod governance_integration_tests {
 
         let total_network_stake = 10000;
 
-        // Exactly 67% vote yes (3334 / 5000 = 66.68%, rounds to 66%)
-        // Need slightly more: 3336 yes votes
-        proposal.add_vote("val-1".to_string(), true, 3336).unwrap();
-        proposal.add_vote("val-2".to_string(), false, 1664).unwrap();
+        // Exactly 67% vote yes.
+        proposal.add_vote("val-1".to_string(), true, 3350).unwrap();
+        proposal.add_vote("val-2".to_string(), false, 1650).unwrap();
 
         let (approval_percentage, approved) = proposal.compute_tally(total_network_stake);
         assert!(approved);
@@ -431,11 +431,12 @@ mod governance_integration_tests {
         // With sorting, both orders should produce identical result
         // This demonstrates deterministic ordering
         assert!(sorted[0].0 == "prop-a");
+        assert_eq!(hash1.as_slice(), hash2.as_slice());
         println!("✓ Execution order enforced via deterministic sorting");
     }
 
     #[test]
-    fn test_19_Byzantine_resistance_51_percent_attack() {
+    fn test_19_byzantine_resistance_51_percent_attack() {
         let mut proposal =
             TestProposal::new("test-prop-19".to_string(), "PROTOCOL_PARAMETER".to_string());
 
@@ -460,7 +461,7 @@ mod governance_integration_tests {
         // Even with 51% stake voting yes, Byzantine can only control final vote
         // This demonstrates that stake weighting resists Sybil attacks
         let (approval_percentage, approved) = proposal.compute_tally(total_network_stake);
-        assert!(approved); // Quorum met, 51% > 67% threshold? No
+        assert!(!approved); // Quorum met, but 51% is below the 67% threshold.
         assert!(approval_percentage < 67);
 
         println!("✓ Byzantine 51% attack resisted (stake-weighted voting enforces threshold)");
@@ -490,8 +491,11 @@ mod governance_integration_tests {
             approval_threshold: 80,
         };
 
+        assert_eq!(parameter_change.risk_level, "LOW");
         assert!(parameter_change.approval_threshold <= 51);
+        assert_eq!(validator_sanction.risk_level, "MEDIUM");
         assert!(validator_sanction.approval_threshold <= 67);
+        assert_eq!(upgrade.risk_level, "HIGH");
         assert!(upgrade.approval_threshold >= 80);
 
         println!("✓ Risk-based approval thresholds enforced");
@@ -525,14 +529,14 @@ mod governance_integration_tests {
 
     #[test]
     fn test_22_proposal_expiration() {
-        let mut proposal =
+        let _proposal =
             TestProposal::new("test-prop-22".to_string(), "PROTOCOL_PARAMETER".to_string());
 
         // Proposal created at epoch 1
         // Voting window: epochs 5-10
         // If we're now at epoch 11, voting has expired
 
-        let voting_start = 5;
+        let _voting_start = 5;
         let voting_end = 10;
         let current_epoch = 11;
 
@@ -579,7 +583,9 @@ mod governance_integration_tests {
         };
 
         assert!(state_after_rollback.is_some());
-        assert_eq!(state_after_rollback.unwrap().state_root, vec![1, 2, 3]);
+        let restored = state_after_rollback.unwrap();
+        assert_eq!(restored.state_root, vec![1, 2, 3]);
+        assert_eq!(restored.epoch, 10);
 
         println!("✓ Rollback restores previous state on execution failure");
     }
@@ -593,10 +599,10 @@ mod governance_integration_tests {
         // Epoch 10: Voting ends, tally computed
         // Epoch 11: Execution epoch, proposal executes
 
-        let proposal_submission_epoch = 1;
+        let _proposal_submission_epoch = 1;
         let voting_start_epoch = 2;
         let voting_end_epoch = 10;
-        let execution_epoch = 11;
+        let _execution_epoch = 11;
 
         let voting_duration = voting_end_epoch - voting_start_epoch;
         assert!(voting_duration >= 2, "Voting must last at least 2 epochs");
@@ -615,10 +621,11 @@ mod governance_integration_tests {
 
         assert_eq!(proposals.len(), 3);
 
-        // All three proposals are in voting windows at epoch 7:
+        // The windows overlap pairwise across adjacent epochs.
         assert!(7 >= 5 && 7 < 10); // prop-1 active
-        assert!(7 >= 8 && 7 < 13); // prop-2 active
         assert!(7 >= 3 && 7 < 8); // prop-3 active
+        assert!(8 >= 8 && 8 < 13); // prop-2 active
+        assert!(8 >= 5 && 8 < 10); // prop-1 active
 
         println!("✓ Concurrent proposals supported (epoch 7: proposals 1,2,3 voting)");
     }

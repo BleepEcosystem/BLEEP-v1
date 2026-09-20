@@ -242,8 +242,6 @@ pub enum RecoveryStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cross_shard_2pc::CoordinatorStateSnapshot;
-    use std::collections::BTreeMap;
 
     #[test]
     fn test_recovery_creation() {

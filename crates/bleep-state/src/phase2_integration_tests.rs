@@ -12,11 +12,11 @@
 
 #[cfg(test)]
 mod phase2_integration_tests {
-    use bleep_state::shard_ai_extension::*;
-    use bleep_state::shard_epoch_binding::*;
-    use bleep_state::shard_lifecycle::*;
-    use bleep_state::shard_registry::*;
-    use bleep_state::shard_validator_assignment::*;
+    use crate::shard_ai_extension::*;
+    use crate::shard_epoch_binding::*;
+    use crate::shard_lifecycle::*;
+    use crate::shard_registry::*;
+    use crate::shard_validator_assignment::*;
 
     /// Test 1: All nodes independently derive identical shard topology
     ///
@@ -59,7 +59,7 @@ mod phase2_integration_tests {
         let validators = vec![vec![1, 2, 3]];
 
         let topology = builder.build_genesis_topology(2, &validators).unwrap();
-        let mut binder = EpochShardBinder::new(topology, 1);
+        let binder = EpochShardBinder::new(topology, 1);
 
         // Block with correct registry root should be accepted
         assert!(binder
@@ -131,7 +131,7 @@ mod phase2_integration_tests {
             status: ValidatorStatus::Active,
         }];
 
-        let validator_set = ValidatorSet::new(validators, EpochId(0));
+        let _validator_set = ValidatorSet::new(validators, EpochId(0));
 
         let validator_assignment = ValidatorAssignment {
             shard_id: ShardId(0),
@@ -195,9 +195,9 @@ mod phase2_integration_tests {
     fn test_shard_merge_combines_state_safely() {
         let mut registry = ShardRegistry::new(EpochId(0), 1);
 
-        let validators = vec![vec![1]];
+        let _validators = vec![vec![1]];
 
-        let validator_set = ValidatorSet::new(
+        let _validator_set = ValidatorSet::new(
             vec![ValidatorInfo {
                 public_key: vec![1],
                 stake: 100,
@@ -419,7 +419,7 @@ mod phase2_integration_tests {
         let validators = vec![vec![1, 2, 3]];
 
         let topology = builder.build_genesis_topology(2, &validators).unwrap();
-        let mut binder = EpochShardBinder::new(topology, 1);
+        let binder = EpochShardBinder::new(topology, 1);
 
         let current_epoch = binder.current_epoch();
         let correct_root = binder.current_topology.registry_root.clone();
@@ -450,7 +450,7 @@ mod phase2_integration_tests {
     /// SAFETY: Light clients can verify shard state
     #[test]
     fn test_shard_state_root_verification() {
-        let mut registry = ShardRegistry::new(EpochId(0), 1);
+        let _registry = ShardRegistry::new(EpochId(0), 1);
 
         let validator_assignment = ValidatorAssignment {
             shard_id: ShardId(0),

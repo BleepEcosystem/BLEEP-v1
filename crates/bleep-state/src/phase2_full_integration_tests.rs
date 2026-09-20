@@ -13,11 +13,11 @@
 
 #[cfg(test)]
 mod phase2_integration_tests {
-    use bleep_state::advanced_fault_detector::*;
-    use bleep_state::rollback_engine::*;
-    use bleep_state::self_healing_orchestrator::*;
-    use bleep_state::shard_registry::*;
-    use bleep_state::snapshot_engine::*;
+    use crate::advanced_fault_detector::*;
+    use crate::rollback_engine::*;
+    use crate::self_healing_orchestrator::*;
+    use crate::shard_registry::*;
+    use crate::snapshot_engine::*;
 
     /// Test 1: State corruption detection triggers autonomous recovery
     #[test]
@@ -203,6 +203,15 @@ mod phase2_integration_tests {
         let validator_key = vec![1, 2, 3];
 
         // Validator produces two different blocks at same height
+        assert!(detector
+            .detect_equivocation(
+                ShardId(0),
+                100,
+                validator_key.clone(),
+                "block_hash_1".to_string(),
+                "block_hash_2".to_string(),
+            )
+            .is_none());
         let fault = detector.detect_equivocation(
             ShardId(0),
             100,

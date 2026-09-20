@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_genesis_supply_exceeds_cap() {
-        let result = ProtocolInvariantEngine::new(2_000_000_000_000_000_000_000);
+        let result = ProtocolInvariantEngine::new(EconomicConfig::default().supply_cap + 1);
         assert!(result.is_err());
     }
 

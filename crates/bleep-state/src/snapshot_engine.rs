@@ -741,7 +741,7 @@ mod tests {
             )
             .unwrap();
 
-        let id3 = engine
+        let _id3 = engine
             .create_snapshot(
                 ShardId(0),
                 EpochId(30),

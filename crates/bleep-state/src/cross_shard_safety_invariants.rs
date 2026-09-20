@@ -28,6 +28,7 @@
 //! - Network partition: Partitioned shards abort on timeout; consensus resolves
 //!
 //! ---
+
 //!
 //! ## 2. DETERMINISTIC COORDINATOR
 //!
@@ -252,6 +253,7 @@ impl SafetyVerifier {
 #[cfg(test)]
 mod safety_tests {
     use super::*;
+    use crate::cross_shard_transaction::CrossShardTransaction;
     use crate::shard_registry::EpochId;
 
     #[test]

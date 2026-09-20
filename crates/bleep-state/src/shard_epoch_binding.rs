@@ -383,7 +383,7 @@ mod tests {
         let validators = vec![vec![1, 2, 3]];
 
         let genesis_topology = builder.build_genesis_topology(2, &validators).unwrap();
-        let mut binder = EpochShardBinder::new(genesis_topology, 1);
+        let binder = EpochShardBinder::new(genesis_topology, 1);
 
         let next_topology = builder
             .build_next_epoch_topology(

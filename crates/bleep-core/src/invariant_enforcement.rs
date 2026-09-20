@@ -603,7 +603,7 @@ mod tests {
         let state = ProtectedState::new(1_000_000).unwrap();
 
         state
-            .hook_validate_governance_execution("proposal_1", &[])
+            .hook_validate_governance_execution("proposal_1", &[1])
             .unwrap();
         state.hook_after_governance_execution("proposal_1").unwrap();
     }

@@ -372,7 +372,7 @@ mod tests {
             (
                 "prop-1".to_string(),
                 "PROTOCOL_PARAMETER".to_string(),
-                vec![1, 2, 3],
+                vec![0; 16],
             ),
             (
                 "prop-2".to_string(),
@@ -407,7 +407,7 @@ mod tests {
         let proposals = vec![(
             "prop-1".to_string(),
             "PROTOCOL_PARAMETER".to_string(),
-            vec![1, 2, 3],
+            vec![0; 16],
         )];
 
         let _ = executor.execute_batch(proposals, 5);
@@ -426,7 +426,7 @@ mod tests {
         let proposals = vec![(
             "prop-1".to_string(),
             "PROTOCOL_PARAMETER".to_string(),
-            vec![1, 2, 3],
+            vec![0; 16],
         )];
 
         // First execution should succeed

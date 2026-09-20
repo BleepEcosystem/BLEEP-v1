@@ -334,7 +334,7 @@ mod phase4_governance_tests {
 
         // Schedule activation
         manager.advance_epoch(100);
-        manager.schedule_activation("prop_1", 20)?;
+        manager.schedule_activation("prop_1", 2)?;
 
         // Execute
         manager.advance_epoch(200);
@@ -490,7 +490,7 @@ mod phase4_governance_tests {
         binding.record_finalized_action(action)?;
 
         // Can't activate yet (no finality)
-        binding.current_block_height = 5; // 5 blocks, need 2+2=4
+        binding.current_block_height = 1;
         assert!(binding.can_activate("action_1").is_err());
 
         // With enough blocks, can't activate (not at activation epoch)

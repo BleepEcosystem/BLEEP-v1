@@ -357,7 +357,6 @@ impl RollbackEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shard_checkpoint::CheckpointConfig;
     use crate::shard_fault_detection::{FaultEvidence, FaultSeverity, FaultType};
 
     #[test]

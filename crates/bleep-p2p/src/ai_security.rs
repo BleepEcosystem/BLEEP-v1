@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn test_anomaly_detector_oversized_payload() {
         let det = AnomalyDetector::new();
-        let big = vec![0u8; 3 * 1024 * 1024];
+        let big = vec![0u8; 64 * 1024 * 1024 + 1];
         assert!(det.check_message(&big, 1).is_some());
     }
 
