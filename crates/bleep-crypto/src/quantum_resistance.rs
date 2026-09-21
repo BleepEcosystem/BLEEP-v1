@@ -102,11 +102,11 @@ impl Transaction {
 
     pub fn hash(&self) -> Vec<u8> {
         let mut hasher = Sha3_256::new();
-        hasher.update(&self.id.to_be_bytes());
+        hasher.update(self.id.to_be_bytes());
         hasher.update(self.from.as_bytes());
         hasher.update(self.to.as_bytes());
-        hasher.update(&self.amount.to_be_bytes());
-        hasher.update(&self.timestamp.to_be_bytes());
+        hasher.update(self.amount.to_be_bytes());
+        hasher.update(self.timestamp.to_be_bytes());
         hasher.update(&self.public_key);
         hasher.finalize().to_vec()
     }
@@ -164,9 +164,9 @@ impl Block {
     ) -> String {
         let mut hasher = Sha3_256::new();
         hasher.update(previous_hash.as_bytes());
-        hasher.update(&timestamp.to_be_bytes());
+        hasher.update(timestamp.to_be_bytes());
         for tx in transactions {
-            hasher.update(&bincode::serde::encode_to_vec(tx, bincode::config::standard()).unwrap());
+            hasher.update(bincode::serde::encode_to_vec(tx, bincode::config::standard()).unwrap());
         }
         hex::encode(hasher.finalize())
     }
@@ -178,6 +178,12 @@ impl Block {
 pub struct BlockchainState {
     pub chain: Arc<RwLock<Vec<Block>>>,
     pub mempool: Arc<RwLock<HashSet<Transaction>>>,
+}
+
+impl Default for BlockchainState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BlockchainState {
@@ -206,6 +212,12 @@ pub struct AdaptiveConsensus {
     pub validators: HashMap<String, f64>,
     pub network_reliability: f64,
     pub consensus_mode: String,
+}
+
+impl Default for AdaptiveConsensus {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AdaptiveConsensus {

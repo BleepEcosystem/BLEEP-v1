@@ -49,7 +49,7 @@ ndarray       = "0.15.6"
 # ONNX inference (pure-Rust tract, enabled under the `onnx` feature flag).
 # No system library or C runtime required. Activated for validator nodes
 # running DeterministicInferenceEngine in production.
-tract-onnx    = { version = "0.21", optional = true }
+tract-onnx    = { version = "0.22.2", optional = true }
 
 [features]
 default = []

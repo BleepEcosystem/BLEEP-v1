@@ -1,159 +1,134 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rand::Rng;
-    use std::sync::Arc;
-    use tokio::runtime::Runtime;
+use crate::anti_asset_loss::AssetRecoveryRequest;
+use crate::quantum_resistance::{AdaptiveConsensus, Block, BlockchainState, Transaction};
+use crate::quantum_secure::{KyberAESHybrid, QuantumSecure};
+use crate::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload, verify_tx_signature};
+use crate::zkp_verification::BLEEPZKPModule;
+use pqcrypto_sphincsplus::sphincsshake256fsimple;
 
-    // 🔹 Test Quantum-Resistant Transaction Signing & Verification
-    #[test]
-    fn test_transaction_signing_and_verification() {
-        let (sk, pk) = falcon::keygen().expect("Falcon keygen failed");
-        let transaction = Transaction::new(1, "Alice", "Bob", 100, &sk, &pk);
+#[test]
+fn transaction_signature_verifies_and_rejects_tampering() {
+    let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+    let transaction = Transaction::new(1, "Alice", "Bob", 100, &secret_key, &public_key);
 
-        assert!(
-            transaction.verify(),
-            "Transaction signature verification failed"
-        );
-    }
+    assert!(transaction.verify());
 
-    // 🔹 Test SHA3-256 Hashing of Transactions
-    #[test]
-    fn test_transaction_hashing() {
-        let (sk, pk) = falcon::keygen().expect("Keygen failed");
-        let transaction = Transaction::new(2, "Charlie", "Dave", 200, &sk, &pk);
-        let hash = transaction.hash();
+    let mut tampered = transaction;
+    tampered.amount += 1;
+    assert!(!tampered.verify());
+}
 
-        assert!(!hash.is_empty(), "Transaction hash should not be empty");
-    }
+#[test]
+fn transaction_hash_changes_when_signed_data_changes() {
+    let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+    let first = Transaction::new(1, "Alice", "Bob", 100, &secret_key, &public_key);
+    let second = Transaction::new(2, "Alice", "Bob", 100, &secret_key, &public_key);
 
-    // 🔹 Test Block Hashing Mechanism
-    #[test]
-    fn test_block_hashing() {
-        let transactions = vec![];
-        let block = Block::new(1, String::from("prev_hash"), transactions);
-        let hash = block.hash.clone();
+    assert_ne!(first.hash(), second.hash());
+    assert_eq!(first.hash().len(), 32);
+}
 
-        assert!(!hash.is_empty(), "Block hash should not be empty");
-    }
+#[test]
+fn block_hash_is_deterministic_for_fixed_timestamp() {
+    let hash_a = Block::calculate_hash(&[], "previous", 42);
+    let hash_b = Block::calculate_hash(&[], "previous", 42);
 
-    // 🔹 Test Quantum-Secure Encryption & Decryption
-    #[test]
-    fn test_quantum_secure_encryption() {
-        let quantum = QuantumSecure::new();
-        let (sk, pk) = falcon::keygen().expect("Keygen failed");
-        let transaction = Transaction::new(3, "Eve", "Frank", 300, &sk, &pk);
+    assert_eq!(hash_a, hash_b);
+    assert_eq!(hash_a.len(), 64);
+}
 
-        let encrypted = quantum.encrypt_transaction(&transaction);
-        let decrypted = quantum.decrypt_transaction(&encrypted);
+#[test]
+fn kyber_aes_round_trip_and_tamper_rejection() {
+    let hybrid = KyberAESHybrid::keygen();
+    let plaintext = b"confidential transaction payload";
+    let (mut ciphertext, encapsulated_key, nonce) = hybrid.encrypt(plaintext);
 
-        assert_eq!(transaction, decrypted, "Decryption failed, data mismatch");
-    }
+    assert_eq!(
+        hybrid.decrypt(&ciphertext, &encapsulated_key, &nonce),
+        plaintext
+    );
 
-    // 🔹 Test Adding a Valid Transaction to Mempool
-    #[tokio::test]
-    async fn test_add_valid_transaction_to_mempool() {
-        let blockchain = BlockchainState::new();
-        let (sk, pk) = falcon::keygen().expect("Keygen failed");
-        let transaction = Transaction::new(4, "George", "Helen", 400, &sk, &pk);
+    ciphertext[0] ^= 1;
+    assert!(
+        std::panic::catch_unwind(|| hybrid.decrypt(&ciphertext, &encapsulated_key, &nonce))
+            .is_err()
+    );
+}
 
-        blockchain.add_transaction(transaction.clone()).await;
-        let mempool = blockchain.mempool.read().await;
+#[test]
+fn quantum_signature_verifies_and_rejects_wrong_message() {
+    let quantum = QuantumSecure::keygen();
+    let message = b"message";
+    let signature = quantum.sign(message);
 
-        assert!(
-            mempool.contains(&transaction),
-            "Transaction not found in mempool"
-        );
-    }
+    assert!(quantum.verify(message, &signature));
+    assert!(!quantum.verify(b"different message", &signature));
+}
 
-    // 🔹 Test Adding a Block to Blockchain
-    #[tokio::test]
-    async fn test_add_block_to_blockchain() {
-        let blockchain = BlockchainState::new();
-        let transactions = vec![];
-        let block = Block::new(2, String::from("prev_hash"), transactions);
+#[tokio::test]
+async fn blockchain_state_stores_transactions_and_blocks() {
+    let blockchain = BlockchainState::new();
+    let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+    let transaction = Transaction::new(1, "Alice", "Bob", 100, &secret_key, &public_key);
+    let block = Block::new(1, "genesis".to_string(), vec![transaction.clone()]);
 
-        blockchain.add_block(block.clone()).await;
-        let chain = blockchain.chain.read().await;
+    blockchain.add_transaction(transaction.clone()).await;
+    blockchain.add_block(block.clone()).await;
 
-        assert!(chain.contains(&block), "Block not found in blockchain");
-    }
+    assert!(blockchain.mempool.read().await.contains(&transaction));
+    assert!(blockchain
+        .chain
+        .read()
+        .await
+        .iter()
+        .any(|item| item.hash == block.hash));
+}
 
-    // 🔹 Test Adaptive Consensus Mode Switching
-    #[test]
-    fn test_consensus_mode_switching() {
-        let mut consensus = AdaptiveConsensus::new();
+#[test]
+fn adaptive_consensus_selects_expected_mode() {
+    let mut consensus = AdaptiveConsensus::new();
 
-        consensus.switch_mode(90);
-        assert_eq!(
-            consensus.consensus_mode, "PoW",
-            "Consensus mode should switch to PoW"
-        );
+    consensus.switch_mode(90);
+    assert_eq!(consensus.consensus_mode, "PoW");
+    consensus.switch_mode(50);
+    assert_eq!(consensus.consensus_mode, "PBFT");
+    consensus.switch_mode(20);
+    assert_eq!(consensus.consensus_mode, "PoS");
+}
 
-        consensus.switch_mode(50);
-        assert_eq!(
-            consensus.consensus_mode, "PBFT",
-            "Consensus mode should switch to PBFT"
-        );
+#[test]
+fn zkp_module_generates_hash_proofs() {
+    let module = BLEEPZKPModule::from_keys(vec![0; 64], vec![1; 64]).expect("valid keys");
+    let proof = module
+        .generate_proof(b"transaction")
+        .expect("proof generation succeeds");
 
-        consensus.switch_mode(20);
-        assert_eq!(
-            consensus.consensus_mode, "PoS",
-            "Consensus mode should switch to PoS"
-        );
-    }
+    assert_eq!(proof.len(), 32);
+    assert!(module
+        .generate_batch_proofs(vec![b"a".to_vec(), b"b".to_vec()])
+        .is_ok());
+}
 
-    // 🔹 Test ZKP Proof Generation
-    #[test]
-    fn test_zkp_proof_generation() {
-        let proving_key = vec![0u8; 64];
-        let verifying_key = vec![1u8; 64];
-        let zkp_module = BLEEPZKPModule::from_keys(proving_key, verifying_key)
-            .expect("ZKP module initialization failed");
+#[test]
+fn asset_recovery_requires_matching_proof_and_approval_threshold() {
+    let mut request = AssetRecoveryRequest::new(
+        "asset".to_string(),
+        "owner".to_string(),
+        "proof".to_string(),
+    );
 
-        let transactions: Vec<Vec<u8>> = vec![vec![0u8; 16], vec![1u8; 16], vec![2u8; 16]];
-        let proofs = zkp_module.generate_batch_proofs(transactions);
+    assert!(!request.validate("wrong-proof"));
+    assert!(request.validate("proof"));
+    assert!(!request.finalize(2));
+    assert!(request.finalize(1));
+}
 
-        assert!(proofs.is_ok(), "ZKP proof generation failed");
-    }
+#[test]
+fn transaction_payload_signing_rejects_invalid_key_and_signature() {
+    let (public_key, secret_key) = generate_tx_keypair();
+    let payload = tx_payload("Alice", "Bob", 100, 42);
+    let signature = sign_tx_payload(&payload, &secret_key).expect("generated key must sign");
 
-    // 🔹 Test Asset Recovery Request Submission
-    #[test]
-    fn test_asset_recovery_submission() {
-        let request = AssetRecoveryRequest::new(
-            String::from("asset123"),
-            String::from("owner123"),
-            String::from("zk-proof"),
-        );
-
-        assert!(request.submit(), "Asset recovery request submission failed");
-    }
-
-    // 🔹 Test Asset Recovery Request Validation
-    #[test]
-    fn test_asset_recovery_validation() {
-        let mut request = AssetRecoveryRequest::new(
-            String::from("asset456"),
-            String::from("owner456"),
-            String::from("zk-proof"),
-        );
-
-        assert!(
-            request.validate(),
-            "Asset recovery request validation failed"
-        );
-    }
-
-    // 🔹 Test Asset Recovery Finalization
-    #[test]
-    fn test_asset_recovery_finalization() {
-        let mut request = AssetRecoveryRequest::new(
-            String::from("asset789"),
-            String::from("owner789"),
-            String::from("zk-proof"),
-        );
-        request.approvals = MIN_APPROVALS; // Simulate enough approvals
-
-        assert!(request.finalize(), "Asset recovery finalization failed");
-    }
+    assert!(verify_tx_signature(&payload, &signature, &public_key));
+    assert!(!verify_tx_signature(&payload, b"invalid", &public_key));
+    assert!(sign_tx_payload(&payload, b"invalid").is_err());
 }

@@ -607,7 +607,7 @@ mod tests {
     use super::*;
     use bleep_connect_commitment_chain::{CommitmentChain, Validator};
     use bleep_connect_crypto::ClassicalKeyPair;
-    use bleep_connect_types::{AssetId, AssetType, ChainId};
+    use bleep_connect_types::{AssetId, ChainId};
     use tempfile::tempdir;
 
     async fn make_chain() -> Arc<CommitmentChain> {
@@ -618,7 +618,7 @@ mod tests {
         Arc::new(CommitmentChain::new(dir.path(), kp, vec![v]).unwrap())
     }
 
-    fn make_intent(chain: &Arc<CommitmentChain>) -> InstantIntent {
+    fn make_intent(_chain: &Arc<CommitmentChain>) -> InstantIntent {
         use bleep_connect_types::UniversalAddress;
         InstantIntent {
             intent_id: [0u8; 32],

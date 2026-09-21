@@ -979,6 +979,7 @@ pub fn rpc_routes_with_state(
         .or(layer3_intent_submit_route(Arc::clone(&state_inner)))
         .or(benchmark_result_route(Arc::clone(&state_inner)))
         .or(audit_report_route(Arc::clone(&state_inner)))
+        .boxed()
 }
 
 /// Convenience wrapper with zero-state (stub / test mode).

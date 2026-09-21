@@ -41,20 +41,6 @@ use std::error::Error;
 use std::sync::{Arc, RwLock};
 use tracing::{error, info, warn};
 
-#[cfg(all(
-    any(target_arch = "x86", target_arch = "x86_64"),
-    not(target_os = "windows")
-))]
-#[no_mangle]
-#[inline(never)]
-pub extern "C" fn __rust_probestack() {
-    unsafe {
-        let mut probe_byte = 0u8;
-        let probe_ptr = (&mut probe_byte as *mut u8).offset(-4096);
-        core::ptr::write_volatile(probe_ptr, 0);
-    }
-}
-
 // ── Crypto ────────────────────────────────────────────────────────────────────
 use bleep_crypto::pq_crypto::KyberKem;
 use bleep_crypto::quantum_secure::QuantumSecure;
