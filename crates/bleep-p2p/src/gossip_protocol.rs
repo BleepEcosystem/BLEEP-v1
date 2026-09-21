@@ -187,7 +187,7 @@ impl GossipProtocol {
 mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair};
+    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, SphincsKeypair};
     use crate::types::{unix_now, MessageType};
 
     fn make_gossip() -> Arc<GossipProtocol> {
@@ -195,7 +195,7 @@ mod tests {
         let (pm, _) = PeerManager::new(local_id.clone(), PeerManagerConfig::default());
         let ed = Ed25519Keypair::generate();
         let kyber = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(ed, kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(ed, SphincsKeypair::generate(), kyber, pm.clone());
         GossipProtocol::new(pm, mp)
     }
 

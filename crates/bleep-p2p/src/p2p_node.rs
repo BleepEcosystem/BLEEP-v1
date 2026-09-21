@@ -33,7 +33,7 @@ use crate::gossip_protocol::GossipProtocol;
 use crate::message_protocol::MessageProtocol;
 use crate::onion_routing::OnionRouter;
 use crate::peer_manager::{PeerEvent, PeerManager, PeerManagerConfig};
-use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, NodeIdentity};
+use crate::quantum_crypto::NodeIdentity;
 use crate::types::{MessageType, NodeId, PeerInfo, SecureMessage};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +67,25 @@ impl Default for P2PNodeConfig {
     }
 }
 
+impl P2PNodeConfig {
+    pub fn from_env() -> Result<Self, String> {
+        let mut config = Self::default();
+        if let Ok(addr) = std::env::var("BLEEP_P2P_LISTEN_ADDR") {
+            config.listen_addr = addr.parse().map_err(|e| format!("invalid BLEEP_P2P_LISTEN_ADDR: {e}"))?;
+        }
+        if let Ok(seeds) = std::env::var("BLEEP_P2P_SEEDS") {
+            for seed in seeds.split(',').map(str::trim).filter(|seed| !seed.is_empty()) {
+                config.bootstrap_peers.push(BootstrapPeer {
+                    addr: seed.parse().map_err(|e| format!("invalid BLEEP_P2P_SEEDS entry '{seed}': {e}"))?,
+                    ed25519_pubkey: vec![],
+                    sphincs_pubkey: vec![],
+                });
+            }
+        }
+        Ok(config)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // P2P NODE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,12 +115,10 @@ impl P2PNode {
         let (peer_manager, mut event_rx) =
             PeerManager::new(node_id.clone(), config.peer_manager_config.clone());
 
-        // Simpler: just generate fresh transport keys (separate from identity)
-        let transport_ed = Ed25519Keypair::generate();
-        let transport_kyber = KyberKeypair::generate();
-
-        let (message_protocol, inbound_rx) =
-            MessageProtocol::new(transport_ed, transport_kyber, peer_manager.clone());
+        let (message_protocol, inbound_rx) = MessageProtocol::new(
+            identity.ed_keypair.clone(), identity.sphincs_keypair.clone(),
+            identity.kyber_keypair.clone(), peer_manager.clone(),
+        );
 
         // Gossip
         let gossip = GossipProtocol::new(peer_manager.clone(), message_protocol.clone());
@@ -165,20 +182,37 @@ impl P2PNode {
         });
 
         // Bootstrap
-        for bp in &config.bootstrap_peers {
-            let bp_id = NodeId::from_bytes(&bp.ed25519_pubkey);
-            let peer = PeerInfo::new(
-                bp_id.clone(),
-                bp.addr,
-                bp.ed25519_pubkey.clone(),
-                bp.sphincs_pubkey.clone(),
-            );
-            peer_manager.dht().add_peer(peer).await;
-            info!(addr = %bp.addr, "Bootstrap peer registered in DHT");
-        }
+        let bootstrap_handle = if config.bootstrap_peers.is_empty() {
+            None
+        } else {
+            let seeds = config.bootstrap_peers.clone();
+            let protocol = message_protocol.clone();
+            let peer_manager = peer_manager.clone();
+            let dht = peer_manager.dht();
+            Some(tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                loop {
+                    for seed in &seeds {
+                        match protocol.establish_outbound(seed.addr).await {
+                            Ok(peer) => {
+                                if let Some(peer_info) = peer_manager.get_peer(&peer) {
+                                    dht.bootstrap(std::slice::from_ref(&peer_info)).await;
+                                }
+                                info!(addr = %seed.addr, peer = %peer, "Connected to bootstrap peer");
+                            }
+                            Err(error) => warn!(addr = %seed.addr, %error, "Bootstrap peer connection failed; will retry"),
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }))
+        };
 
         let handle = NodeHandle {
-            tasks: vec![listen_handle, gossip_handle, dht_handle, event_handle],
+            tasks: vec![listen_handle, gossip_handle, dht_handle, event_handle]
+                .into_iter()
+                .chain(bootstrap_handle)
+                .collect(),
         };
 
         Ok((node, handle))
@@ -243,6 +277,10 @@ impl P2PNode {
     pub fn healthy_peer_count(&self) -> usize {
         self.peer_manager.healthy_peers().len()
     }
+
+    pub async fn find_closest(&self, target: &NodeId, k: usize) -> Vec<PeerInfo> {
+        self.peer_manager.find_closest(target, k).await
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,7 +305,6 @@ impl NodeHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quantum_crypto::SphincsKeypair;
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -323,6 +360,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(node_a.peer_count(), 1);
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_peer_is_dialed_and_admitted() {
+        let (node_b, handle_b) = start_test_node(17706).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let config = P2PNodeConfig {
+            listen_addr: "127.0.0.1:17707".parse().unwrap(),
+            bootstrap_peers: vec![BootstrapPeer {
+                addr: "127.0.0.1:17706".parse().unwrap(),
+                ed25519_pubkey: vec![],
+                sphincs_pubkey: vec![],
+            }],
+            peer_manager_config: PeerManagerConfig::default(),
+        };
+        let (node_a, handle_a) = P2PNode::start(config).await.unwrap();
+
+        timeout(Duration::from_secs(30), async {
+            loop {
+                if node_a.peer_count() == 1 && node_b.peer_count() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("bootstrap peer should be admitted through the outbound handshake");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if node_b.peer_count() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("bootstrap peer should be admitted on the accepting node");
+
+        assert_eq!(node_b.peer_count(), 1);
+        let closest = node_a
+            .peer_manager
+            .find_closest(&node_b.node_id, 1)
+            .await;
+        assert_eq!(closest.first().map(|peer| &peer.id), Some(&node_b.node_id));
+
         handle_a.shutdown().await;
         handle_b.shutdown().await;
     }

@@ -37,6 +37,7 @@ pub struct KyberPublicKey(pub Vec<u8>);
 pub struct KyberSecretKey(#[zeroize(skip)] pub Vec<u8>);
 
 /// A generated Kyber keypair.
+#[derive(Clone)]
 pub struct KyberKeypair {
     pub public_key: KyberPublicKey,
     pub secret_key: KyberSecretKey,
@@ -84,6 +85,7 @@ pub struct SphincsPublicKey(pub Vec<u8>);
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct SphincsSecretKey(#[zeroize(skip)] pub Vec<u8>);
 
+#[derive(Clone)]
 pub struct SphincsKeypair {
     pub public_key: SphincsPublicKey,
     pub secret_key: SphincsSecretKey,

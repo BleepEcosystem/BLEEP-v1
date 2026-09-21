@@ -433,7 +433,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // ── Step 9: P2P ───────────────────────────────────────────────────────────
     info!("🌐 [12/16] Starting P2P node…");
-    let (p2p_node, p2p_handle) = P2PNode::start(P2PNodeConfig::default()).await?;
+    let p2p_config = P2PNodeConfig::from_env().map_err(|e| format!("P2P config: {e}"))?;
+    info!("  P2P listen={} seeds={}", p2p_config.listen_addr, p2p_config.bootstrap_peers.len());
+    let (p2p_node, p2p_handle) = P2PNode::start(p2p_config).await?;
     info!(
         "  ✅ P2P node {} | peers: {}",
         p2p_node.node_id,

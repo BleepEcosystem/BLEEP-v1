@@ -98,6 +98,26 @@ Transport-layer framing and authentication:
 | `quantum_mode` | `true` | Use PQC for all sessions (always enabled in production) |
 | `anti_replay_cache_slots` | `65,536` | LRU nonce cache size |
 
+The node binary also reads these environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `BLEEP_P2P_LISTEN_ADDR` | `0.0.0.0:7700` | TCP listen address |
+| `BLEEP_P2P_SEEDS` | empty | Comma-separated `host:port` addresses for authenticated outbound bootstrap dialing |
+
+For example, start a node that listens publicly and dials two known peers:
+
+```sh
+BLEEP_P2P_LISTEN_ADDR=0.0.0.0:7700 \
+BLEEP_P2P_SEEDS=198.51.100.10:7700,198.51.100.11:7700 \
+cargo run --bin bleep
+```
+
+Each successful seed connection performs the SPHINCS+ identity admission and
+Kyber session exchange before adding the peer to the local Kademlia routing
+table. Seed addresses must be reachable from the node; public keys are learned
+and verified during the authenticated handshake.
+
 ---
 
 ## Quick Start
