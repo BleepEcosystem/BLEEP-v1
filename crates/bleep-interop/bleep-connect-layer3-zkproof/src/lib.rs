@@ -337,9 +337,10 @@ pub struct Layer3ZKProof {
 impl Layer3ZKProof {
     /// Create Layer3 with a post-quantum proof generator and verifier.
     pub fn new(commitment_chain: Arc<CommitmentChain>) -> BleepConnectResult<Self> {
+        let (generator, verifier) = ProofGenerator::new_shared()?;
         Ok(Self {
-            generator: Arc::new(ProofGenerator::new()?),
-            verifier: Arc::new(ProofVerifier::new()?),
+            generator: Arc::new(generator),
+            verifier: Arc::new(verifier),
             aggregator: Arc::new(BatchAggregator::new()),
             commitment_chain,
         })
@@ -431,7 +432,7 @@ mod tests {
     use super::*;
     use bleep_connect_commitment_chain::{CommitmentChain, Validator};
     use bleep_connect_crypto::ClassicalKeyPair;
-    use bleep_connect_types::{ChainId, ProofType};
+    use bleep_connect_types::ProofType;
     use tempfile::tempdir;
 
     fn make_chain() -> Arc<CommitmentChain> {
@@ -458,8 +459,7 @@ mod tests {
 
     #[test]
     fn test_pq_prove_verify() {
-        let gen = ProofGenerator::new().unwrap();
-        let verifier = ProofVerifier::new().unwrap();
+        let (gen, verifier) = ProofGenerator::new_shared().unwrap();
 
         let input = make_input(1);
         let proof = gen.generate_proof(&input).unwrap();

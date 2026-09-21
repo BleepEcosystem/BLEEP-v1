@@ -81,7 +81,6 @@ impl MerkleLeaf {
         let hash_result = hasher.finalize();
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_result);
-
         Self { index, data, hash }
     }
 }
@@ -116,8 +115,8 @@ impl MerkleNode {
     /// Create an internal node from two children
     pub fn branch(left: MerkleNode, right: MerkleNode) -> Self {
         let mut hasher = Sha3_256::new();
-        hasher.update(&left.hash);
-        hasher.update(&right.hash);
+        hasher.update(left.hash);
+        hasher.update(right.hash);
         let hash_result = hasher.finalize();
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_result);
@@ -160,7 +159,7 @@ impl MerkleProof {
         let mut current_hash = self.leaf_hash;
         for sibling in &self.path {
             let mut hasher = Sha3_256::new();
-            hasher.update(&current_hash);
+            hasher.update(current_hash);
             hasher.update(sibling);
             let hash_result = hasher.finalize();
             current_hash.copy_from_slice(&hash_result);
@@ -193,6 +192,12 @@ pub struct MerkleTree {
 
     /// Index for quick leaf lookup
     leaf_index: BTreeMap<u64, usize>,
+}
+
+impl Default for MerkleTree {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MerkleTree {
@@ -321,8 +326,8 @@ impl MerkleTree {
 
                     // Hash for next level
                     let mut hasher = Sha3_256::new();
-                    hasher.update(&left_hash);
-                    hasher.update(&right_hash);
+                    hasher.update(left_hash);
+                    hasher.update(right_hash);
                     let hash_result = hasher.finalize();
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(&hash_result);
@@ -335,8 +340,8 @@ impl MerkleTree {
                     }
 
                     let mut hasher = Sha3_256::new();
-                    hasher.update(&left_hash);
-                    hasher.update(&left_hash);
+                    hasher.update(left_hash);
+                    hasher.update(left_hash);
                     let hash_result = hasher.finalize();
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(&hash_result);
@@ -477,7 +482,7 @@ mod tests {
         tree.add_leaf(vec![4, 5, 6]).unwrap();
 
         let root = tree.finalize().unwrap();
-        assert_eq!(tree.is_finalized(), true);
+        assert!(tree.is_finalized());
         assert_eq!(tree.root().unwrap(), root);
     }
 

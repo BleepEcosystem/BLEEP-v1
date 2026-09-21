@@ -62,8 +62,8 @@ pub fn tx_payload(sender: &str, receiver: &str, amount: u64, timestamp: u64) -> 
     let mut h = Sha3_256::new();
     h.update(sender.as_bytes());
     h.update(receiver.as_bytes());
-    h.update(&amount.to_le_bytes());
-    h.update(&timestamp.to_le_bytes());
+    h.update(amount.to_le_bytes());
+    h.update(timestamp.to_le_bytes());
     h.finalize().into()
 }
 

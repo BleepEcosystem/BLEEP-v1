@@ -55,10 +55,8 @@ impl AssetRecoveryRequest {
 // Example function to process a batch of asset recovery requests
 pub fn process_responses(requests: &mut [AssetRecoveryRequest], proof: &str, min_approvals: u32) {
     for req in requests.iter_mut() {
-        if req.validate(proof) {
-            if req.finalize(min_approvals) {
-                // Asset can be recovered
-            }
+        if req.validate(proof) && req.finalize(min_approvals) {
+            // Asset can be recovered
         }
     }
 }

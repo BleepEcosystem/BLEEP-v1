@@ -528,6 +528,10 @@ impl Layer1Social {
         self.emergency.is_paused().await
     }
 
+    pub async fn pause(&self, reason: String) {
+        self.emergency.pause(reason).await;
+    }
+
     pub async fn resume(&self) {
         self.emergency.resume().await;
     }
@@ -544,7 +548,7 @@ fn now() -> u64 {
 mod tests {
     use super::*;
     use bleep_connect_commitment_chain::{CommitmentChain, Validator};
-    use bleep_connect_types::AssetId;
+    use bleep_connect_types::ChainId;
     use tempfile::tempdir;
 
     async fn make_layer1() -> (Layer1Social, Vec<(RegisteredVoter, ClassicalKeyPair)>) {

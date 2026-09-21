@@ -954,9 +954,38 @@ mod tests {
         let server = thread::spawn(move || {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
+                let mut request_bytes = Vec::new();
                 let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap();
-                let request = String::from_utf8_lossy(&buf[..n]);
+                let content_length = loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    request_bytes.extend_from_slice(&buf[..n]);
+                    let Some(header_end) = request_bytes
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request_bytes[..header_end]);
+                    break headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                };
+                let header_end = request_bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                while request_bytes.len() < header_end + content_length {
+                    let n = stream.read(&mut buf).unwrap();
+                    request_bytes.extend_from_slice(&buf[..n]);
+                }
+                let request = String::from_utf8_lossy(&request_bytes);
                 let response = if request.contains("eth_getTransactionReceipt") {
                     r#"{"jsonrpc":"2.0","id":1,"result":{"blockNumber":"0x5","status":"0x1"}}"#
                 } else {

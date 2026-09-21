@@ -667,6 +667,24 @@ impl HybridEncryption {
     }
 }
 
+/// Calculate Shannon entropy of a byte slice
+fn calculate_entropy(data: &[u8]) -> f64 {
+    let mut counts = [0usize; 256];
+    for &byte in data {
+        counts[byte as usize] += 1;
+    }
+
+    let len = data.len() as f64;
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = count as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,22 +829,4 @@ mod tests {
         // If we got here without panic, zeroization completed without corruption.
         assert_eq!(sk_copy.len(), SecretKey::LEN);
     }
-}
-
-/// Calculate Shannon entropy of a byte slice
-fn calculate_entropy(data: &[u8]) -> f64 {
-    let mut counts = [0usize; 256];
-    for &byte in data {
-        counts[byte as usize] += 1;
-    }
-
-    let len = data.len() as f64;
-    counts
-        .iter()
-        .filter(|&&count| count > 0)
-        .map(|&count| {
-            let p = count as f64 / len;
-            -p * p.log2()
-        })
-        .sum()
 }

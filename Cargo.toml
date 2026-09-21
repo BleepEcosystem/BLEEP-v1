@@ -131,3 +131,6 @@ tokio-test = "0.4.3"
 criterion  = { version = "0.5.1", features = ["html_reports"] }
 proptest   = "1.4.0"
 mockall    = "0.12.1"
+
+[patch.crates-io]
+proc-macro-error2 = { git = "https://github.com/GnomedDev/proc-macro-error-2.git", rev = "b02d79c49898a8f4340aaa81ebd7cae3668ac6a9" }

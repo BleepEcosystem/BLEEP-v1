@@ -609,7 +609,7 @@ mod tests {
         assert!(!orc.is_paused().await);
 
         // Manually pause via emergency controller
-        orc.layer1.emergency.pause("test".into()).await;
+        orc.layer1.pause("test".into()).await;
         assert!(orc.is_paused().await);
 
         // Submitting an intent while paused must fail

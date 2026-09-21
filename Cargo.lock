@@ -1096,6 +1096,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1125,12 +1126,14 @@ name = "bleep-connect-executor"
 version = "0.1.0"
 dependencies = [
  "bleep-connect-adapters",
+ "bleep-connect-commitment-chain",
  "bleep-connect-crypto",
  "bleep-connect-layer4-instant",
  "bleep-connect-types",
  "dashmap 5.5.3",
  "hex",
  "serde",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1146,6 +1149,7 @@ dependencies = [
  "dashmap 5.5.3",
  "hex",
  "serde",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1163,6 +1167,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1180,6 +1185,7 @@ dependencies = [
  "hex",
  "serde",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1197,6 +1203,7 @@ dependencies = [
  "dashmap 5.5.3",
  "hex",
  "serde",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -5908,8 +5915,7 @@ dependencies = [
 [[package]]
 name = "proc-macro-error-attr2"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+source = "git+https://github.com/GnomedDev/proc-macro-error-2.git?rev=b02d79c49898a8f4340aaa81ebd7cae3668ac6a9#b02d79c49898a8f4340aaa81ebd7cae3668ac6a9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5918,8 +5924,7 @@ dependencies = [
 [[package]]
 name = "proc-macro-error2"
 version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+source = "git+https://github.com/GnomedDev/proc-macro-error-2.git?rev=b02d79c49898a8f4340aaa81ebd7cae3668ac6a9#b02d79c49898a8f4340aaa81ebd7cae3668ac6a9"
 dependencies = [
  "proc-macro-error-attr2",
  "proc-macro2",

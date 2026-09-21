@@ -52,6 +52,12 @@ pub struct BLEEPZKPModule {
     pub logger: BLEEPLogger,
 }
 
+impl Default for BLEEPZKPModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BLEEPZKPModule {
     /// Initialize a development ZKP module with placeholder key material.
     pub fn new() -> Self {
@@ -235,7 +241,7 @@ impl BLEEPZKPModule {
     /// Save the revocation list securely
     pub fn save_revocation_tree(&self, path: &str) -> Result<(), BLEEPError> {
         // Save the root of the Merkle tree as a simple representation
-        fs::write(path, &self.revocation_tree.root())?;
+        fs::write(path, self.revocation_tree.root())?;
         self.logger.info("Revocation tree saved.");
         Ok(())
     }

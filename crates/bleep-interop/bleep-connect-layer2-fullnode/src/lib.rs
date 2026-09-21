@@ -516,7 +516,7 @@ mod tests {
     use bleep_connect_commitment_chain::{CommitmentChain, Validator};
     use tempfile::tempdir;
 
-    async fn make_layer2() -> Layer2FullNode {
+    async fn make_layer2(endpoint: String) -> Layer2FullNode {
         let dir = tempdir().unwrap();
         let kp = ClassicalKeyPair::generate();
         let v = Validator::new(kp.public_key_bytes(), 1_000_000);
@@ -533,7 +533,7 @@ mod tests {
             let node = VerifierNode::new(
                 kp.public_key_bytes(),
                 client,
-                "http://localhost".into(),
+                endpoint.clone(),
                 true,
             );
             layer2.add_verifier_node(node, kp).await;
@@ -543,11 +543,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_full_verification() {
-        let layer2 = make_layer2().await;
-        assert_eq!(layer2.verifier_node_count().await, 3);
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
 
-        let intent_id = sha256(b"high-value-transfer");
-        // Compute what the consensus state root should be (deterministic)
         let expected_root = sha256(
             &[
                 ChainId::Ethereum.to_u32().to_be_bytes().as_slice(),
@@ -556,6 +555,30 @@ mod tests {
             ]
             .concat(),
         );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let response_root = hex::encode(expected_root);
+        let server = thread::spawn(move || {
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"stateRoot":"0x{}"}}}}"#,
+                response_root
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                stream.read(&mut request).unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let layer2 = make_layer2(endpoint).await;
+        assert_eq!(layer2.verifier_node_count().await, 3);
+
+        let intent_id = sha256(b"high-value-transfer");
 
         let req_id = layer2
             .request_verification(ChainId::Ethereum, 42, intent_id, expected_root)
@@ -565,6 +588,7 @@ mod tests {
         let result = layer2.verify(req_id).await.unwrap();
         assert!(result.consensus_reached);
         assert_eq!(result.verifier_nodes.len(), 3);
+        server.join().unwrap();
     }
 
     #[tokio::test]
