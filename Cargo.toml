@@ -105,7 +105,7 @@ libp2p = "0.56.0"
 rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
 dashmap = "5.5.3"
 lru = "0.18.0"
-warp = "0.4.3"
+warp = { version = "0.4.3", features = ["server"] }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
 rand = "0.8.5"
 tempfile = "3.10"
