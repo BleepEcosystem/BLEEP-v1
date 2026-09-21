@@ -7,34 +7,33 @@ license     = "MIT OR Apache-2.0"
 description = "BLEEP Blockchain JSON-RPC layer"
 
 [dependencies]
-tokio              = { version = "1.36", features = ["full"] }
-warp               = "0.3.6"
-serde              = { version = "1.0", features = ["derive"] }
-serde_json         = "1.0"
-bytes              = "1.5"
-tracing            = "0.1.40"
+tokio = { version = "1.36", features = ["full"] }
+warp = "0.4.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bytes = "1.5"
+tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-anyhow             = "1.0.80"
+anyhow = "1.0.80"
 sha2 = "0.10.8"
-hex  = "0.4.3"
+hex = "0.4.3"
 parking_lot = "0.12.1"
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 
-# Internal crates needed for route handlers
-bleep-core        = { path = "../bleep-core" }
+bleep-core = { path = "../bleep-core" }
 bleep-wallet-core = { path = "../bleep-wallet-core" }
-bleep-ai          = { path = "../bleep-ai" }
-bleep-crypto      = { path = "../bleep-crypto" }
-bleep-pat         = { path = "../bleep-pat" }
-bleep-state       = { path = "../bleep-state" }
-bleep-consensus   = { path = "../bleep-consensus" }
-bleep-economics   = { path = "../bleep-economics" }
-bleep-interop     = { path = "../bleep-interop" }
-bleep-telemetry   = { path = "../bleep-telemetry" }
-bleep-governance  = { path = "../bleep-governance" }
-bleep-auth        = { path = "../bleep-auth" }
-base64           = "0.21"
+bleep-ai = { path = "../bleep-ai" }
+bleep-crypto = { path = "../bleep-crypto" }
+bleep-pat = { path = "../bleep-pat" }
+bleep-state = { path = "../bleep-state" }
+bleep-consensus = { path = "../bleep-consensus" }
+bleep-economics = { path = "../bleep-economics" }
+bleep-interop = { path = "../bleep-interop" }
+bleep-telemetry = { path = "../bleep-telemetry" }
+bleep-governance = { path = "../bleep-governance" }
+bleep-auth = { path = "../bleep-auth" }
+base64 = "0.21"
 
 [[bin]]
 name = "bleep-rpc"

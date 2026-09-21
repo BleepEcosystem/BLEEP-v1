@@ -35,102 +35,98 @@ members = [
 ]
 
 [package]
-name        = "bleep-root"
-version     = "1.0.0"
+name = "bleep-root"
+version = "1.0.0"
 default-run = "bleep"
-edition     = "2021"
-authors     = ["Muhammad Attahir"]
-license     = "MIT OR Apache-2.0"
-description = "BLEEP Blockchain — AI-powered, quantum-secure, cross-chain decentralized ecosystem."
-repository  = "https://github.com/bleep-project/bleep"
+edition = "2021"
+authors = ["Muhammad Attahir"]
+license = "MIT OR Apache-2.0"
+description = "BLEEP Blockchain - AI-powered, quantum-secure, cross-chain decentralized ecosystem."
+repository = "https://github.com/bleep-project/bleep"
 
 [[bin]]
 name = "bleep_admin"
 path = "src/bin/bleep_admin.rs"
-
 [[bin]]
 name = "bleep"
 path = "src/bin/main.rs"
-
 [[bin]]
 name = "bleep-executor"
 path = "src/bin/executor.rs"
 
 [features]
-default  = ["mainnet"]
-mainnet  = []
-pretestnet  = []
-quantum  = ["pqcrypto", "pqcrypto-kyber"]
+default = ["mainnet"]
+mainnet = []
+pretestnet = []
+quantum = ["pqcrypto", "pqcrypto-kyber"]
 
 [dependencies]
-bleep-core        = { path = "crates/bleep-core" }
-bleep-crypto      = { path = "crates/bleep-crypto" }
-bleep-consensus   = { path = "crates/bleep-consensus" }
-bleep-scheduler   = { path = "crates/bleep-scheduler" }
-bleep-governance  = { path = "crates/bleep-governance" }
-bleep-interop     = { path = "crates/bleep-interop" }
-bleep-p2p         = { path = "crates/bleep-p2p" }
-bleep-pat         = { path = "crates/bleep-pat" }
-bleep-rpc         = { path = "crates/bleep-rpc" }
+bleep-core = { path = "crates/bleep-core" }
+bleep-crypto = { path = "crates/bleep-crypto" }
+bleep-consensus = { path = "crates/bleep-consensus" }
+bleep-scheduler = { path = "crates/bleep-scheduler" }
+bleep-governance = { path = "crates/bleep-governance" }
+bleep-interop = { path = "crates/bleep-interop" }
+bleep-p2p = { path = "crates/bleep-p2p" }
+bleep-pat = { path = "crates/bleep-pat" }
+bleep-rpc = { path = "crates/bleep-rpc" }
 bleep-sig-availability = { path = "crates/bleep-sig-availability" }
-bleep-zkp        = { path = "crates/bleep-zkp" }
-bleep-state       = { path = "crates/bleep-state" }
-bleep-telemetry   = { path = "crates/bleep-telemetry" }
-bleep-vm          = { path = "crates/bleep-vm" }
+bleep-zkp = { path = "crates/bleep-zkp" }
+bleep-state = { path = "crates/bleep-state" }
+bleep-telemetry = { path = "crates/bleep-telemetry" }
+bleep-vm = { path = "crates/bleep-vm" }
 bleep-wallet-core = { path = "crates/bleep-wallet-core" }
-bleep-ai          = { path = "crates/bleep-ai" }
-bleep-economics   = { path = "crates/bleep-economics" }
-bleep-auth        = { path = "crates/bleep-auth" }
-
-tokio             = { version = "1.36", features = ["full"] }
-tokio-stream      = "0.1.15"
-tokio-util        = { version = "0.7.10", features = ["codec"] }
-async-trait       = "0.1.77"
-futures           = "0.3.30"
-rayon             = "1.8.1"
-parking_lot       = "0.12.1"
-serde             = { version = "1.0", features = ["derive"] }
-serde_json        = "1.0"
+bleep-ai = { path = "crates/bleep-ai" }
+bleep-economics = { path = "crates/bleep-economics" }
+bleep-auth = { path = "crates/bleep-auth" }
+tokio = { version = "1.36", features = ["full"] }
+tokio-stream = "0.1.15"
+tokio-util = { version = "0.7.10", features = ["codec"] }
+async-trait = "0.1.77"
+futures = "0.3.30"
+rayon = "1.8.1"
+parking_lot = "0.12.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 bincode = "2.0.1"
-hex               = "0.4.3"
-base64            = "0.21.7"
-blake2            = "0.10.6"
-sha2              = "0.10.8"
-sha3              = "0.10.8"
-tiny-keccak       = { version = "2.0.2", features = ["sha3"] }
-ed25519-dalek     = "2.1.1"
-zeroize           = { version = "1.7.0", features = ["zeroize_derive"] }
-aes-gcm           = "0.10.3"
-hkdf              = "0.12.4"
-halo2_proofs      = "0.3.0"
-ark-r1cs-std      = "0.6.0"
-libp2p            = "0.56.0"
-rocksdb           = { version = "0.21.0", features = ["multi-threaded-cf"] }
-dashmap           = "5.5.3"
+hex = "0.4.3"
+base64 = "0.21.7"
+blake2 = "0.10.6"
+sha2 = "0.10.8"
+sha3 = "0.10.8"
+tiny-keccak = { version = "2.0.2", features = ["sha3"] }
+ed25519-dalek = "2.1.1"
+zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
+aes-gcm = "0.10.3"
+hkdf = "0.12.4"
+halo2_proofs = "0.3.0"
+ark-r1cs-std = "0.6.0"
+libp2p = "0.56.0"
+rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
+dashmap = "5.5.3"
 lru = "0.18.0"
-warp              = "0.3.6"
-reqwest           = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
-rand              = "0.8.5"
-tempfile          = "3.10"
-log               = "0.4.21"
-env_logger        = "0.11.2"
-tracing           = "0.1.40"
+warp = "0.4.3"
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
+rand = "0.8.5"
+tempfile = "3.10"
+log = "0.4.21"
+env_logger = "0.11.2"
+tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-thiserror         = "1.0.56"
-anyhow            = "1.0.80"
-config            = "0.14.0"
-clap              = { version = "4.5.1", features = ["derive"] }
-chrono            = { version = "0.4.34", features = ["serde"] }
-pqcrypto          = { version = "0.18.1", optional = true }
+thiserror = "1.0.56"
+anyhow = "1.0.80"
+config = "0.14.0"
+clap = { version = "4.5.1", features = ["derive"] }
+chrono = { version = "0.4.34", features = ["serde"] }
+pqcrypto = { version = "0.18.1", optional = true }
 pqcrypto-kyber = { version = "0.8.1", optional = true }
-socket2           = "0.5"
-
+socket2 = "0.5"
 
 [dev-dependencies]
 tokio-test = "0.4.3"
-criterion  = { version = "0.5.1", features = ["html_reports"] }
-proptest   = "1.4.0"
-mockall    = "0.12.1"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+proptest = "1.4.0"
+mockall = "0.12.1"
 
 [patch.crates-io]
 proc-macro-error2 = { git = "https://github.com/GnomedDev/proc-macro-error-2.git", rev = "b02d79c49898a8f4340aaa81ebd7cae3668ac6a9" }
