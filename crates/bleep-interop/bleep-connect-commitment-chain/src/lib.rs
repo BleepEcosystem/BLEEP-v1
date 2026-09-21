@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rocksdb::{ColumnFamilyDescriptor, Options, DB};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 
 use bleep_connect_crypto::{sha256, ClassicalKeyPair};
 use bleep_connect_types::{
@@ -35,17 +35,50 @@ pub struct ChainStorage {
 
 impl ChainStorage {
     pub fn open(path: &Path) -> BleepConnectResult<Self> {
+        std::fs::create_dir_all(path).map_err(|e| {
+            BleepConnectError::DatabaseError(format!(
+                "failed to create db directory {}: {e}",
+                path.display()
+            ))
+        })?;
+
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        let cfs = vec![
-            ColumnFamilyDescriptor::new(CF_BLOCKS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_COMMITMENTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_VALIDATORS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_META, Options::default()),
-        ];
-        let db = DB::open_cf_descriptors(&opts, path, cfs)
-            .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?;
+
+        let open_db = |opts: &Options| {
+            DB::open_cf_descriptors(
+                opts,
+                path,
+                vec![
+                    ColumnFamilyDescriptor::new(CF_BLOCKS, Options::default()),
+                    ColumnFamilyDescriptor::new(CF_COMMITMENTS, Options::default()),
+                    ColumnFamilyDescriptor::new(CF_VALIDATORS, Options::default()),
+                    ColumnFamilyDescriptor::new(CF_META, Options::default()),
+                ],
+            )
+        };
+
+        let db = match open_db(&opts) {
+            Ok(db) => db,
+            Err(e) => {
+                let err = e.to_string();
+                if err.contains("LOCK") || err.contains("Resource temporarily unavailable") {
+                    let lock_path = path.join("LOCK");
+                    if lock_path.exists() {
+                        warn!(
+                            "Removing stale RocksDB lock file at {} before reopening",
+                            lock_path.display()
+                        );
+                        let _ = std::fs::remove_file(&lock_path);
+                    }
+                    open_db(&opts).map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?
+                } else {
+                    return Err(BleepConnectError::DatabaseError(err));
+                }
+            }
+        };
+
         Ok(Self { db: Arc::new(db) })
     }
 
@@ -438,5 +471,22 @@ mod tests {
         storage.store_commitment(&c).unwrap();
         let loaded = storage.get_commitment(&c.commitment_id).unwrap().unwrap();
         assert_eq!(loaded.commitment_id, c.commitment_id);
+    }
+
+    #[test]
+    fn test_storage_reopens_after_stale_lock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("commitment_chain");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let storage = ChainStorage::open(&path).unwrap();
+        let lock_path = path.join("LOCK");
+        assert!(lock_path.exists(), "expected RocksDB lock file to be created");
+        drop(storage);
+
+        std::fs::write(&lock_path, b"stale-lock").unwrap();
+
+        let reopened = ChainStorage::open(&path).unwrap();
+        assert!(reopened.db.cf_handle(CF_BLOCKS).is_some());
     }
 }
