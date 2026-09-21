@@ -513,7 +513,7 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_connect_commitment_chain::{CommitmentChain, Validator};
+    use bleep_connect_comm11itment_chain::{CommitmentChain, Validator};
     use tempfile::tempdir;
 
     async fn make_layer2(endpoint: String) -> Layer2FullNode {
