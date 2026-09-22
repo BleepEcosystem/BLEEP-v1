@@ -273,7 +273,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run audit
-        run: cargo audit
+        run: cargo audit --deny warnings
 
   # ------------------------------------------------------------------ #
   #  7. DEPENDENCY REVIEW (on PRs)                                       #

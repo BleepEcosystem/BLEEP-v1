@@ -26,9 +26,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run audit
-        run: |
-          cargo audit --json > audit-report.json || true
-          cargo audit
+        run: cargo audit --deny warnings
 
       - name: Upload audit report
         if: always()
