@@ -42,7 +42,7 @@ use std::sync::{Arc, RwLock};
 use tracing::{error, info, warn};
 
 // ── Crypto ────────────────────────────────────────────────────────────────────
-use bleep_crypto::pq_crypto::KyberKem;
+use bleep_crypto::pq_crypto::{KyberKem, KyberPublicKey};
 use bleep_crypto::quantum_secure::QuantumSecure;
 use bleep_crypto::tx_signer::generate_tx_keypair;
 
@@ -169,12 +169,29 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Generate real SPHINCS+-SHAKE-256f-simple keypair for block signing.
     // generate_tx_keypair() returns (pk_bytes: 64B, sk_bytes: 128B).
-    let (sphincs_pk, sphincs_sk) = generate_tx_keypair();
+    let key_dir = std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
+    let key_paths = (
+        format!("{}/sphincs.public", key_dir),
+        format!("{}/sphincs.secret", key_dir),
+        format!("{}/kyber.public", key_dir),
+    );
+    let (sphincs_pk, sphincs_sk, kyber_pk) = if std::path::Path::new(&key_paths.0).exists()
+        && std::path::Path::new(&key_paths.1).exists()
+        && std::path::Path::new(&key_paths.2).exists()
+    {
+        let public = hex::decode(std::fs::read_to_string(&key_paths.0)?.trim())?;
+        let secret = hex::decode(std::fs::read_to_string(&key_paths.1)?.trim())?;
+        let kyber = KyberPublicKey::from_bytes(hex::decode(std::fs::read_to_string(&key_paths.2)?.trim())?)?;
+        (public, secret, kyber)
+    } else {
+        let (public, secret) = generate_tx_keypair();
+        let (kyber, _) = KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
+        (public, secret, kyber)
+    };
 
     // Generate real Kyber-1024 keypair for validator KEM binding.
     // KyberKem::keygen() returns (KyberPublicKey: 1568B, KyberSecretKey: 3168B).
-    let (kyber_pk, _kyber_sk) =
-        KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
+    let kyber_pk = kyber_pk;
 
     info!(
         "  ✅ SPHINCS+-SHAKE-256f-simple keypair generated (PK={} bytes, SK={} bytes).",
