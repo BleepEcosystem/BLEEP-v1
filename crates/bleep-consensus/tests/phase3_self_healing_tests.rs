@@ -16,9 +16,7 @@ mod incident_detector {
 
 #[cfg(test)]
 mod phase3_self_healing_tests {
-    use bleep_consensus::incident_detector::{
-            DetectionParams, IncidentDetector, IncidentType,
-    };
+    use bleep_consensus::incident_detector::{DetectionParams, IncidentDetector, IncidentType};
     use bleep_consensus::recovery_controller::{
         ProtocolParams, RecoveryController, RecoveryPreconditions,
     };

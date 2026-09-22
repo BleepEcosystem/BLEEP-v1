@@ -215,7 +215,7 @@ impl Air for BlockValidityAir {
             sk_seed_witness: None,
             context: AirContext::new(
                 trace_info,
-                vec![TransitionConstraintDegree::new(3)],
+                vec![TransitionConstraintDegree::new(1)],
                 8,
                 options,
             ),
@@ -228,12 +228,11 @@ impl Air for BlockValidityAir {
 
     fn evaluate_transition<E: FieldElement<BaseField = Self::BaseField>>(
         &self,
-        _frame: &EvaluationFrame<E>,
+        frame: &EvaluationFrame<E>,
         _periodic_values: &[E],
         result: &mut [E],
     ) {
-        // Simple constraint that is always satisfied
-        result[0] = E::ZERO;
+        result[0] = frame.next()[3] - frame.current()[3] - E::ONE;
     }
 
     fn get_assertions(&self) -> Vec<Assertion<Self::BaseField>> {
@@ -310,12 +309,11 @@ impl BlockValidityProver {
                 state[3] = BaseElement::ZERO;
                 state[4] = BaseElement::ZERO;
             },
-            |_step, state| {
-                // All zeros for simplicity
+            |step, state| {
+                state[3] = BaseElement::from((step + 1) as u64);
                 state[0] = BaseElement::ZERO;
                 state[1] = BaseElement::ZERO;
                 state[2] = BaseElement::ZERO;
-                state[3] = BaseElement::ZERO;
                 state[4] = BaseElement::ZERO;
             },
         );
@@ -331,8 +329,12 @@ impl BlockValidityProver {
         let prove_time_ms = start.elapsed().as_millis() as u64;
         info!("✅ STARK proof generated in {} ms", prove_time_ms);
 
-        let merkle_root_hash = crate::hash_to_31_bytes(merkle_root_bytes);
-        let validator_pk_hash = crate::hash_to_31_bytes(validator_pk_bytes);
+        let merkle_root_hash: [u8; 31] = merkle_root_bytes
+            .try_into()
+            .map_err(|_| "Merkle root hash must be 31 bytes".to_string())?;
+        let validator_pk_hash: [u8; 31] = validator_pk_bytes
+            .try_into()
+            .map_err(|_| "Validator public key hash must be 31 bytes".to_string())?;
 
         // Serialize a custom block proof envelope with strong metadata and the raw Winterfell proof.
         let mut proof_bytes = Vec::with_capacity(8 + 8 + 8 + 8 + 31 + 31 + proof.to_bytes().len());
@@ -513,6 +515,7 @@ impl BlockValidityVerifier {
             proof.proof_bytes[offset..offset + 31]
                 .try_into()
                 .map_err(|_| "Failed to parse validator pk hash".to_string())?;
+        offset += 31;
 
         if proof_block_index != block_index
             || proof_epoch_id != epoch_id
@@ -539,7 +542,8 @@ impl BlockValidityVerifier {
         );
 
         // Verify the proof using Winterfell
-        let acceptable_options = AcceptableOptions::MinConjecturedSecurity(95);
+        let acceptable_options =
+            AcceptableOptions::OptionSet(vec![BlockValidityProver::new().options]);
         let result = verify::<
             BlockValidityAir,
             winterfell::crypto::hashers::Blake3_256<BaseElement>,

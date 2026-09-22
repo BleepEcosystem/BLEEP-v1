@@ -512,6 +512,5 @@ mod tests {
             }
         };
         assert_eq!(mid1, mid2);
-
     }
 }

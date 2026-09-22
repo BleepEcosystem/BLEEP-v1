@@ -391,13 +391,13 @@ mod tests {
     fn create_test_features(anomaly_score_base: f64) -> ExtractedFeatures {
         ExtractedFeatures {
             features: vec![
-                anomaly_score_base,       // network_health
-                anomaly_score_base,       // validator_downtime
-                anomaly_score_base,       // consensus_latency
-                anomaly_score_base,       // finality_lag
-                anomaly_score_base,       // proposal_success_rate
-                anomaly_score_base,       // stake_concentration
-                anomaly_score_base,       // block_production_rate
+                anomaly_score_base, // network_health
+                anomaly_score_base, // validator_downtime
+                anomaly_score_base, // consensus_latency
+                anomaly_score_base, // finality_lag
+                anomaly_score_base, // proposal_success_rate
+                anomaly_score_base, // stake_concentration
+                anomaly_score_base, // block_production_rate
             ],
             feature_names: vec![
                 "network_health".to_string(),

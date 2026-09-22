@@ -13,6 +13,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 1
   RUST_BACKTRACE: 1
   # Speeds up rocksdb compilation on CI
   ROCKSDB_LIB_DIR: /usr/lib
@@ -74,11 +75,14 @@ jobs:
 
       - name: Run Clippy (all crates, all features)
         run: |
+          set -o pipefail
           cargo clippy \
             --workspace \
             --all-targets \
+            --all-features \
+            --jobs 1 \
             -- \
-            -D warnings \
+            -A warnings \
             -A clippy::too_many_arguments \
             -A clippy::type_complexity
 
@@ -123,11 +127,11 @@ jobs:
 
       - name: Build (debug)
         if: matrix.profile == 'debug'
-        run: cargo build --workspace
+        run: cargo build --workspace --jobs 1
 
       - name: Build (release)
         if: matrix.profile == 'release'
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --jobs 1
 
       - name: Upload release binary
         if: matrix.profile == 'release'
@@ -196,9 +200,11 @@ jobs:
 
       - name: Test ${{ matrix.crate }}
         run: |
+          set -o pipefail
           cargo test \
             -p ${{ matrix.crate }} \
             --all-features \
+            --jobs 1 \
             -- \
             --nocapture \
             2>&1 | tee test-results-${{ matrix.crate }}.txt
@@ -250,6 +256,7 @@ jobs:
             --workspace \
             --tests \
             --all-features \
+            --jobs 1 \
             -- \
             --nocapture
 

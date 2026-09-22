@@ -348,12 +348,21 @@ impl IncidentDetector {
             let active_chain_stall = self
                 .block_history
                 .back()
-                .map(|latest_block| latest_block.epoch.saturating_sub(latest_finality.finality_epoch))
+                .map(|latest_block| {
+                    latest_block
+                        .epoch
+                        .saturating_sub(latest_finality.finality_epoch)
+                })
                 .unwrap_or(0);
             let stale_finality_with_progress = self.block_history.len() >= 5
-                && active_chain_stall >= self.detection_params.finality_delay_threshold.saturating_sub(2);
+                && active_chain_stall
+                    >= self
+                        .detection_params
+                        .finality_delay_threshold
+                        .saturating_sub(2);
 
-            if gap > self.detection_params.finality_delay_threshold || stale_finality_with_progress {
+            if gap > self.detection_params.finality_delay_threshold || stale_finality_with_progress
+            {
                 let evidence = IncidentEvidence::FinalityGap {
                     last_finalized: latest_finality.finalized_epoch,
                     current_epoch,

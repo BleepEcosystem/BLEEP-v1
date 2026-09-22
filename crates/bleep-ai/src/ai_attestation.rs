@@ -79,7 +79,7 @@ pub struct ProofOfInference {
     pub attestation_timestamp: u64,
 
     /// Nonce for replay protection
-        // Determine constraint approval from proof
+    // Determine constraint approval from proof
     pub attestation_nonce: Vec<u8>,
 
     /// Constraints evaluated (what was checked)
@@ -100,7 +100,6 @@ pub struct ProofOfInference {
 pub enum ConstraintOutcome {
     /// All constraints passed
     Approved,
-
 
     /// Some constraints failed - proposal rejected
     Rejected {
