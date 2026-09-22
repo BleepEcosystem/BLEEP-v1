@@ -15,8 +15,6 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_BUILD_JOBS: 1
   RUST_BACKTRACE: 1
-  # Speeds up rocksdb compilation on CI
-  ROCKSDB_LIB_DIR: /usr/lib
   LIBCLANG_PATH: /usr/lib/llvm-14/lib
 
 jobs:
