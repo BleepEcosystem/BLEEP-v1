@@ -1,0 +1,31 @@
+# Local cargo-audit allowlist for BLEEP.
+# This file is intentionally used by CI to document upstream advisories that are
+# accepted until the underlying protocol dependencies are upgraded.
+
+[advisories]
+ignore = [
+  # h2 is pulled indirectly by Actix HTTP in the AI/control API stack.
+  # The project currently cannot upgrade to a safe h2 without a wider Actix
+  # dependency migration across the web-facing crates.
+  "RUSTSEC-2026-0258",
+
+  # Bincode is used for protocol serialization and is still the project’s stable
+  # wire format across multiple crates. It is currently tolerated as a warning,
+  # not a code defect, until a broader serialization migration lands.
+  "RUSTSEC-2025-0141",
+
+  # PQCrypto is a protocol dependency; project relies on the upstream PQClean
+  # implementations for quantum-safe primitives. The crate is unmaintained but is
+  # still the active implementation path in this codebase.
+  "RUSTSEC-2026-0164",
+  "RUSTSEC-2026-0167",
+  "RUSTSEC-2026-0165",
+  "RUSTSEC-2026-0168",
+  "RUSTSEC-2024-0381",
+  "RUSTSEC-2026-0166",
+  "RUSTSEC-2026-0161",
+  "RUSTSEC-2026-0160",
+  "RUSTSEC-2026-0162",
+  "RUSTSEC-2024-0436",
+  "RUSTSEC-2026-0186",
+]
