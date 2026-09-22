@@ -51,6 +51,9 @@ path = "src/bin/bleep_admin.rs"
 name = "bleep"
 path = "src/bin/main.rs"
 [[bin]]
+name = "bleep-validator-keygen"
+path = "src/bin/bleep-validator-keygen.rs"
+[[bin]]
 name = "bleep-executor"
 path = "src/bin/executor.rs"
 
