@@ -738,7 +738,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     run_consensus_engine()?;
 
     // ── Step 16: RPC server ───────────────────────────────────────────────────
-    info!("🔌 [16/16] Starting JSON-RPC server on 0.0.0.0:8545…");
+    let rpc_listen_addr = std::env::var("BLEEP_RPC_LISTEN_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:8545".to_string())
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| format!("Invalid BLEEP_RPC_LISTEN_ADDR: {}", e))?;
+    info!("🔌 [16/16] Starting JSON-RPC server on {}…", rpc_listen_addr);
 
     // Share atomic counters with the relay task (blocks/txs/height)
     let rpc_blocks = Arc::clone(&rpc_state.blocks_produced);
@@ -755,7 +759,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let routes = rpc_routes_with_state(rpc_state);
     let rpc_handle = tokio::spawn(async move {
-        warp::serve(routes).run(([0, 0, 0, 0], 8545)).await;
+        warp::serve(routes).run(rpc_listen_addr).await;
     });
 
     info!("  ✅ RPC: /rpc/health  /rpc/telemetry  /rpc/state/{{address}}  /rpc/proof/{{address}}");

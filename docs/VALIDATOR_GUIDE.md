@@ -145,6 +145,21 @@ curl -o /etc/bleep/testnet-genesis.toml \
 
 ## Step 6 — Start your node
 
+For a local or testnet validator, the repository includes a launcher that
+assigns the node's ports and state directory and connects it to seed peers:
+
+```bash
+./scripts/run-validator.sh \
+  --name validator-1 \
+  --p2p-port 7701 \
+  --rpc-port 8546 \
+  --seeds "<SEED_IP>:7700"
+```
+
+Build automatically before starting with `--build`. Run one validator per
+machine, use a different state directory for additional local validators, and
+allow inbound TCP traffic on the P2P port.
+
 **Option A — systemd (recommended for production):**
 
 ```ini
