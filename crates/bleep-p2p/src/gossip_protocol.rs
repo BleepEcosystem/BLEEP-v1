@@ -13,7 +13,7 @@ use std::time::Duration;
 use lru::LruCache;
 use parking_lot::Mutex;
 use tokio::time::interval;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::message_protocol::MessageProtocol;
 use crate::peer_manager::PeerManager;
@@ -136,6 +136,8 @@ impl GossipProtocol {
             .map(|(id, _)| id)
             .collect();
 
+        let attempted = eager.len();
+        let mut delivered = 0;
         for peer_id in &eager {
             if !self.message_protocol.has_session(peer_id) {
                 warn!(peer = %peer_id, "Gossip: no session, skipping");
@@ -161,10 +163,12 @@ impl GossipProtocol {
                 warn!(peer = %peer_id, error = %e, "Gossip: send failed");
                 self.peer_manager.record_failure(peer_id);
             } else {
+                delivered += 1;
                 self.peer_manager.record_success(peer_id);
                 debug!(peer = %peer_id, "Gossip: eagerly pushed message");
             }
         }
+        info!(attempted, delivered, "Gossip: message delivery complete");
     }
 
     /// Background loop: drain the pending queue and spread each message.

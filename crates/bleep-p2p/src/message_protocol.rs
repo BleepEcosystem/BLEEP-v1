@@ -59,6 +59,7 @@ struct HandshakeHello {
     ed25519_pubkey: Vec<u8>,
     sphincs_pubkey: Vec<u8>,
     kyber_pubkey: Vec<u8>,
+    listen_addr: SocketAddr,
     challenge: Vec<u8>,
     signature: Vec<u8>,
 }
@@ -117,6 +118,7 @@ pub struct MessageProtocol {
     local_sphincs: Arc<SphincsKeypair>,
     local_kyber: Arc<KyberKeypair>,
     local_id: NodeId,
+    advertised_addr: std::sync::RwLock<SocketAddr>,
     /// Peer NodeId → established session key.
     sessions: DashMap<NodeId, Session>,
     /// Anti-replay cache.
@@ -140,12 +142,20 @@ impl MessageProtocol {
             local_sphincs: Arc::new(local_sphincs),
             local_kyber: Arc::new(local_kyber),
             local_id,
+            advertised_addr: std::sync::RwLock::new(SocketAddr::from(([0, 0, 0, 0], 0))),
             sessions: DashMap::new(),
             nonce_cache: Arc::new(Mutex::new(NonceCache::new())),
             inbound_tx: tx,
             peer_manager,
         });
         (proto, rx)
+    }
+
+    pub fn set_advertised_addr(&self, addr: SocketAddr) {
+        *self
+            .advertised_addr
+            .write()
+            .expect("advertised address lock poisoned") = addr;
     }
 
     // ── SESSION ESTABLISHMENT ─────────────────────────────────────────────────
@@ -202,6 +212,10 @@ impl MessageProtocol {
             ed25519_pubkey: self.local_identity.public_key_bytes(),
             sphincs_pubkey: self.local_sphincs.public_key_bytes(),
             kyber_pubkey: self.local_kyber.public_key.0.clone(),
+            listen_addr: *self
+                .advertised_addr
+                .read()
+                .expect("advertised address lock poisoned"),
             challenge: challenge.clone(),
             signature: self.local_sphincs.sign(&challenge),
         }
@@ -521,11 +535,21 @@ impl MessageProtocol {
             WireFrame::Message(msg) => msg,
             WireFrame::Handshake(hello) => {
                 Self::verify_hello(&hello)?;
+                if hello.listen_addr.port() == 0 {
+                    return Err(P2PError::AuthenticationFailed);
+                }
+                let listen_addr = if hello.listen_addr.ip().is_unspecified() {
+                    SocketAddr::new(peer_addr.ip(), hello.listen_addr.port())
+                } else if hello.listen_addr.ip() != peer_addr.ip() {
+                    return Err(P2PError::AuthenticationFailed);
+                } else {
+                    hello.listen_addr
+                };
                 if self.peer_manager.get_peer(&hello.node_id).is_none() {
                     self.peer_manager
                         .add_peer(
                             hello.node_id.clone(),
-                            peer_addr,
+                            listen_addr,
                             hello.ed25519_pubkey,
                             hello.sphincs_pubkey,
                             &hello.challenge,

@@ -129,6 +129,7 @@ impl P2PNode {
             identity.kyber_keypair.clone(),
             peer_manager.clone(),
         );
+        message_protocol.set_advertised_addr(config.listen_addr);
 
         // Gossip
         let gossip = GossipProtocol::new(peer_manager.clone(), message_protocol.clone());
