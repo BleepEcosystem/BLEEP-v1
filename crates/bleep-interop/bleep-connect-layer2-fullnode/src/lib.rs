@@ -530,12 +530,7 @@ mod tests {
             ClientImplementation::Erigon,
         ] {
             let kp = ClassicalKeyPair::generate();
-            let node = VerifierNode::new(
-                kp.public_key_bytes(),
-                client,
-                endpoint.clone(),
-                true,
-            );
+            let node = VerifierNode::new(kp.public_key_bytes(), client, endpoint.clone(), true);
             layer2.add_verifier_node(node, kp).await;
         }
         layer2

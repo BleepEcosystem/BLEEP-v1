@@ -385,8 +385,8 @@ impl CoordinatorManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
     use crate::shard_registry::EpochId;
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_coordinator_creation() {

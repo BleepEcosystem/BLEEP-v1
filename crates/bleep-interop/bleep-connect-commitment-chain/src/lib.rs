@@ -481,7 +481,10 @@ mod tests {
 
         let storage = ChainStorage::open(&path).unwrap();
         let lock_path = path.join("LOCK");
-        assert!(lock_path.exists(), "expected RocksDB lock file to be created");
+        assert!(
+            lock_path.exists(),
+            "expected RocksDB lock file to be created"
+        );
         drop(storage);
 
         std::fs::write(&lock_path, b"stale-lock").unwrap();

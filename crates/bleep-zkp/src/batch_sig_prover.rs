@@ -16,11 +16,38 @@
 //! ## Integration with bleep-consensus
 //!
 //! ```rust
+//! use bleep_zkp::{
+//!     batch_sig_prover::ParallelBatchSigProver,
+//!     extended_air::{bleep_proof_options, ExtendedBlockPublicInputs},
+//! };
+//!
+//! let blocks_per_epoch = 100u64;
+//! let sk_seed = [0x42u8; 32];
+//! let sigs = vec![vec![0u8; 49_856]; 4];
+//! let pub_inputs = ExtendedBlockPublicInputs {
+//!     block_index: 42,
+//!     epoch_id: 0,
+//!     tx_count: 4,
+//!     blocks_per_epoch,
+//!     merkle_root_hash: [0xAA; 32],
+//!     validator_pk_hash: [0xBB; 32],
+//!     sk_seed_hash: [0u8; 32],
+//!     block_hash: [0xCC; 32],
+//!     smt_root: [0xDD; 32],
+//!     sig_commitment_root: [0u8; 32],
+//!     sig_count: 4,
+//!     batch_seq_id: 1,
+//! };
+//!
 //! let prover = ParallelBatchSigProver::new(blocks_per_epoch, bleep_proof_options());
-//! let result = prover.prove_block(pub_inputs, &raw_signatures, &sk_seed)?;
+//! let result = prover
+//!     .prove_block(pub_inputs, &sigs, &sk_seed)
+//!     .expect("proof generation should succeed");
+//!
 //! // result.proof             → include in block header
 //! // result.sig_commitment_root → include in block header + announce via SAL
 //! // result.sig_hashes        → broadcast via SigCommitmentAnnouncement
+//! let _ = result.sig_commitment_root;
 //! ```
 
 use sha3::{Digest, Sha3_256};
@@ -474,6 +501,7 @@ fn field_pair_to_bytes(hi: BaseElement, lo: BaseElement) -> [u8; 32] {
 mod tests {
     use super::*;
     use crate::extended_air::bleep_proof_options;
+    use winterfell::Trace;
 
     /// Build a minimal, deterministic set of public inputs for testing.
     fn test_pub_inputs(tx_count: u32) -> ExtendedBlockPublicInputs {

@@ -71,12 +71,20 @@ impl P2PNodeConfig {
     pub fn from_env() -> Result<Self, String> {
         let mut config = Self::default();
         if let Ok(addr) = std::env::var("BLEEP_P2P_LISTEN_ADDR") {
-            config.listen_addr = addr.parse().map_err(|e| format!("invalid BLEEP_P2P_LISTEN_ADDR: {e}"))?;
+            config.listen_addr = addr
+                .parse()
+                .map_err(|e| format!("invalid BLEEP_P2P_LISTEN_ADDR: {e}"))?;
         }
         if let Ok(seeds) = std::env::var("BLEEP_P2P_SEEDS") {
-            for seed in seeds.split(',').map(str::trim).filter(|seed| !seed.is_empty()) {
+            for seed in seeds
+                .split(',')
+                .map(str::trim)
+                .filter(|seed| !seed.is_empty())
+            {
                 config.bootstrap_peers.push(BootstrapPeer {
-                    addr: seed.parse().map_err(|e| format!("invalid BLEEP_P2P_SEEDS entry '{seed}': {e}"))?,
+                    addr: seed
+                        .parse()
+                        .map_err(|e| format!("invalid BLEEP_P2P_SEEDS entry '{seed}': {e}"))?,
                     ed25519_pubkey: vec![],
                     sphincs_pubkey: vec![],
                 });
@@ -116,8 +124,10 @@ impl P2PNode {
             PeerManager::new(node_id.clone(), config.peer_manager_config.clone());
 
         let (message_protocol, inbound_rx) = MessageProtocol::new(
-            identity.ed_keypair.clone(), identity.sphincs_keypair.clone(),
-            identity.kyber_keypair.clone(), peer_manager.clone(),
+            identity.ed_keypair.clone(),
+            identity.sphincs_keypair.clone(),
+            identity.kyber_keypair.clone(),
+            peer_manager.clone(),
         );
 
         // Gossip
@@ -200,7 +210,9 @@ impl P2PNode {
                                 }
                                 info!(addr = %seed.addr, peer = %peer, "Connected to bootstrap peer");
                             }
-                            Err(error) => warn!(addr = %seed.addr, %error, "Bootstrap peer connection failed; will retry"),
+                            Err(error) => {
+                                warn!(addr = %seed.addr, %error, "Bootstrap peer connection failed; will retry")
+                            }
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -403,10 +415,7 @@ mod tests {
         .expect("bootstrap peer should be admitted on the accepting node");
 
         assert_eq!(node_b.peer_count(), 1);
-        let closest = node_a
-            .peer_manager
-            .find_closest(&node_b.node_id, 1)
-            .await;
+        let closest = node_a.peer_manager.find_closest(&node_b.node_id, 1).await;
         assert_eq!(closest.first().map(|peer| &peer.id), Some(&node_b.node_id));
 
         handle_a.shutdown().await;

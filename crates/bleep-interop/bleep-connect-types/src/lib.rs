@@ -206,11 +206,6 @@ impl AssetId {
             asset_type: AssetType::ERC20,
         }
     }
-
-    #[allow(clippy::inherent_to_string)]
-    pub fn to_string(&self) -> String {
-        format!("{self}")
-    }
 }
 
 impl fmt::Display for AssetId {

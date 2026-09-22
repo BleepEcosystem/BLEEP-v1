@@ -302,7 +302,12 @@ mod phase4_ai_integration_tests {
         let detector = IncidentDetector::new(DetectionParams::default());
 
         let controller = RecoveryController::new(
-            vec!["validator-1".to_string(), "validator-2".to_string(), "validator-3".to_string(), "validator-4".to_string()],
+            vec![
+                "validator-1".to_string(),
+                "validator-2".to_string(),
+                "validator-3".to_string(),
+                "validator-4".to_string(),
+            ],
             ProtocolParams::default(),
             RecoveryPreconditions::default(),
         );

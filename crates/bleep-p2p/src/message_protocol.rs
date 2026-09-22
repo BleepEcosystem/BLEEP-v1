@@ -22,8 +22,8 @@ use tracing::{debug, error, info, warn};
 use crate::error::{P2PError, P2PResult};
 use crate::peer_manager::PeerManager;
 use crate::quantum_crypto::{
-    ed25519_verify, kyber_decapsulate, kyber_encapsulate, Ed25519Keypair, KyberKeypair,
-    SphincsKeypair, SessionKey,
+    ed25519_verify, kyber_decapsulate, kyber_encapsulate, Ed25519Keypair, KyberKeypair, SessionKey,
+    SphincsKeypair,
 };
 use crate::types::{unix_now, MessageType, NodeId, SecureMessage};
 
@@ -66,8 +66,13 @@ struct HandshakeHello {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum WireFrame {
     Handshake(HandshakeHello),
-    SessionInit { peer_id: NodeId, ciphertext: Vec<u8> },
-    SessionAck { peer_id: NodeId },
+    SessionInit {
+        peer_id: NodeId,
+        ciphertext: Vec<u8>,
+    },
+    SessionAck {
+        peer_id: NodeId,
+    },
     Message(SecureMessage),
 }
 
@@ -206,7 +211,10 @@ impl MessageProtocol {
         let encoded = bincode::serde::encode_to_vec(frame, bincode::config::standard())
             .map_err(|e| P2PError::Serialization(e.to_string()))?;
         if encoded.len() > MAX_FRAME_BYTES {
-            return Err(P2PError::Serialization(format!("Frame too large: {} bytes", encoded.len())));
+            return Err(P2PError::Serialization(format!(
+                "Frame too large: {} bytes",
+                encoded.len()
+            )));
         }
         let mut buf = BytesMut::with_capacity(4 + encoded.len());
         buf.put_u32(encoded.len() as u32);
@@ -217,15 +225,23 @@ impl MessageProtocol {
     async fn decode_wire(stream: &mut TcpStream) -> P2PResult<WireFrame> {
         let mut len_buf = [0u8; 4];
         timeout(READ_TIMEOUT, stream.read_exact(&mut len_buf))
-            .await.map_err(|_| P2PError::ConnectionTimeout { addr: "unknown".into() })?
+            .await
+            .map_err(|_| P2PError::ConnectionTimeout {
+                addr: "unknown".into(),
+            })?
             .map_err(P2PError::Io)?;
         let frame_len = u32::from_be_bytes(len_buf) as usize;
         if frame_len > MAX_FRAME_BYTES {
-            return Err(P2PError::Serialization(format!("Frame too large: {frame_len} bytes")));
+            return Err(P2PError::Serialization(format!(
+                "Frame too large: {frame_len} bytes"
+            )));
         }
         let mut payload = vec![0u8; frame_len];
         timeout(READ_TIMEOUT, stream.read_exact(&mut payload))
-            .await.map_err(|_| P2PError::ConnectionTimeout { addr: "unknown".into() })?
+            .await
+            .map_err(|_| P2PError::ConnectionTimeout {
+                addr: "unknown".into(),
+            })?
             .map_err(P2PError::Io)?;
         bincode::serde::decode_from_slice::<WireFrame, _>(&payload, bincode::config::standard())
             .map(|(v, _)| v)
@@ -243,12 +259,19 @@ impl MessageProtocol {
         if hello.version != 1 || NodeId::from_bytes(&hello.ed25519_pubkey) != hello.node_id {
             return Err(P2PError::AuthenticationFailed);
         }
-        crate::quantum_crypto::sphincs_verify(&hello.challenge, &hello.signature, &hello.sphincs_pubkey)
+        crate::quantum_crypto::sphincs_verify(
+            &hello.challenge,
+            &hello.signature,
+            &hello.sphincs_pubkey,
+        )
     }
 
     pub(crate) async fn establish_outbound(&self, addr: SocketAddr) -> P2PResult<NodeId> {
         let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-            .await.map_err(|_| P2PError::ConnectionTimeout { addr: addr.to_string() })?
+            .await
+            .map_err(|_| P2PError::ConnectionTimeout {
+                addr: addr.to_string(),
+            })?
             .map_err(P2PError::Io)?;
         Self::write_wire(&mut stream, &WireFrame::Handshake(self.local_handshake())).await?;
         let remote = match Self::decode_wire(&mut stream).await? {
@@ -257,15 +280,26 @@ impl MessageProtocol {
         };
         Self::verify_hello(&remote)?;
         if self.peer_manager.get_peer(&remote.node_id).is_none() {
-            self.peer_manager.add_peer(
-                remote.node_id.clone(), addr, remote.ed25519_pubkey, remote.sphincs_pubkey,
-                &remote.challenge, &remote.signature,
-            ).await?;
+            self.peer_manager
+                .add_peer(
+                    remote.node_id.clone(),
+                    addr,
+                    remote.ed25519_pubkey,
+                    remote.sphincs_pubkey,
+                    &remote.challenge,
+                    &remote.signature,
+                )
+                .await?;
         }
         let ciphertext = self.initiate_session(&remote.node_id, &remote.kyber_pubkey)?;
-        Self::write_wire(&mut stream, &WireFrame::SessionInit {
-            peer_id: self.local_id.clone(), ciphertext,
-        }).await?;
+        Self::write_wire(
+            &mut stream,
+            &WireFrame::SessionInit {
+                peer_id: self.local_id.clone(),
+                ciphertext,
+            },
+        )
+        .await?;
         match Self::decode_wire(&mut stream).await? {
             WireFrame::SessionAck { peer_id } if peer_id == remote.node_id => Ok(peer_id),
             _ => Err(P2PError::AuthenticationFailed),
@@ -482,28 +516,40 @@ impl MessageProtocol {
         }
     }
 
-    async fn handle_incoming(
-        &self,
-        mut stream: TcpStream,
-        peer_addr: SocketAddr,
-    ) -> P2PResult<()> {
+    async fn handle_incoming(&self, mut stream: TcpStream, peer_addr: SocketAddr) -> P2PResult<()> {
         let msg = match Self::decode_wire(&mut stream).await? {
             WireFrame::Message(msg) => msg,
             WireFrame::Handshake(hello) => {
                 Self::verify_hello(&hello)?;
                 if self.peer_manager.get_peer(&hello.node_id).is_none() {
-                    self.peer_manager.add_peer(
-                        hello.node_id.clone(), peer_addr, hello.ed25519_pubkey, hello.sphincs_pubkey,
-                        &hello.challenge, &hello.signature,
-                    ).await?;
+                    self.peer_manager
+                        .add_peer(
+                            hello.node_id.clone(),
+                            peer_addr,
+                            hello.ed25519_pubkey,
+                            hello.sphincs_pubkey,
+                            &hello.challenge,
+                            &hello.signature,
+                        )
+                        .await?;
                 }
-                Self::write_wire(&mut stream, &WireFrame::Handshake(self.local_handshake())).await?;
+                Self::write_wire(&mut stream, &WireFrame::Handshake(self.local_handshake()))
+                    .await?;
                 let (peer_id, ciphertext) = match Self::decode_wire(&mut stream).await? {
-                    WireFrame::SessionInit { peer_id, ciphertext } if peer_id == hello.node_id => (peer_id, ciphertext),
+                    WireFrame::SessionInit {
+                        peer_id,
+                        ciphertext,
+                    } if peer_id == hello.node_id => (peer_id, ciphertext),
                     _ => return Err(P2PError::AuthenticationFailed),
                 };
                 self.accept_session(&peer_id, &ciphertext)?;
-                Self::write_wire(&mut stream, &WireFrame::SessionAck { peer_id: self.local_id.clone() }).await?;
+                Self::write_wire(
+                    &mut stream,
+                    &WireFrame::SessionAck {
+                        peer_id: self.local_id.clone(),
+                    },
+                )
+                .await?;
                 return Ok(());
             }
             _ => return Err(P2PError::AuthenticationFailed),
@@ -541,7 +587,6 @@ impl MessageProtocol {
 
         let _ = self.inbound_tx.send((sender_id, msg)).await;
         Ok(())
-        
     }
 }
 

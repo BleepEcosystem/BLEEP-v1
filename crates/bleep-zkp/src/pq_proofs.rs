@@ -526,16 +526,10 @@ mod tests {
 
     #[test]
     fn test_proof_serialization() {
-        let proof = BlockValidityProof::prove(
-            1,
-            0,
-            3,
-            &[0xAAu8; 31],
-            &[0xBBu8; 31],
-            &[0xCCu8; 32],
-            b"test_secret_key",
-        )
-        .unwrap();
+        let (_pk, sk) = generate_tx_keypair();
+        let proof =
+            BlockValidityProof::prove(1, 0, 3, &[0xAAu8; 31], &[0xBBu8; 31], &[0xCCu8; 32], &sk)
+                .unwrap();
 
         let serialized = proof.to_bytes().expect("Serialization failed");
         let deserialized =
