@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn each_shard_has_validators_assigned() {
         let coord = ShardCoordinator::new();
-        for (_, shard) in &coord.shards {
+        for shard in coord.shards.values() {
             assert!(
                 !shard.validators.is_empty(),
                 "every shard must have validators"

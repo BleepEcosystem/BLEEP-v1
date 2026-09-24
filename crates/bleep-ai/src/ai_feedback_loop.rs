@@ -74,6 +74,12 @@ pub struct AccuracyMetrics {
     pub false_negative_rate: f32,
 }
 
+impl Default for AccuracyMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AccuracyMetrics {
     /// Create new metrics
     pub fn new() -> Self {
@@ -157,6 +163,12 @@ pub struct BucketStats {
 
     /// Expected accuracy (= range midpoint)
     pub expected_accuracy: f32,
+}
+
+impl Default for ConfidenceCalibration {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConfidenceCalibration {

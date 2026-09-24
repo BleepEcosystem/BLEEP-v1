@@ -100,17 +100,19 @@ impl WasmEngineAdapter {
 
         let entry_points = ["execute", "call", "main", "_start", "invoke"];
         let mut output = Vec::new();
-        let mut success = false;
+        let mut success = true;
+        let mut attempted_entry = false;
         let mut last_err: Option<String> = None;
 
         for entry in &entry_points {
             if let Ok(func) = instance.exports.get_function(entry) {
+            attempted_entry = true;
                 let args = vec![Value::I32(calldata.len() as i32)];
                 match func.call(&mut store, &args) {
                     Ok(results) => {
                         success = true;
                         if let Some(Value::I32(v)) = results.first() {
-                            output = (*v as i32).to_le_bytes().to_vec();
+                            output = { *v }.to_le_bytes().to_vec();
                         }
                         break;
                     }
@@ -122,18 +124,10 @@ impl WasmEngineAdapter {
             }
         }
 
-        if !success && last_err.is_some() {
-            // All entry points failed — return error only if we actually tried one
-            if entry_points
-                .iter()
-                .any(|ep| instance.exports.get_function(ep).is_ok())
-            {
-                return Err(VmError::ExecutionFailed(
-                    last_err.unwrap_or_else(|| "WASM execution failed".into()),
-                ));
-            }
-            // No matching export found — passive execution succeeds
-            success = true;
+        if attempted_entry && !success {
+            return Err(VmError::ExecutionFailed(
+                last_err.unwrap_or_else(|| "WASM execution failed".into()),
+            ));
         }
 
         let collected = log_store.read().clone();

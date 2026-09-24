@@ -505,6 +505,6 @@ mod tests {
         let (pm, mut rx) = make_test_pm();
         let id = add_test_peer(&pm, 30).await;
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event, PeerEvent::Added(_)));
+        assert!(matches!(event, PeerEvent::Added(event_id) if event_id == id));
     }
 }

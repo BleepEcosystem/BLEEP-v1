@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::ai_adaptive_logic::{AIAdaptiveConsensus, Validator};
     use crate::ConsensusMode;

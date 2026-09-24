@@ -63,8 +63,8 @@ impl Transaction {
         let mut h = Sha3_256::new();
         h.update(self.sender.as_bytes());
         h.update(self.receiver.as_bytes());
-        h.update(&self.amount.to_le_bytes());
-        h.update(&self.timestamp.to_le_bytes());
+        h.update(self.amount.to_le_bytes());
+        h.update(self.timestamp.to_le_bytes());
         h.finalize().into()
     }
 
@@ -225,6 +225,7 @@ impl Block {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_consensus_and_sharding(
         index: u64,
         transactions: Vec<Transaction>,
@@ -322,7 +323,7 @@ impl Block {
         ));
         // Bind sig_commitment_root into the block hash so the SPHINCS+ signature
         // commits to the SAL root. Non-zero only for blocks with real tx signatures.
-        h.update(&self.sig_commitment_root);
+        h.update(self.sig_commitment_root);
         hex::encode(h.finalize())
     }
 
@@ -694,7 +695,7 @@ pub fn derive_block_keypair(seed: &[u8]) -> Result<([u8; 32], [u8; 32]), String>
     sk.copy_from_slice(&seed[..32]);
 
     let mut h = Sha3_256::new();
-    h.update(&sk);
+    h.update(sk);
     let pk_bytes = h.finalize();
     let mut pk = [0u8; 32];
     pk.copy_from_slice(&pk_bytes);
@@ -758,8 +759,8 @@ mod tests {
         h2.update(b.compute_hash().as_bytes());
         let msg: [u8; 32] = h2.finalize().into();
         let mut h3 = Sha3_256::new();
-        h3.update(&msg);
-        h3.update(&sk);
+        h3.update(msg);
+        h3.update(sk);
         let prf: [u8; 32] = h3.finalize().into();
         let mut sig = Vec::with_capacity(96);
         sig.extend_from_slice(&pk);

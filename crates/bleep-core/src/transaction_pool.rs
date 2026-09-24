@@ -149,7 +149,7 @@ impl TransactionPool {
 
         eprintln!(
             "[DEBUG TxPool] Payload hash (32 bytes): {}",
-            hex::encode(&payload)
+            hex::encode(payload)
         );
 
         if !bleep_crypto::tx_signer::verify_tx_signature(&payload, sig_bytes, pk_bytes) {
@@ -176,7 +176,7 @@ impl TransactionPool {
             transaction.amount,
             transaction.timestamp,
         );
-        let tx_hash: [u8; 32] = Sha256::digest(&payload).into();
+        let tx_hash: [u8; 32] = Sha256::digest(payload).into();
 
         {
             let mut seen = self.seen_hashes.lock().await;

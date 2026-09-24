@@ -132,7 +132,7 @@ impl ChainAdapter for EthereumAdapter {
         if execution_proof.len() < 68 {
             return Ok(false);
         }
-        if &execution_proof[..4] != &self.fulfill_selector {
+        if execution_proof[..4] != self.fulfill_selector {
             debug!("Selector mismatch in execution proof");
             return Ok(false);
         }
@@ -163,6 +163,12 @@ impl ChainAdapter for EthereumAdapter {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct BitcoinAdapter;
+
+impl Default for BitcoinAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl BitcoinAdapter {
     pub fn new() -> Self {
@@ -223,7 +229,7 @@ impl ChainAdapter for BitcoinAdapter {
         let script = &execution_proof[3..3 + script_len];
         let intent_id = intent.calculate_id();
         // Check the 32-byte hash is embedded in the script at offset 2
-        if script.len() >= 35 && &script[2..34] == &intent_id {
+        if script.len() >= 35 && script[2..34] == intent_id {
             return Ok(true);
         }
         Ok(false)
@@ -245,6 +251,12 @@ impl ChainAdapter for BitcoinAdapter {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct SolanaAdapter;
+
+impl Default for SolanaAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SolanaAdapter {
     pub fn new() -> Self {
@@ -294,11 +306,11 @@ impl ChainAdapter for SolanaAdapter {
             return Ok(false);
         }
         let disc_hash = sha256(b"global:fulfill_intent");
-        if &execution_proof[..8] != &disc_hash[..8] {
+        if execution_proof[..8] != disc_hash[..8] {
             return Ok(false);
         }
         let intent_id = intent.calculate_id();
-        Ok(&execution_proof[8..40] == &intent_id)
+        Ok(execution_proof[8..40] == intent_id)
     }
 
     fn get_finality_blocks(&self) -> u64 {
@@ -380,6 +392,12 @@ impl ChainAdapter for CosmosAdapter {
 
 pub struct BleepAdapter;
 
+impl Default for BleepAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BleepAdapter {
     pub fn new() -> Self {
         Self
@@ -413,7 +431,7 @@ impl ChainAdapter for BleepAdapter {
             return Ok(false);
         }
         let intent_id = intent.calculate_id();
-        Ok(&execution_proof[4..36] == &intent_id)
+        Ok(execution_proof[4..36] == intent_id)
     }
 
     fn get_finality_blocks(&self) -> u64 {

@@ -148,7 +148,7 @@ impl ProposalStore {
         }
 
         // Prevent double-voting
-        let mut votes = self.votes.entry(id).or_insert_with(Vec::new);
+        let mut votes = self.votes.entry(id).or_default();
         if votes.iter().any(|v| v.voter == vote.voter) {
             return Err(BleepConnectError::InternalError("Already voted".into()));
         }
@@ -184,6 +184,12 @@ impl Default for ProposalStore {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct ArbitrationEngine;
+
+impl Default for ArbitrationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ArbitrationEngine {
     pub fn new() -> Self {
@@ -285,6 +291,12 @@ impl ArbitrationEngine {
 pub struct EmergencyController {
     is_paused: Arc<RwLock<bool>>,
     pause_reason: Arc<RwLock<Option<String>>>,
+}
+
+impl Default for EmergencyController {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EmergencyController {

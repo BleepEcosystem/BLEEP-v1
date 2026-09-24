@@ -74,6 +74,12 @@ pub struct ValidatorBindingRegistry {
     by_validator: HashMap<String, String>,
 }
 
+impl Default for ValidatorBindingRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ValidatorBindingRegistry {
     pub fn new() -> Self {
         Self {

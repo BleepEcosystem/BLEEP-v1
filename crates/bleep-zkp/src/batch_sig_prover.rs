@@ -296,8 +296,12 @@ impl ParallelBatchSigProver {
                 state[COL_BLOCK_HASH_LO] = f_block_hash_lo;
 
                 // Reserved block validity cols 14–47: zero
-                for i in COL_BLOCK_RESERVED_START..=COL_BLOCK_RESERVED_END {
-                    state[i] = BaseElement::ZERO;
+                for value in state
+                    .iter_mut()
+                    .take(COL_BLOCK_RESERVED_END + 1)
+                    .skip(COL_BLOCK_RESERVED_START)
+                {
+                    *value = BaseElement::ZERO;
                 }
 
                 // Sig commitment state (cols 48–56)
@@ -319,8 +323,8 @@ impl ParallelBatchSigProver {
                 }
 
                 // Padding / reserved cols 57–67: zero
-                for i in 57..TRACE_WIDTH {
-                    state[i] = BaseElement::ZERO;
+                for value in state.iter_mut().take(TRACE_WIDTH).skip(57) {
+                    *value = BaseElement::ZERO;
                 }
             },
             // ── update: transition from row `step` → row `step + 1` ───────

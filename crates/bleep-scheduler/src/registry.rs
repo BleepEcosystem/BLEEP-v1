@@ -147,6 +147,12 @@ pub struct TaskRegistry {
     tasks: DashMap<TaskId, RegisteredTask>,
 }
 
+impl Default for TaskRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskRegistry {
     pub fn new() -> Self {
         Self {
@@ -193,6 +199,10 @@ impl TaskRegistry {
         self.tasks.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
     /// Interval tasks due to run at `now`.
     pub fn due_interval(&self, now: chrono::DateTime<chrono::Utc>) -> Vec<RegisteredTask> {
         self.tasks
@@ -223,8 +233,8 @@ impl TaskRegistry {
                     return false;
                 }
                 match t.trigger {
-                    Trigger::EveryNBlocks { every_n_blocks } => height % every_n_blocks == 0,
-                    Trigger::EpochBoundary { epoch_len } => height % epoch_len == 0,
+                    Trigger::EveryNBlocks { every_n_blocks } => height.is_multiple_of(every_n_blocks),
+                    Trigger::EpochBoundary { epoch_len } => height.is_multiple_of(epoch_len),
                     _ => false,
                 }
             })

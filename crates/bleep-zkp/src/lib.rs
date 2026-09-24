@@ -127,6 +127,12 @@ impl BlockValidityCircuit {
 /// Block-level STARK prover.
 pub struct BlockProver;
 
+impl Default for BlockProver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockProver {
     /// Create a new block prover instance.
     pub fn new() -> Self {
@@ -166,6 +172,12 @@ impl BlockProver {
 
 /// Block-level STARK verifier.
 pub struct BlockVerifier;
+
+impl Default for BlockVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl BlockVerifier {
     /// Create a new block verifier instance.
@@ -428,9 +440,9 @@ impl BatchProver {
         let mut hasher = Sha3_256::new();
 
         for tx in batch_txs {
-            hasher.update(&tx.nonce.to_le_bytes());
-            hasher.update(&tx.amount.to_le_bytes());
-            hasher.update(&tx.gas_limit.to_le_bytes());
+            hasher.update(tx.nonce.to_le_bytes());
+            hasher.update(tx.amount.to_le_bytes());
+            hasher.update(tx.gas_limit.to_le_bytes());
         }
 
         let batch_digest: [u8; 32] = hasher.finalize().into();

@@ -135,6 +135,7 @@ impl BlockProducer {
     ///
     /// Returns `(producer, receiver)`. Subscribe the receiver in `main.rs` for
     /// both the scheduler relay and the `GossipBridge`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         validator_id: String,
         _my_stake: u64,
@@ -158,6 +159,7 @@ impl BlockProducer {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_sig_availability(
         validator_id: String,
         _my_stake: u64,
@@ -398,7 +400,7 @@ impl BlockProducer {
                     let new_bal = if update.delta >= 0 {
                         current.saturating_add(update.delta as u128)
                     } else {
-                        current.saturating_sub(update.delta.unsigned_abs() as u128)
+                        current.saturating_sub(update.delta.unsigned_abs())
                     };
                     state.set_balance(&addr, new_bal);
                 }
@@ -459,7 +461,7 @@ impl BlockProducer {
             self.config.protocol_version,
             hex::encode(&state_root[..16]), // shard_registry_root = first 16 bytes of state root
             0,                              // shard_id: main chain
-            hex::encode(&state_root),       // shard_state_root = full state root
+            hex::encode(state_root),       // shard_state_root = full state root
         );
 
         // ── 7a: Compute sig_commitment_root from raw signatures ───────────────

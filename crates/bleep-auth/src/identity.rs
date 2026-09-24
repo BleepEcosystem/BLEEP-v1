@@ -76,6 +76,12 @@ pub struct IdentityRegistry {
     dapp_handles: HashMap<String, String>,
 }
 
+impl Default for IdentityRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IdentityRegistry {
     pub fn new() -> Self {
         Self {

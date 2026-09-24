@@ -1,4 +1,5 @@
 pub struct BLEEPZKPModule;
+
 impl BLEEPZKPModule {
     pub fn new() -> Self {
         Self
@@ -8,5 +9,11 @@ impl BLEEPZKPModule {
     }
     pub fn verify_proof(&self, _proof: &[u8], _data: &[u8]) -> Result<bool, String> {
         Ok(true)
+    }
+}
+
+impl Default for BLEEPZKPModule {
+    fn default() -> Self {
+        Self::new()
     }
 }

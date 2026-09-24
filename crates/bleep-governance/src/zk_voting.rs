@@ -381,7 +381,7 @@ impl ZKVotingEngine {
         let voters = self
             .proposal_voters
             .entry(ballot.proposal_id.clone())
-            .or_insert_with(HashSet::new);
+            .or_default();
 
         if voters.contains(commitment_hash) {
             return Err(ZKVotingError::DoubleVoteDetected);
@@ -400,7 +400,7 @@ impl ZKVotingEngine {
         let ballots = self
             .proposal_ballots
             .entry(ballot.proposal_id.clone())
-            .or_insert_with(Vec::new);
+            .or_default();
         ballots.push(ballot);
 
         info!("Vote cast and recorded in ZK voting engine");

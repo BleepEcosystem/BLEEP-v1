@@ -127,7 +127,7 @@ impl DecisionType {
             }
         }
         let hash = hasher.finalize();
-        hex::encode(&hash)
+        hex::encode(hash)
     }
 
     /// Serialize for signing
@@ -405,6 +405,12 @@ pub struct DecisionBatch {
     merkle_tree: Option<MerkleTree>,
 }
 
+impl Default for DecisionBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DecisionBatch {
     /// Create a new decision batch
     pub fn new() -> Self {
@@ -461,6 +467,10 @@ impl DecisionBatch {
     /// Get number of decisions
     pub fn len(&self) -> usize {
         self.decisions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.decisions.is_empty()
     }
 }
 

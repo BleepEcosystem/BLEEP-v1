@@ -88,6 +88,12 @@ pub struct AuditLog {
     head_hash: String,
 }
 
+impl Default for AuditLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuditLog {
     const GENESIS_HASH: &'static str =
         "0000000000000000000000000000000000000000000000000000000000000000";

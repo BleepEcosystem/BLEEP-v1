@@ -128,7 +128,7 @@ impl ConstitutionalConstraint {
     /// Compute SHA256 hash of constraint
     fn compute_hash(&self) -> Result<Vec<u8>, ConstitutionError> {
         let serialized = bincode::serde::encode_to_vec(
-            &(
+            (
                 &self.id,
                 &self.description,
                 &self.scope,
@@ -473,7 +473,7 @@ impl BLEEPConstitution {
     /// Compute cryptographic hash of entire constitution
     fn compute_hash(&self) -> Result<Vec<u8>, ConstitutionError> {
         let serialized = bincode::serde::encode_to_vec(
-            &(
+            (
                 &self.version,
                 &self.genesis_epoch,
                 &self.constraints,

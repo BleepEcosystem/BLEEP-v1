@@ -360,6 +360,7 @@ mod tests {
         let b_sphincs_pk = node_b.identity.sphincs_keypair.public_key.0.clone();
         let challenge = b"handshake-test-challenge";
         let sig = node_b.make_identity_proof(challenge).unwrap();
+        let expected_peer_id = NodeId::from_bytes(&b_ed_pk);
 
         let peer_id = node_a
             .connect_peer(
@@ -372,6 +373,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(peer_id, expected_peer_id);
         assert_eq!(node_a.peer_count(), 1);
         handle_a.shutdown().await;
         handle_b.shutdown().await;
@@ -434,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_accepts_tcp_connections() {
-        let (node, handle) = start_test_node(17705).await;
+        let (_node, handle) = start_test_node(17705).await;
         // Just verify the port is bound
         let result = timeout(
             Duration::from_millis(200),

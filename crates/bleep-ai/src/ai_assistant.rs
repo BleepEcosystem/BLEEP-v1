@@ -46,6 +46,7 @@ pub struct BLEEPAIAssistant {
 }
 
 impl BLEEPAIAssistant {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         wallet: Arc<BLEEPWallet>,
         governance: Arc<BLEEPGovernance>,

@@ -61,6 +61,12 @@ pub struct Scheduler {
     block_tick_tx: broadcast::Sender<BlockTick>,
 }
 
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Scheduler {
     pub fn new() -> Self {
         let (block_tick_tx, _) = broadcast::channel(256);

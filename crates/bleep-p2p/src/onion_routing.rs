@@ -268,8 +268,7 @@ mod tests {
     }
 
     fn fake_secret(seed: u8) -> Vec<u8> {
-        let mut s = vec![seed; 32];
-        s
+        vec![seed; 32]
     }
 
     #[test]
@@ -293,7 +292,6 @@ mod tests {
     #[test]
     fn test_wrap_and_peel_roundtrip() {
         let (router, _) = make_router();
-        let local = NodeId::random();
 
         let relay1 = NodeId::random();
         let relay2 = NodeId::random();

@@ -125,11 +125,10 @@ impl FaultEvidence {
                     return Err("State roots should not match for mismatch fault".to_string());
                 }
             }
-            FaultType::ValidatorEquivocation { hash1, hash2, .. } => {
-                if hash1 == hash2 {
+            FaultType::ValidatorEquivocation { hash1, hash2, .. }
+                if hash1 == hash2 => {
                     return Err("Block hashes should differ for equivocation".to_string());
                 }
-            }
             _ => {}
         }
 
@@ -193,6 +192,7 @@ impl FaultDetector {
     /// Detect state root mismatch
     ///
     /// SAFETY: Compares reported state root against quorum consensus.
+    #[allow(clippy::too_many_arguments)]
     pub fn detect_state_root_mismatch(
         &self,
         shard_id: ShardId,
@@ -453,6 +453,12 @@ pub struct FaultHistory {
     faults: HashMap<ShardId, Vec<FaultEvidence>>,
 }
 
+impl Default for FaultHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FaultHistory {
     pub fn new() -> Self {
         FaultHistory {
@@ -464,7 +470,7 @@ impl FaultHistory {
     pub fn record_fault(&mut self, evidence: FaultEvidence) {
         self.faults
             .entry(evidence.shard_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(evidence);
     }
 

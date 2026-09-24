@@ -224,7 +224,7 @@ impl UpgradePayload {
     /// Verify payload hasn't been tampered with
     pub fn verify(&self, expected_hash: &[u8]) -> Result<bool, UpgradeError> {
         let computed = self.compute_hash()?;
-        Ok(&computed == expected_hash)
+        Ok(computed == expected_hash)
     }
 }
 
@@ -396,7 +396,7 @@ impl UpgradeCheckpoint {
     /// Compute checkpoint hash
     fn compute_hash(&self) -> Result<Vec<u8>, UpgradeError> {
         let serialized = bincode::serde::encode_to_vec(
-            &(
+            (
                 self.version_before,
                 &self.state_root_before,
                 self.block_height,

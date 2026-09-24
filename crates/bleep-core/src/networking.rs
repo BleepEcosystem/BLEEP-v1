@@ -21,6 +21,12 @@ pub struct NetworkingModule {
     pub peers: Mutex<HashMap<String, String>>,
 }
 
+impl Default for NetworkingModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkingModule {
     pub fn new() -> Self {
         NetworkingModule {

@@ -64,6 +64,12 @@ pub struct PATEngine {
     gas: PATGasModel,
 }
 
+impl Default for PATEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PATEngine {
     pub fn new() -> Self {
         PATEngine {
@@ -85,7 +91,7 @@ impl PATEngine {
         // Gas check first — cheapest failure path
         let gas_used = self.gas.charge(&intent.kind, intent.gas_limit)?;
 
-        let outcome = match &intent.kind {
+        match &intent.kind {
             PATIntentKind::CreateToken(i) => self.exec_create_token(i, &intent.caller, gas_used),
             PATIntentKind::Mint(i) => self.exec_mint(i, &intent.caller, gas_used, view),
             PATIntentKind::Burn(i) => self.exec_burn(i, &intent.caller, gas_used, view),
@@ -101,9 +107,7 @@ impl PATEngine {
             PATIntentKind::TransferOwnership(i) => {
                 self.exec_transfer_ownership(i, &intent.caller, gas_used, view)
             }
-        };
-
-        outcome
+        }
     }
 
     // ── CreateToken ───────────────────────────────────────────────────────────
@@ -168,8 +172,7 @@ impl PATEngine {
         if token.total_supply_cap > 0 {
             let new_supply = token
                 .current_supply
-                .checked_add(i.amount)
-                .unwrap_or(u128::MAX);
+                .saturating_add(i.amount);
             if new_supply > token.total_supply_cap {
                 return Err(PATError::SupplyCapExceeded {
                     cap: token.total_supply_cap,

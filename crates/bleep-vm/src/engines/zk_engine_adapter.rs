@@ -38,8 +38,8 @@ impl ZkEngineAdapter {
         match ExecutionProof::deserialize(proof_bytes) {
             Ok(proof) => {
                 debug!(
-                    state_before = hex::encode(&proof.state_root_before),
-                    state_after = hex::encode(&proof.state_root_after),
+                    state_before = hex::encode(proof.state_root_before),
+                    state_after = hex::encode(proof.state_root_after),
                     gas_used = proof.gas_used,
                     "Post-quantum proof verified successfully"
                 );
@@ -89,7 +89,7 @@ impl Engine for ZkEngineAdapter {
 
         if packet.len() < PROOF_LEN {
             return Err(VmError::ValidationError(
-                format!("ZK proof packet too small (minimum {} bytes)", PROOF_LEN).into(),
+                format!("ZK proof packet too small (minimum {} bytes)", PROOF_LEN),
             ));
         }
 
@@ -238,7 +238,17 @@ mod tests {
     async fn test_small_packet_succeeds_structurally() {
         let e = ZkEngineAdapter::new();
         let c = ctx(1_000_000);
-        let result = e.execute(&c, &[0u8; 10], &[], 1_000_000).await.unwrap();
+        let proof = crate::engines::zk_engine::ExecutionProof::new(
+            &[0u8; 32],
+            &[1u8; 32],
+            1_000,
+            &[2u8; 32],
+            b"test trace",
+        );
+        let result = e
+            .execute(&c, &proof.serialize(), &[], 1_000_000)
+            .await
+            .unwrap();
         assert!(result.success);
     }
 

@@ -205,7 +205,7 @@ impl ShardLockManager {
             .collect();
 
         for lock_id in to_release {
-            if let Ok(_) = self.release_lock(lock_id) {
+            if self.release_lock(lock_id).is_ok() {
                 warn!(
                     "[Shard {:?}] Expired lock {:?} was released",
                     self.shard_id, lock_id
@@ -268,6 +268,12 @@ pub struct CrossShardLockCoordinator {
     transaction_locks: BTreeMap<TransactionId, BTreeSet<StateLockId>>,
 }
 
+impl Default for CrossShardLockCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CrossShardLockCoordinator {
     /// Create a new lock coordinator
     pub fn new() -> Self {
@@ -318,7 +324,7 @@ impl CrossShardLockCoordinator {
 
         // Track transaction locks
         let mut tx_locks = BTreeSet::new();
-        for (_, (lock_id, _)) in locks_by_shard {
+        for (lock_id, _) in locks_by_shard.values() {
             tx_locks.insert(*lock_id);
         }
         self.transaction_locks.insert(transaction_id, tx_locks);
@@ -391,7 +397,7 @@ mod tests {
         );
 
         assert_eq!(lock.status, LockStatus::Active);
-        assert!(lock.covers_key(&vec![1, 2, 3]));
+        assert!(lock.covers_key(&[1, 2, 3]));
     }
 
     #[test]
@@ -442,11 +448,11 @@ mod tests {
             )
             .unwrap();
 
-        assert!(!manager.is_key_writable(&vec![1, 2, 3]));
+        assert!(!manager.is_key_writable(&[1, 2, 3]));
 
         manager.release_lock(StateLockId(100)).unwrap();
 
-        assert!(manager.is_key_writable(&vec![1, 2, 3]));
+        assert!(manager.is_key_writable(&[1, 2, 3]));
     }
 
     #[test]

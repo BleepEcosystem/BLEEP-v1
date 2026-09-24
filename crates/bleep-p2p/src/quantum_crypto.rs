@@ -251,9 +251,9 @@ impl ProofOfIdentity {
         let mut rng_bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut rng_bytes);
         let mut hasher = Sha256::new();
-        hasher.update(&keypair.public_key_bytes());
+        hasher.update(keypair.public_key_bytes());
         hasher.update(context);
-        hasher.update(&rng_bytes);
+        hasher.update(rng_bytes);
         let challenge = hasher.finalize().to_vec();
 
         let signature = keypair.sign(&challenge);

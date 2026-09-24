@@ -187,7 +187,7 @@ impl AIReputation {
         self.score = (self.score as i32 + record.reputation_impact) as i64;
 
         // Clamp score to reasonable bounds
-        self.score = self.score.max(0).min(10_000);
+        self.score = self.score.clamp(0, 10_000);
 
         self.last_updated_epoch = current_epoch;
         self.records.push(record);
@@ -244,6 +244,12 @@ impl AIReputation {
 pub struct AIReputationTracker {
     /// Map of model_id -> reputation
     reputations: HashMap<String, AIReputation>,
+}
+
+impl Default for AIReputationTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AIReputationTracker {

@@ -32,6 +32,12 @@ pub struct IncidentDetector {
     incidents: Vec<IncidentReport>,
 }
 
+impl Default for IncidentDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IncidentDetector {
     pub fn new() -> Self {
         IncidentDetector {
@@ -53,6 +59,12 @@ impl IncidentDetector {
 
 pub struct RecoveryController {
     recovery_log: Vec<RecoveryLog>,
+}
+
+impl Default for RecoveryController {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecoveryController {
@@ -77,6 +89,12 @@ impl RecoveryController {
 pub struct SelfHealingOrchestrator {
     detector: IncidentDetector,
     recovery: RecoveryController,
+}
+
+impl Default for SelfHealingOrchestrator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SelfHealingOrchestrator {

@@ -52,7 +52,7 @@ impl StarkProof {
     /// Serialize to bytes for transmission
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let bytes = bincode::serde::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(bytes)
     }
 
@@ -61,7 +61,7 @@ impl StarkProof {
         let proof =
             bincode::serde::decode_from_slice::<Self, _>(bytes, bincode::config::standard())
                 .map(|(v, _)| v)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(proof)
     }
 }
@@ -128,7 +128,7 @@ impl BlockValidityAir {
             BatchingMethod::Linear,
         );
 
-        let air = Self {
+        Self {
             block_index,
             epoch_id,
             tx_count,
@@ -142,8 +142,7 @@ impl BlockValidityAir {
                 8,                                        // num_assertions
                 options,
             ),
-        };
-        air
+        }
     }
 
     /// Create AIR for verification only
@@ -170,7 +169,7 @@ impl BlockValidityAir {
             BatchingMethod::Linear,
         );
 
-        let air = Self {
+        Self {
             block_index,
             epoch_id,
             tx_count,
@@ -184,8 +183,7 @@ impl BlockValidityAir {
                 8,
                 options,
             ),
-        };
-        air
+        }
     }
 
     /// Public inputs as field elements for verification
@@ -381,7 +379,7 @@ impl Prover for BlockValidityProver {
         E: FieldElement<BaseField = Self::BaseField>;
 
     fn get_pub_inputs(&self, _trace: &Self::Trace) -> <<Self as Prover>::Air as Air>::PublicInputs {
-        ()
+        
     }
 
     fn options(&self) -> &ProofOptions {
@@ -587,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_block_validity_circuit_creation() {
-        let _air = BlockValidityAir::for_verifying(1, 0, 3, &vec![0xAAu8; 31], &vec![0xBBu8; 31]);
+        let _air = BlockValidityAir::for_verifying(1, 0, 3, &[0xAAu8; 31], &[0xBBu8; 31]);
         // Circuit should be created without panicking
     }
 

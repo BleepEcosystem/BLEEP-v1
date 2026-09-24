@@ -39,8 +39,8 @@ fn message_id(msg: &SecureMessage) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(msg.sender_id.as_bytes());
-    h.update(&msg.nonce);
-    h.update(&msg.timestamp.to_le_bytes());
+    h.update(msg.nonce);
+    h.update(msg.timestamp.to_le_bytes());
     let d = h.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&d);
@@ -51,13 +51,15 @@ fn message_id(msg: &SecureMessage) -> [u8; 32] {
 // GOSSIP ENGINE
 // ─────────────────────────────────────────────────────────────────────────────
 
+type PendingMessage = (SecureMessage, Option<NodeId>);
+
 pub struct GossipProtocol {
     peer_manager: Arc<PeerManager>,
     message_protocol: Arc<MessageProtocol>,
     /// LRU cache of already-seen message IDs (prevents re-broadcast).
     seen: Arc<Mutex<LruCache<[u8; 32], ()>>>,
     /// Pending messages to be spread on the next tick.
-    pub(crate) pending: Arc<Mutex<Vec<(SecureMessage, Option<NodeId>)>>>,
+    pub(crate) pending: Arc<Mutex<Vec<PendingMessage>>>,
 }
 
 impl GossipProtocol {
@@ -110,7 +112,7 @@ impl GossipProtocol {
         // Select EAGER_FANOUT highest-scoring peers (excluding sender).
         let candidates: Vec<NodeId> = healthy
             .iter()
-            .filter(|p| exclude.map_or(true, |ex| &p.id != ex))
+            .filter(|p| exclude != Some(&p.id))
             .map(|p| p.id.clone())
             .collect();
 

@@ -199,10 +199,6 @@ impl MessageProtocol {
         self.sessions.contains_key(peer_id)
     }
 
-    pub(crate) fn peer_info(&self, peer_id: &NodeId) -> Option<crate::types::PeerInfo> {
-        self.peer_manager.get_peer(peer_id)
-    }
-
     fn local_handshake(&self) -> HandshakeHello {
         let mut challenge = vec![0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut challenge);
@@ -475,15 +471,13 @@ impl MessageProtocol {
             None,
         )
         .map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            P2PError::Io(std::io::Error::other(
                 format!("socket2::Socket::new failed: {}", e),
             ))
         })?;
 
         socket.set_reuse_address(true).map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            P2PError::Io(std::io::Error::other(
                 format!("SO_REUSEADDR failed: {}", e),
             ))
         })?;
@@ -496,14 +490,12 @@ impl MessageProtocol {
         })?;
 
         socket.listen(128).map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            P2PError::Io(std::io::Error::other(
                 format!("socket listen failed: {}", e),
             ))
         })?;
         socket.set_nonblocking(true).map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            P2PError::Io(std::io::Error::other(
                 format!("set_nonblocking failed: {}", e),
             ))
         })?;
@@ -600,9 +592,8 @@ impl MessageProtocol {
         }
 
         // Verify and decrypt
-        let _plaintext = self.open_message(&msg, &sender_pk).await.map_err(|e| {
+        let _plaintext = self.open_message(&msg, &sender_pk).await.inspect_err(|_e| {
             self.peer_manager.record_failure(&sender_id);
-            e
         })?;
 
         self.peer_manager.record_success(&sender_id);
@@ -617,9 +608,8 @@ impl MessageProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kademlia_dht::KademliaDht;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{sphincs_sign, Ed25519Keypair, KyberKeypair, SphincsKeypair};
+    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, SphincsKeypair};
 
     fn make_proto() -> (
         Arc<MessageProtocol>,

@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::block::Block;
     use crate::blockchain::{Blockchain, BlockchainState};

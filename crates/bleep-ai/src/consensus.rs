@@ -1,4 +1,5 @@
 pub struct BLEEPAdaptiveConsensus;
+
 impl BLEEPAdaptiveConsensus {
     pub fn new() -> Self {
         Self
@@ -8,5 +9,11 @@ impl BLEEPAdaptiveConsensus {
     }
     pub fn finalize_transaction(&self, _tx_id: &str) -> Result<(), String> {
         Ok(())
+    }
+}
+
+impl Default for BLEEPAdaptiveConsensus {
+    fn default() -> Self {
+        Self::new()
     }
 }

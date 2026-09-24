@@ -153,8 +153,8 @@ impl AIAdaptiveConsensus {
             weighted_sum += reliability * weight;
         }
 
-        let result = (weighted_sum / total_weight).min(1.0).max(0.0);
-        result
+        
+        (weighted_sum / total_weight).clamp(0.0, 1.0)
     }
 
     /// **AI-powered Validator Adjustment & Auto-Penalty**

@@ -69,7 +69,7 @@ pub struct TxBitmap {
 impl TxBitmap {
     /// Create a zeroed bitmap for `tx_count` transactions.
     pub fn new(tx_count: u32) -> Self {
-        let byte_count = ((tx_count as usize) + 7) / 8;
+        let byte_count = (tx_count as usize).div_ceil(8);
         Self {
             bits: vec![0u8; byte_count],
             capacity: tx_count,
@@ -118,7 +118,7 @@ impl TxBitmap {
     /// Expands `self` if `other` has higher capacity.
     pub fn merge(&mut self, other: &TxBitmap) {
         if other.capacity > self.capacity {
-            let new_byte_count = ((other.capacity as usize) + 7) / 8;
+            let new_byte_count = (other.capacity as usize).div_ceil(8);
             self.bits.resize(new_byte_count, 0);
             self.capacity = other.capacity;
         }

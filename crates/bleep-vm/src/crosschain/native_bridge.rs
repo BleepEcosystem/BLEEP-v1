@@ -178,6 +178,7 @@ pub struct CrossChainMessage {
 }
 
 impl CrossChainMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_chain: ChainId,
         destination_chain: ChainId,
@@ -232,7 +233,7 @@ impl CrossChainMessage {
         h.update(sender);
         h.update(contract);
         h.update(calldata);
-        h.update(&ts.to_le_bytes());
+        h.update(ts.to_le_bytes());
         h.finalize().into()
     }
 }

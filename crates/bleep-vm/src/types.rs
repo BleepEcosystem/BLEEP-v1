@@ -166,10 +166,10 @@ impl StateSnapshot {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         for w in writes {
-            h.update(&w.write_index.to_le_bytes());
-            h.update(&(w.key.len() as u64).to_le_bytes());
+            h.update(w.write_index.to_le_bytes());
+            h.update((w.key.len() as u64).to_le_bytes());
             h.update(&w.key);
-            h.update(&(w.value.len() as u64).to_le_bytes());
+            h.update((w.value.len() as u64).to_le_bytes());
             h.update(&w.value);
         }
         h.finalize().into()
@@ -250,22 +250,19 @@ pub struct ZkExecutionProof {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum OptimisationLevel {
     /// No transformations; useful for debugging.
     None,
     /// Dead-code elimination and constant folding only.
     Basic,
     /// Full Cranelift mid-tier + inlining.
+    #[default]
     Standard,
     /// Aggressive — includes cross-function inlining and profile-guided hints.
     Aggressive,
 }
 
-impl Default for OptimisationLevel {
-    fn default() -> Self {
-        OptimisationLevel::Standard
-    }
-}
 
 /// Summary of all transformations applied.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

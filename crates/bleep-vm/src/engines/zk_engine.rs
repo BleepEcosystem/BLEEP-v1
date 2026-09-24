@@ -51,9 +51,9 @@ impl ExecutionProof {
         hasher.update(b"BLEEP_PQ_EXECUTION_PROOF_V1");
         hasher.update(state_before);
         hasher.update(state_after);
-        hasher.update(&gas_used.to_be_bytes());
+        hasher.update(gas_used.to_be_bytes());
         hasher.update(tx_hash);
-        hasher.update(&trace_hash);
+        hasher.update(trace_hash);
         let proof_commitment: [u8; 32] = hasher.finalize().into();
 
         ExecutionProof {

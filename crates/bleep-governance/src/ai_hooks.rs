@@ -220,11 +220,7 @@ impl AIHooks {
         for change in &proposal.rule_changes {
             if let Ok(_rule) = ruleset.get_rule(&change.rule_name) {
                 // Compute impact deterministically
-                let value_change = if change.new_value >= change.old_value {
-                    change.new_value - change.old_value
-                } else {
-                    change.old_value - change.new_value
-                };
+                let value_change = change.new_value.abs_diff(change.old_value);
                 let _pct_change = (value_change * 100u128) / change.old_value.max(1);
 
                 match change.rule_name.as_str() {
@@ -262,7 +258,7 @@ impl AIHooks {
         let result = SimulationResult {
             proposal_id: proposal.proposal_id.clone(),
             performance_impact: perf_impact,
-            safety_impact: safety_impact,
+            safety_impact,
             worst_case_description: worst_case,
             best_case_description: best_case,
             recommendation: if safety_impact > 0 && perf_impact > -20 {

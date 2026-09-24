@@ -87,7 +87,7 @@ impl ShardExecutionPlan {
     pub fn add_write(&mut self, shard: ShardId, key: Vec<u8>) {
         self.shard_writes
             .entry(shard)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(key);
     }
 
@@ -95,7 +95,7 @@ impl ShardExecutionPlan {
     pub fn add_read(&mut self, shard: ShardId, key: Vec<u8>) {
         self.shard_reads
             .entry(shard)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(key);
     }
 
@@ -397,7 +397,7 @@ impl StateLockId {
     /// Generate a deterministic lock ID
     pub fn compute(transaction_id: &TransactionId, shard: ShardId, keys: &[Vec<u8>]) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(&transaction_id.0);
+        hasher.update(transaction_id.0);
         hasher.update(shard.0.to_le_bytes());
 
         for key in keys {

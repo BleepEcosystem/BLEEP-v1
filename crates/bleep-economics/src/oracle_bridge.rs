@@ -290,7 +290,7 @@ impl OracleBridgeEngine {
         // Record update
         self.price_updates
             .entry(update.asset.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(update.clone());
 
         // Update operator metrics

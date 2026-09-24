@@ -237,26 +237,26 @@ impl StateDiff {
         // Balance updates (BTreeMap — deterministic order)
         for (acc, update) in &self.balances {
             h.update(acc);
-            h.update(&update.delta.to_le_bytes());
+            h.update(update.delta.to_le_bytes());
         }
 
         // Events (in order)
         for ev in &self.events {
-            h.update(&ev.contract);
+            h.update(ev.contract);
             for topic in &ev.topics {
                 h.update(topic);
             }
             h.update(&ev.data);
-            h.update(&ev.log_index.to_le_bytes());
+            h.update(ev.log_index.to_le_bytes());
         }
 
         // Code deployments
         for cd in &self.code {
-            h.update(&cd.address);
-            h.update(&cd.code_hash);
+            h.update(cd.address);
+            h.update(cd.code_hash);
         }
 
-        h.update(&self.gas_charged.to_le_bytes());
+        h.update(self.gas_charged.to_le_bytes());
         h.finalize().into()
     }
 

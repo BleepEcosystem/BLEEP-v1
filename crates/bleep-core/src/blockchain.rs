@@ -154,12 +154,11 @@ impl Blockchain {
         };
 
         // ── 1. Full structural + signature validation ─────────────────────
-        if !block.transactions.is_empty() || block.index != 0 {
-            if !BlockValidator::validate_full_block(last_block, &block, public_key) {
+        if (!block.transactions.is_empty() || block.index != 0)
+            && !BlockValidator::validate_full_block(last_block, &block, public_key) {
                 log::error!("Block {} failed validation", block.index);
                 return false;
             }
-        }
 
         // ── 2. Apply transactions to in-memory state ─────────────────────
         {

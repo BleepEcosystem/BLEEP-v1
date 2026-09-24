@@ -603,7 +603,7 @@ mod tests {
         if let Err(InvariantError::DoubleFinality { .. }) = result {
             // Expected
         } else {
-            assert!(false, "Expected DoubleFinality error");
+            panic!("Expected DoubleFinality error");
         }
     }
 

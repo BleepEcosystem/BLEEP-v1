@@ -71,7 +71,9 @@ mod governance_integration_tests {
             let quorum_met = total_voted > quorum_threshold;
 
             let approval_percentage = if total_voted > 0 {
-                ((stake_approve * 100) / total_voted) as u64
+                (stake_approve * 100)
+                    .checked_div(total_voted)
+                    .unwrap_or(0) as u64
             } else {
                 0
             };
@@ -613,19 +615,13 @@ mod governance_integration_tests {
     #[test]
     fn test_26_concurrent_proposals() {
         // Multiple proposals can be active simultaneously
-        let proposals = vec![
+        let proposals = [
             ("prop-1", "PROTOCOL_PARAMETER", 5), // voting 5-10
             ("prop-2", "VALIDATOR_SANCTION", 8), // voting 8-13
             ("prop-3", "RECOVERY", 3),           // voting 3-8
         ];
 
         assert_eq!(proposals.len(), 3);
-
-        // The windows overlap pairwise across adjacent epochs.
-        assert!(7 >= 5 && 7 < 10); // prop-1 active
-        assert!(7 >= 3 && 7 < 8); // prop-3 active
-        assert!(8 >= 8 && 8 < 13); // prop-2 active
-        assert!(8 >= 5 && 8 < 10); // prop-1 active
 
         println!("✓ Concurrent proposals supported (epoch 7: proposals 1,2,3 voting)");
     }

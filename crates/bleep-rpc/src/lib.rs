@@ -721,7 +721,7 @@ pub fn rpc_routes_with_state(
                             }),
                             warp::http::StatusCode::SERVICE_UNAVAILABLE,
                         );
-                        return Ok::<_, warp::Rejection>(resp);
+                        Ok::<_, warp::Rejection>(resp)
                     }
                     Some(reg_arc) => {
                         let mut reg = reg_arc.lock();
@@ -738,10 +738,10 @@ pub fn rpc_routes_with_state(
                                     status: "already_registered".into(),
                                     stake: v.stake,
                                 };
-                                return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                                Ok::<_, warp::Rejection>(warp::reply::with_status(
                                     warp::reply::json(&resp),
                                     warp::http::StatusCode::OK,
-                                ));
+                                ))
                             }
                             None => {
                                 // Create new validator identity.
@@ -762,7 +762,7 @@ pub fn rpc_routes_with_state(
                                             warp::reply::json(&ErrResp { error: e }),
                                             warp::http::StatusCode::BAD_REQUEST,
                                         );
-                                        return Ok::<_, warp::Rejection>(resp);
+                                        Ok::<_, warp::Rejection>(resp)
                                     }
                                     Ok(ident) => {
                                         let current_stake = ident.stake;
@@ -773,10 +773,10 @@ pub fn rpc_routes_with_state(
                                             status: "registered".into(),
                                             stake: current_stake,
                                         };
-                                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                                        Ok::<_, warp::Rejection>(warp::reply::with_status(
                                             warp::reply::json(&resp),
                                             warp::http::StatusCode::OK,
-                                        ));
+                                        ))
                                     }
                                 }
                             }
@@ -802,7 +802,7 @@ pub fn rpc_routes_with_state(
                             }),
                             warp::http::StatusCode::SERVICE_UNAVAILABLE,
                         );
-                        return Ok::<_, warp::Rejection>(resp);
+                        Ok::<_, warp::Rejection>(resp)
                     }
                     Some(reg_arc) => {
                         let mut reg = reg_arc.lock();
@@ -1755,7 +1755,7 @@ fn pat_create(
         .and(with_arc_state(state))
         .map(
             |req: PatCreateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -1816,7 +1816,7 @@ fn pat_mint(
         .and(with_arc_state(state))
         .map(
             |req: PatMintReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let caller = match hex_to_address(&req.caller) {
                         Ok(a) => a,
@@ -1877,7 +1877,7 @@ fn pat_burn(
         .and(with_arc_state(state))
         .map(
             |req: PatBurnReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let from = match hex_to_address(&req.from) {
                         Ok(a) => a,
@@ -1930,7 +1930,7 @@ fn pat_transfer(
         .map(
             |req: PatTransferReq, _claims: SessionClaims, st: Arc<RpcState>| {
                 match &st.pat_registry {
-                    None => return pat_not_initialised(),
+                    None => pat_not_initialised(),
                     Some(reg) => {
                         let from = match hex_to_address(&req.from) {
                             Ok(a) => a,
@@ -1993,7 +1993,7 @@ fn pat_balance(
         .and(with_arc_state(state))
         .map(
             |symbol: String, address: String, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let addr = match hex_to_address(&address) {
                         Ok(a) => a,
@@ -2027,7 +2027,7 @@ fn pat_info(
         .and(warp::get())
         .and(with_arc_state(state))
         .map(|symbol: String, st: Arc<RpcState>| match &st.pat_registry {
-            None => return pat_not_initialised(),
+            None => pat_not_initialised(),
             Some(reg) => {
                 let r = reg.lock();
                 match r.get_token(&symbol) {
@@ -2065,7 +2065,7 @@ fn pat_list(
         .and(warp::get())
         .and(with_arc_state(state))
         .map(|st: Arc<RpcState>| match &st.pat_registry {
-            None => return pat_not_initialised(),
+            None => pat_not_initialised(),
             Some(reg) => {
                 let r = reg.lock();
                 let tokens: Vec<serde_json::Value> = r
@@ -2114,7 +2114,7 @@ fn pat_approve(
         .and(with_arc_state(state))
         .map(
             |req: PatApproveReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2191,7 +2191,7 @@ fn pat_freeze(
         .and(with_arc_state(state))
         .map(
             |req: PatFreezeReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2257,7 +2257,7 @@ fn pat_set_burn_rate(
             |req: PatSetBurnRateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st
                 .pat_registry
             {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2322,7 +2322,7 @@ fn pat_set_owner(
         .map(
             |req: PatSetOwnerReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry
             {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2536,7 +2536,7 @@ fn faucet_drip(
             if let Some(blockchain) = &st.blockchain {
                 let bc = blockchain.read().unwrap();
                 let mut core_state = bc.state.write().unwrap();
-                core_state.credit(&address, RpcState::FAUCET_DRIP_AMOUNT as u64);
+                core_state.credit(&address, RpcState::FAUCET_DRIP_AMOUNT);
             }
 
             Box::new(warp::reply::with_status(

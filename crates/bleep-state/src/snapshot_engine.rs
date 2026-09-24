@@ -80,7 +80,7 @@ impl SnapshotConfig {
 
     /// Determine if snapshot should be created at this epoch
     pub fn should_create_snapshot(&self, epoch: u64) -> bool {
-        epoch > 0 && epoch % self.epochs_per_snapshot == 0
+        epoch > 0 && epoch.is_multiple_of(self.epochs_per_snapshot)
     }
 
     /// Compute snapshot ID for an epoch
@@ -462,7 +462,7 @@ impl SnapshotEngine {
         self.snapshots.insert(snapshot_id, snapshot);
         self.snapshots_per_shard
             .entry(shard_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(snapshot_id);
 
         self.next_snapshot_id = SnapshotId(snapshot_id.as_u64() + 1);
@@ -574,7 +574,7 @@ impl SnapshotEngine {
     pub fn prune_old_snapshots(&mut self) -> Result<Vec<SnapshotId>, String> {
         let mut pruned = Vec::new();
 
-        for (_shard_id, snapshot_ids) in self.snapshots_per_shard.iter_mut() {
+        for snapshot_ids in self.snapshots_per_shard.values_mut() {
             while snapshot_ids.len() > self.config.max_retained_snapshots as usize {
                 if let Some(old_id) = snapshot_ids.first().copied() {
                     self.snapshots.remove(&old_id);

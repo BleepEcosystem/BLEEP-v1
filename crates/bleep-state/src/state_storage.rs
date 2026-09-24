@@ -66,7 +66,7 @@ impl BlockchainState {
         self.merkle_root = calculate_merkle_root(&state_data);
 
         // AI-Powered anomaly detection for security
-        if detect_state_anomalies(&self) {
+        if detect_state_anomalies(self) {
             panic!("State anomaly detected! Potential attack detected.");
         }
     }

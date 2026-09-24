@@ -221,7 +221,9 @@ impl VoteTally {
         let approval_percentage = if stake_total == 0 {
             0
         } else {
-            ((stake_approve * 100) / stake_total) as u64
+            (stake_approve * 100)
+                .checked_div(stake_total)
+                .unwrap_or(0) as u64
         };
 
         // Approved if quorum met AND approval >= threshold
@@ -321,6 +323,7 @@ pub struct Proposal {
 }
 
 impl Proposal {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         proposal_type: ProposalType,
@@ -421,7 +424,7 @@ impl Proposal {
         let mut stake_approve = 0u128;
         let mut stake_reject = 0u128;
 
-        for (_, vote) in &self.votes {
+        for vote in self.votes.values() {
             if vote.approval {
                 stake_approve = stake_approve.saturating_add(vote.stake);
             } else {
@@ -435,7 +438,7 @@ impl Proposal {
             total_network_stake,
             self.approval_threshold,
         )
-        .map_err(|e| GovernanceError::InternalError(e))?;
+        .map_err(GovernanceError::InternalError)?;
 
         self.tally = Some(tally.clone());
 

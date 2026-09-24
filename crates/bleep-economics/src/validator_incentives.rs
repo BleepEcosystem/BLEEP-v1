@@ -206,7 +206,7 @@ impl Default for RewardParameters {
     fn default() -> Self {
         RewardParameters {
             block_proposal_reward: 32 * 10u128.pow(6), // 0.32 BLEEP (8 decimals)
-            participation_reward: 1 * 10u128.pow(6),   // 0.01 BLEEP
+            participation_reward: 10u128.pow(6),   // 0.01 BLEEP
             healing_multiplier: 3,                     // 3x participation
             cross_shard_reward: 5 * 10u128.pow(6),     // 0.05 BLEEP
         }

@@ -435,6 +435,6 @@ mod tests {
         // Re-executing same proposal should be skipped (not error)
         let result = executor.execute_batch(proposals, 5);
         // Should still succeed but second proposal won't execute
-        assert!(result.is_ok() || matches!(result, Err(_)));
+        assert!(result.is_ok() || result.is_err());
     }
 }

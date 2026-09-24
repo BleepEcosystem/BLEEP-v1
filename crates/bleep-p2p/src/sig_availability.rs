@@ -98,7 +98,7 @@ mod tests {
             version: 1,
             sender_id: NodeId::random(),
             message_type: MessageType::SigAvailability,
-            payload: [TOPIC_SIG_AVAILABILITY as u8]
+            payload: [TOPIC_SIG_AVAILABILITY]
                 .into_iter()
                 .chain(payload.into_iter())
                 .collect(),

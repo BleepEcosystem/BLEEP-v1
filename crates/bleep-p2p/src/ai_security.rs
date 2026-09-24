@@ -131,6 +131,12 @@ pub struct PeerScoring {
     records: DashMap<NodeId, InteractionRecord>,
 }
 
+impl Default for PeerScoring {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerScoring {
     pub fn new() -> Self {
         PeerScoring {
@@ -239,6 +245,12 @@ pub struct SybilDetector {
     flagged: DashMap<NodeId, bool>,
 }
 
+impl Default for SybilDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SybilDetector {
     pub fn new() -> Self {
         SybilDetector {
@@ -303,6 +315,12 @@ pub struct AnomalyDetector {
     max_payload_bytes: usize,
     /// Maximum acceptable hop count.
     max_hop_count: u8,
+}
+
+impl Default for AnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnomalyDetector {
@@ -404,7 +422,6 @@ mod tests {
     #[test]
     fn test_sybil_detector_flags_on_subnet_saturation() {
         let sybil = SybilDetector::new();
-        let addr_base = "192.168.1.1:9000";
         for i in 0..=MAX_PEERS_PER_SUBNET {
             let id = nid(i as u8);
             let addr: std::net::SocketAddr = format!("192.168.1.{}:9000", i + 1).parse().unwrap();

@@ -126,8 +126,8 @@ impl RoutingTable {
         let dist = self.local_id.xor_distance(id);
         // Index = position of the highest set bit in the XOR distance.
         // Distance of 0 (self) is not inserted; we use bucket 0 as a fallback.
-        for byte_idx in 0..32 {
-            let byte = dist[byte_idx];
+        for (byte_idx, byte) in dist.iter().enumerate() {
+            let byte = *byte;
             if byte != 0 {
                 let bit_pos = 7 - byte.leading_zeros() as usize;
                 return byte_idx * 8 + bit_pos;
@@ -340,7 +340,6 @@ impl KademliaDht {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::PeerStatus;
     use std::net::SocketAddr;
 
     fn make_peer(seed: u8) -> PeerInfo {

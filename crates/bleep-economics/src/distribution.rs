@@ -356,7 +356,7 @@ impl LinearVestingSchedule {
         if vesting_duration == 0 {
             return self.total;
         }
-        let unlocked = (self.total as u128)
+        let unlocked = self.total
             .saturating_mul(vesting_elapsed.min(vesting_duration) as u128)
             / vesting_duration as u128;
         unlocked.min(self.total)

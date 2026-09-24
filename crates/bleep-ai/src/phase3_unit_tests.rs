@@ -1,7 +1,7 @@
 /// Unit tests for Phase 3 AI modules that don't depend on bleep-core
 /// These tests validate core functionality in isolation
-
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod phase3_unit_tests {
     use crate::{
         ai_attestation::*, ai_constraint_validator::*, ai_feedback_loop::*, ai_proposal_types::*,

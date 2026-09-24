@@ -45,6 +45,10 @@ impl ValidatorSet {
         self.validators.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.validators.is_empty()
+    }
+
     /// Check if validator count is sufficient for Byzantine tolerance
     ///
     /// SAFETY: At least 3f+1 validators needed to tolerate f Byzantine faults

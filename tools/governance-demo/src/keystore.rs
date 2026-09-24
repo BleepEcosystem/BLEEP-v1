@@ -78,8 +78,8 @@ pub fn create_key(
     };
 
     let entry = KeyEntry {
-        salt: general_purpose::STANDARD.encode(&salt),
-        nonce: general_purpose::STANDARD.encode(&nonce_bytes),
+        salt: general_purpose::STANDARD.encode(salt),
+        nonce: general_purpose::STANDARD.encode(nonce_bytes),
         cipher: general_purpose::STANDARD.encode(&ct),
         fingerprint,
     };
