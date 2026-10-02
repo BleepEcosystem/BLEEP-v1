@@ -27,7 +27,7 @@ const DOMAIN_EMPTY: &[u8] = b"bleep_sal_empty_v1";
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Compute `SHA3-256(DOMAIN_LEAF || sig_bytes)` — the canonical per-transaction
-/// commitment that travels over the gossip mesh in place of the full 49,856-byte
+/// commitment that travels over the gossip mesh in place of the full 49,088-byte
 /// SPHINCS+ signature.
 #[inline]
 pub fn hash_sig(sig_bytes: &[u8]) -> SigHash {
@@ -213,7 +213,7 @@ pub struct MerkleProof {
 /// Uses Rayon for parallel SHA3-256 computation across all signatures,
 /// then builds the Blake3 Merkle tree sequentially.
 ///
-/// Typical timing for 512 SPHINCS+ signatures (49,856 bytes each) on an
+/// Typical timing for 512 SPHINCS+ signatures (49,088 bytes each) on an
 /// 8-core validator: **~45 ms** (dominated by SHA3-256 bandwidth, ~24.8 MB
 /// of input data).
 pub fn compute_sig_commitment(sigs: &[Vec<u8>]) -> (SigCommitmentRoot, Vec<SigHash>) {

@@ -410,7 +410,7 @@ mod tests {
             ),
         };
 
-        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincssha2128ssimple::keypair();
+        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
         let signature = AISignature::sign(
             public_key.as_bytes(),
             secret_key.as_bytes(),
@@ -462,7 +462,7 @@ mod tests {
 
         // Invalid signature (wrong assessment hash)
         let (bad_public_key, bad_secret_key) =
-            pqcrypto_sphincsplus::sphincssha2128ssimple::keypair();
+            pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
         let mut bad_signature = AISignature::sign(
             bad_public_key.as_bytes(),
             bad_secret_key.as_bytes(),

@@ -333,7 +333,7 @@ mod tests {
         let verifier = PostQuantumVerifier::new(42).expect("verifier failed");
 
         // Create a corrupted proof
-        let mut proof = vec![0u8; 168 + 7856];
+        let mut proof = vec![0u8; 168 + 49088];
         proof[0] = 0xFF;
         proof[1] = 0xFF;
 

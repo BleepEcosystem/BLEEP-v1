@@ -296,11 +296,11 @@ graph LR
 | Security Assumption | One-wayness of SHAKE-256 (hash-based) |
 | Public Key | **64 bytes** |
 | Secret Key | **128 bytes** (`Zeroizing<Vec<u8>>` — zeroed on drop) |
-| Signature | **49,856 bytes** |
+| Signature | **49,088 bytes** |
 | Crate | `pqcrypto-sphincsplus` v0.7.2 |
 | Usage | Transaction signing, block signing, P2P message authentication |
 
-> **Bandwidth:** SPHINCS+ signatures are 49,856 bytes each. Raw per-block signature data at 512 tx/block is ~24.3 MB. The **Signature Availability Layer** (live in Protocol Version 5) reduces block-gossip bandwidth to **~320 KB per block (~98.7% reduction)** by replacing per-transaction signature propagation with a Blake3 Merkle commitment (`sig_commitment_root`) bound into the SPHINCS+ block signature and the 68-column extended STARK proof. Individual signatures are available on demand from the SAL gossip store.
+> **Bandwidth:** SPHINCS+ signatures are 49,088 bytes each. Raw per-block signature data at 512 tx/block is ~24.3 MB. The **Signature Availability Layer** (live in Protocol Version 5) reduces block-gossip bandwidth to **~320 KB per block (~98.7% reduction)** by replacing per-transaction signature propagation with a Blake3 Merkle commitment (`sig_commitment_root`) bound into the SPHINCS+ block signature and the 68-column extended STARK proof. Individual signatures are available on demand from the SAL gossip store.
 
 ### Key Encapsulation — Kyber-1024 / ML-KEM-1024 (FIPS 203)
 
@@ -420,7 +420,7 @@ flowchart LR
         SEL["Proposer Selection\nStake-proportional VRF"]
         BP["BlockProducer\nSelect ≤4,096 txs\nCompute SMT root"]
         STARK["STARK Prover\n~850ms · 48-col trace\n5 public inputs"]
-        SIGN["SPHINCS+ Block Sign\n49,856-byte signature"]
+        SIGN["SPHINCS+ Block Sign\n49,088-byte signature"]
         BCAST["P2P Broadcast\nGossip fanout=8"]
     end
 
@@ -845,7 +845,7 @@ DevNet UI
 
 | Parameter | Value | Source |
 |---|---|---|
-| SPHINCS+ signature size | **49,856 bytes** | `pqcrypto-sphincsplus` v0.7.2 |
+| SPHINCS+ signature size | **49,088 bytes** | `pqcrypto-sphincsplus` v0.7.2 |
 | SPHINCS+ public key | **64 bytes** | `pqcrypto-sphincsplus` v0.7.2 |
 | SPHINCS+ secret key | **128 bytes** | `pqcrypto-sphincsplus` v0.7.2 |
 | Kyber-1024 public key | 1,568 bytes | `pqcrypto-kyber` |

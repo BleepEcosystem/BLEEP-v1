@@ -21,7 +21,7 @@ mod phase4_ai_integration_tests {
     use sha2::{Digest, Sha256};
 
     fn test_signature(hash: &[u8], epoch: u64) -> AISignature {
-        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincssha2128ssimple::keypair();
+        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
         AISignature::sign(public_key.as_bytes(), secret_key.as_bytes(), hash, epoch).unwrap()
     }
 
@@ -408,7 +408,7 @@ mod phase4_ai_integration_tests {
 
     #[test]
     fn test_19_signature_authentication() {
-        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincssha2128ssimple::keypair();
+        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
         let assessment_hash = b"assessment_hash".to_vec();
         let epoch = 10;
 
@@ -429,7 +429,7 @@ mod phase4_ai_integration_tests {
 
         assert!(sig1.verify(public_key.as_bytes()));
         assert!(sig2.verify(public_key.as_bytes()));
-        let (untrusted_key, _) = pqcrypto_sphincsplus::sphincssha2128ssimple::keypair();
+        let (untrusted_key, _) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
         assert!(!sig1.verify(untrusted_key.as_bytes()));
     }
 

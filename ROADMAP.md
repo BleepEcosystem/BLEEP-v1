@@ -200,7 +200,7 @@ These are honest gaps documented for contributors and researchers. See [`WHITEPA
 
 | Limitation | Impact | Mitigation Path |
 |---|---|---|
-| SPHINCS+ signatures are 49,856 bytes — no native aggregation | SAL reduces gossip to ~320 KB/block via Blake3 Merkle commitment over SHA3-256(sig_i); receivers verify via STARK-committed sig_commitment_root | ✅ Resolved (Sprint 10) — hash-based Merkle aggregation (O(log n) validator vote bandwidth) remains Phase 8 research |
+| SPHINCS+ signatures are 49,088 bytes — no native aggregation | SAL reduces gossip to ~320 KB/block via Blake3 Merkle commitment over SHA3-256(sig_i); receivers verify via STARK-committed sig_commitment_root | ✅ Resolved (Sprint 10) — hash-based Merkle aggregation (O(log n) validator vote bandwidth) remains Phase 8 research |
 | TPS figures are simulated, not measured | Projected 10,921 avg TPS — actual performance unknown until public testnet | Public testnet measurement in Phase 6 |
 | Ed25519 still present in Cargo.toml | Contradicts "no classical fallback" until Phase 9 sunset | Explicit sunset in Phase 9; quantum feature flag enforces PQ on sensitive paths now |
 | STARK proof size larger than SNARKs | ~100 KB per proof vs SNARKs; offset by no trusted setup requirement | Accepted design trade-off; documented in whitepaper |

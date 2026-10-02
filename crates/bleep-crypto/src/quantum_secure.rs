@@ -3,7 +3,7 @@ use aes_gcm::aead::Aead;
 use aes_gcm::KeyInit;
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use pqcrypto_kyber::kyber1024;
-use pqcrypto_sphincsplus::sphincssha2128fsimple;
+use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::kem::SharedSecret;
 use pqcrypto_traits::sign::DetachedSignature;
 use rand::rngs::OsRng;
@@ -63,13 +63,13 @@ impl KyberAESHybrid {
 }
 
 pub struct QuantumSecure {
-    pub public_key: sphincssha2128fsimple::PublicKey,
-    pub secret_key: sphincssha2128fsimple::SecretKey,
+    pub public_key: sphincsshake256fsimple::PublicKey,
+    pub secret_key: sphincsshake256fsimple::SecretKey,
 }
 
 impl QuantumSecure {
     pub fn keygen() -> Self {
-        let (pk, sk) = sphincssha2128fsimple::keypair();
+        let (pk, sk) = sphincsshake256fsimple::keypair();
         QuantumSecure {
             public_key: pk,
             secret_key: sk,
@@ -77,16 +77,16 @@ impl QuantumSecure {
     }
 
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        let detached_sig = sphincssha2128fsimple::detached_sign(message, &self.secret_key);
+        let detached_sig = sphincsshake256fsimple::detached_sign(message, &self.secret_key);
         detached_sig.as_bytes().to_vec()
     }
 
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
-        let detached_sig = match sphincssha2128fsimple::DetachedSignature::from_bytes(signature) {
+        let detached_sig = match sphincsshake256fsimple::DetachedSignature::from_bytes(signature) {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        sphincssha2128fsimple::verify_detached_signature(&detached_sig, message, &self.public_key)
+        sphincsshake256fsimple::verify_detached_signature(&detached_sig, message, &self.public_key)
             .is_ok()
     }
 }

@@ -9,7 +9,7 @@
 //! - **Route selection** — `OnionRouter::select_route` (Kademlia peer set,
 //!   AI trust-score filter ≥ 55.0, random shuffle for unlinkability).
 //! - **Per-hop KEM** — `kyber_encapsulate` from `quantum_crypto.rs`
-//!   (Kyber-768, NIST PQC finalist).
+//!   (Kyber-1024, NIST PQC finalist).
 //! - **Onion wrapping** — `OnionRouter::wrap` (nested AES-256-GCM layers,
 //!   inner-to-outer construction).
 //! - **Dispatch** — `OnionRouter::send_anonymous` →
@@ -74,7 +74,7 @@ impl DarkRouting {
     /// ## Steps
     /// 1. **Route selection** — picks up to `MAX_HOPS` peers above the
     ///    trust threshold and shuffles them.
-    /// 2. **KEM** — for each relay, generates an ephemeral Kyber-768 keypair
+    /// 2. **KEM** — for each relay, generates an ephemeral Kyber-1024 keypair
     ///    and calls `kyber_encapsulate` to produce a per-hop shared secret.
     ///    The resulting `(ciphertext, shared_secret)` pair provides forward
     ///    secrecy: even if a relay's long-term key is compromised later, past

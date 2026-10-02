@@ -16,7 +16,7 @@ use aes_gcm::{
 use blake2::Blake2b512;
 use hkdf::Hkdf;
 use pqcrypto_kyber::kyber1024;
-use pqcrypto_sphincsplus::sphincssha2256ssimple;
+use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::kem::{Ciphertext, PublicKey as KemPk, SecretKey as KemSk, SharedSecret};
 use pqcrypto_traits::sign::{DetachedSignature, PublicKey as SignPk, SecretKey as SignSk};
 use rand::rngs::OsRng;
@@ -67,7 +67,7 @@ pub struct QuantumKeyPair {
 impl QuantumKeyPair {
     /// Generate a fresh quantum keypair using OS randomness.
     pub fn generate() -> Self {
-        let (sign_pk, sign_sk) = sphincssha2256ssimple::keypair();
+        let (sign_pk, sign_sk) = sphincsshake256fsimple::keypair();
         let (kem_pk, kem_sk) = kyber1024::keypair();
         Self {
             sign_sk: sign_sk.as_bytes().to_vec(),
@@ -89,13 +89,13 @@ impl QuantumKeyPair {
 
     /// Sign a message with SPHINCS+. Returns a detached signature.
     pub fn sign(&self, message: &[u8]) -> CryptoResult<QuantumSignature> {
-        let sk = sphincssha2256ssimple::SecretKey::from_bytes(&self.sign_sk).map_err(|_| {
+        let sk = sphincsshake256fsimple::SecretKey::from_bytes(&self.sign_sk).map_err(|_| {
             CryptoError::InvalidKeyLength {
-                expected: sphincssha2256ssimple::secret_key_bytes(),
+                expected: sphincsshake256fsimple::secret_key_bytes(),
                 got: self.sign_sk.len(),
             }
         })?;
-        let sig = sphincssha2256ssimple::detached_sign(message, &sk);
+        let sig = sphincsshake256fsimple::detached_sign(message, &sk);
         Ok(QuantumSignature {
             bytes: sig.as_bytes().to_vec(),
         })
@@ -163,15 +163,15 @@ impl QuantumVerifier {
 
     /// Verify a SPHINCS+ detached signature over `message`.
     pub fn verify_sphincs(&self, message: &[u8], signature: &QuantumSignature) -> bool {
-        let pk = match sphincssha2256ssimple::PublicKey::from_bytes(&self.sign_pk) {
+        let pk = match sphincsshake256fsimple::PublicKey::from_bytes(&self.sign_pk) {
             Ok(k) => k,
             Err(_) => return false,
         };
-        let sig = match sphincssha2256ssimple::DetachedSignature::from_bytes(&signature.bytes) {
+        let sig = match sphincsshake256fsimple::DetachedSignature::from_bytes(&signature.bytes) {
             Ok(s) => s,
             Err(_) => return false,
         };
-        sphincssha2256ssimple::verify_detached_signature(&sig, message, &pk).is_ok()
+        sphincsshake256fsimple::verify_detached_signature(&sig, message, &pk).is_ok()
     }
 }
 
@@ -179,7 +179,7 @@ impl QuantumVerifier {
 // POST-QUANTUM SIGNING (legacy type name retained for API compatibility)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A SPHINCS+-SHA2-256s-simple keypair.
+/// A SPHINCS+-SHAKE-256f-simple keypair.
 ///
 /// The legacy `ClassicalKeyPair` name remains source-compatible, but this type
 /// creates and verifies only SPHINCS+ signatures.
@@ -190,7 +190,7 @@ pub struct ClassicalKeyPair {
 
 impl ClassicalKeyPair {
     pub fn generate() -> Self {
-        let (verifying_key, signing_key) = sphincssha2256ssimple::keypair();
+        let (verifying_key, signing_key) = sphincsshake256fsimple::keypair();
         Self {
             signing_key: signing_key.as_bytes().to_vec(),
             verifying_key: verifying_key.as_bytes().to_vec(),
@@ -198,17 +198,17 @@ impl ClassicalKeyPair {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
-        let secret_len = sphincssha2256ssimple::secret_key_bytes();
-        let public_len = sphincssha2256ssimple::public_key_bytes();
+        let secret_len = sphincsshake256fsimple::secret_key_bytes();
+        let public_len = sphincsshake256fsimple::public_key_bytes();
         if bytes.len() != secret_len + public_len {
             return Err(CryptoError::InvalidKeyLength {
                 expected: secret_len + public_len,
                 got: bytes.len(),
             });
         }
-        let signing_key = sphincssha2256ssimple::SecretKey::from_bytes(&bytes[..secret_len])
+        let signing_key = sphincsshake256fsimple::SecretKey::from_bytes(&bytes[..secret_len])
             .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
-        let verifying_key = sphincssha2256ssimple::PublicKey::from_bytes(&bytes[secret_len..])
+        let verifying_key = sphincsshake256fsimple::PublicKey::from_bytes(&bytes[secret_len..])
             .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
         Ok(Self {
             signing_key: signing_key.as_bytes().to_vec(),
@@ -229,19 +229,19 @@ impl ClassicalKeyPair {
     }
 
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        let signing_key = sphincssha2256ssimple::SecretKey::from_bytes(&self.signing_key)
+        let signing_key = sphincsshake256fsimple::SecretKey::from_bytes(&self.signing_key)
             .expect("SPHINCS+ keypair contains a valid secret key");
-        sphincssha2256ssimple::detached_sign(message, &signing_key)
+        sphincsshake256fsimple::detached_sign(message, &signing_key)
             .as_bytes()
             .to_vec()
     }
 
     pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> CryptoResult<bool> {
-        let vk = sphincssha2256ssimple::PublicKey::from_bytes(public_key)
+        let vk = sphincsshake256fsimple::PublicKey::from_bytes(public_key)
             .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
-        let sig = sphincssha2256ssimple::DetachedSignature::from_bytes(signature)
+        let sig = sphincsshake256fsimple::DetachedSignature::from_bytes(signature)
             .map_err(|e| CryptoError::SphincsError(e.to_string()))?;
-        Ok(sphincssha2256ssimple::verify_detached_signature(&sig, message, &vk).is_ok())
+        Ok(sphincsshake256fsimple::verify_detached_signature(&sig, message, &vk).is_ok())
     }
 }
 

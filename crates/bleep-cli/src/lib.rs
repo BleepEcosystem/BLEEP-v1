@@ -103,7 +103,7 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum WalletCommand {
-    /// Generate a new SPHINCS+ + Kyber-768 keypair and encrypted wallet
+    /// Generate a new SPHINCS+ + Kyber-1024 keypair and encrypted wallet
     Create,
     /// Query balance from /rpc/state (offline fallback to local RocksDB)
     Balance,

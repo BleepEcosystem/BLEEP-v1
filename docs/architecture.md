@@ -178,7 +178,7 @@ The VM never writes to `bleep-state` directly. It returns a `StateDiff` that is 
 
 ### 4. Post-Quantum by Default
 
-The `quantum` feature flag is on by default in `Cargo.toml`. All signatures on mainnet use Falcon or SPHINCS+. Kyber-768 is used for session key establishment. Ed25519 remains available for compatibility but will be sunset post-mainnet.
+The `quantum` feature flag is on by default in `Cargo.toml`. All signatures on mainnet use Falcon or SPHINCS+. Kyber-1024 is used for session key establishment. Ed25519 remains available for compatibility but will be sunset post-mainnet.
 
 ### 5. Shard Safety via 2PC
 
@@ -265,7 +265,7 @@ The SAL solves the SPHINCS+ block-propagation bandwidth problem without sacrific
 
 ### Problem
 
-SPHINCS+-SHAKE-256f-simple produces 49,856-byte signatures. At 512 tx/block, raw signature data per block is ~24.3 MB. Broadcasting this with every block is impractical for validators on commodity internet connections.
+SPHINCS+-SHAKE-256f-simple produces 49,088-byte signatures. At 512 tx/block, raw signature data per block is ~24.3 MB. Broadcasting this with every block is impractical for validators on commodity internet connections.
 
 ### Solution
 

@@ -92,7 +92,7 @@ impl TransactionPool {
         }
 
         // ── Step 3: Signature length check ────────────────────────────────────
-        // SPHINCS+-SHAKE256-simple: 64-byte PK + ~2144-byte signature minimum
+        // Reject obviously truncated SPHINCS+ key/signature blobs before verification.
         if transaction.signature.len() < SPHINCS_PK_LEN + 100 {
             // At least 64 bytes for PK + some sig
             log::error!(
@@ -106,7 +106,7 @@ impl TransactionPool {
 
         // ── Step 4: S-07 — SPHINCS+ cryptographic verification ───────────────
         //
-        // Wire format: signature = pk_bytes(64) || sphincs_detached_sig(49856)
+        // Wire format: signature = pk_bytes(64) || sphincs_detached_sig(49088)
         // Canonical payload: SHA3-256(sender || receiver || amount_le8 || timestamp_le8)
         //
         // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes.
@@ -332,7 +332,7 @@ mod tests {
             receiver: "bob".into(),
             amount: 100,
             timestamp: 1_700_000_003,
-            signature: vec![0u8; SPHINCS_PK_LEN + 49856],
+            signature: vec![0u8; SPHINCS_PK_LEN + 49088],
         };
         assert!(
             !pool.add_transaction(tx).await,

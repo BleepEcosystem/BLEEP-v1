@@ -2,8 +2,8 @@
 //!
 //! ## Key change from v1
 //!
-//! `SigAvailabilityAttestation` (one 49,856-byte SPHINCS+ sig **per transaction**)
-//! is replaced by `BatchBlockAttestation` (one 49,856-byte SPHINCS+ sig **per
+//! `SigAvailabilityAttestation` (one 49,088-byte SPHINCS+ sig **per transaction**)
+//! is replaced by `BatchBlockAttestation` (one 49,088-byte SPHINCS+ sig **per
 //! validator per block**), paired with a compact `TxBitmap` recording exactly
 //! which transactions that validator has verified.
 //!
@@ -181,7 +181,7 @@ impl SigCommitmentAnnouncement {
 /// One attestation per validator per **block** — not per transaction.
 ///
 /// A validator that has verified all 512 transactions produces a 64-byte
-/// bitmap plus ONE 49,856-byte SPHINCS+ signature for the entire block.
+/// bitmap plus ONE 49,088-byte SPHINCS+ signature for the entire block.
 ///
 /// ## Bandwidth
 ///
@@ -206,7 +206,7 @@ pub struct BatchBlockAttestation {
     pub attested_count: u32,
     /// SHA3-256 of this validator's SPHINCS+ public key.
     pub validator_pk_hash: [u8; 32],
-    /// ONE 49,856-byte SPHINCS+ sig over `signing_payload(...)`.
+    /// ONE 49,088-byte SPHINCS+ sig over `signing_payload(...)`.
     pub attestation_sig: Vec<u8>,
     /// SPHINCS+ public key (64 bytes) for verification.
     pub validator_pk: Vec<u8>,

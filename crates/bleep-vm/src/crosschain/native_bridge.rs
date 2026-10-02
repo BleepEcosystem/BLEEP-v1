@@ -11,7 +11,7 @@
 //! 4. Returns the result (or a receipt if async)
 //!
 //! Security: cross-chain calls go through BLEEP Connect which provides:
-//! - Kyber-768 KEM encrypted transport
+//! - Kyber-1024 KEM encrypted transport
 //! - SPHINCS+ signed messages
 //! - ZK proof of source execution (optional)
 //! - Relayer stake slashing on fraud

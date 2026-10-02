@@ -1,9 +1,9 @@
 //! Production post-quantum and classical cryptography for bleep-p2p.
 //!
 //! Algorithms used:
-//! - Key encapsulation : Kyber-768 (NIST PQC round 3 winner)
-//! - Signatures        : SPHINCS+-SHA2-128s (stateless hash-based, NIST PQC winner)
-//! - Signatures        : SPHINCS+-SHA2-128s for all protocol authentication
+//! - Key encapsulation : Kyber-1024
+//! - Signatures        : SPHINCS+-SHAKE-256f-simple (FIPS 205, security level 5)
+//! - Signatures        : SPHINCS+-SHAKE-256f-simple for all protocol authentication
 //! - Symmetric         : AES-256-GCM with random 12-byte nonce prepended
 //! - KDF               : HKDF-SHA256
 
@@ -12,8 +12,8 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use hkdf::Hkdf;
-use pqcrypto_kyber::kyber768;
-use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+use pqcrypto_kyber::kyber1024;
+use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
 use pqcrypto_traits::{
     kem::{Ciphertext as KemCiphertext, PublicKey as KemPk, SecretKey as KemSk, SharedSecret},
     sign::{PublicKey as SignPk, SecretKey as SignSk, SignedMessage},
@@ -28,11 +28,11 @@ use crate::error::{P2PError, P2PResult};
 // KYBER KEY ENCAPSULATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Kyber-768 public key.
+/// Kyber-1024 public key.
 #[derive(Clone)]
 pub struct KyberPublicKey(pub Vec<u8>);
 
-/// Kyber-768 secret key.
+/// Kyber-1024 secret key.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct KyberSecretKey(#[zeroize(skip)] pub Vec<u8>);
 
@@ -44,9 +44,9 @@ pub struct KyberKeypair {
 }
 
 impl KyberKeypair {
-    /// Generate a fresh Kyber-768 keypair.
+    /// Generate a fresh Kyber-1024 keypair.
     pub fn generate() -> Self {
-        let (pk, sk) = kyber768::keypair();
+        let (pk, sk) = kyber1024::keypair();
         KyberKeypair {
             public_key: KyberPublicKey(pk.as_bytes().to_vec()),
             secret_key: KyberSecretKey(sk.as_bytes().to_vec()),
@@ -57,19 +57,19 @@ impl KyberKeypair {
 /// Encapsulate a shared secret to `recipient_pk`.
 /// Returns `(ciphertext_bytes, shared_secret_bytes)`.
 pub fn kyber_encapsulate(recipient_pk_bytes: &[u8]) -> P2PResult<(Vec<u8>, Vec<u8>)> {
-    let pk = kyber768::PublicKey::from_bytes(recipient_pk_bytes)
+    let pk = kyber1024::PublicKey::from_bytes(recipient_pk_bytes)
         .map_err(|e| P2PError::Crypto(format!("Kyber pk parse: {e}")))?;
-    let (ss, ct) = kyber768::encapsulate(&pk);
+    let (ss, ct) = kyber1024::encapsulate(&pk);
     Ok((ct.as_bytes().to_vec(), ss.as_bytes().to_vec()))
 }
 
 /// Decapsulate to recover the shared secret.
 pub fn kyber_decapsulate(ciphertext_bytes: &[u8], sk_bytes: &[u8]) -> P2PResult<Vec<u8>> {
-    let ct = kyber768::Ciphertext::from_bytes(ciphertext_bytes)
+    let ct = kyber1024::Ciphertext::from_bytes(ciphertext_bytes)
         .map_err(|e| P2PError::Crypto(format!("Kyber ct parse: {e}")))?;
-    let sk = kyber768::SecretKey::from_bytes(sk_bytes)
+    let sk = kyber1024::SecretKey::from_bytes(sk_bytes)
         .map_err(|e| P2PError::Crypto(format!("Kyber sk parse: {e}")))?;
-    let ss = kyber768::decapsulate(&ct, &sk);
+    let ss = kyber1024::decapsulate(&ct, &sk);
     Ok(ss.as_bytes().to_vec())
 }
 
@@ -77,11 +77,11 @@ pub fn kyber_decapsulate(ciphertext_bytes: &[u8], sk_bytes: &[u8]) -> P2PResult<
 // SPHINCS+ SIGNATURES
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// SPHINCS+-SHA2-128s public key.
+/// SPHINCS+-SHAKE-256f-simple public key.
 #[derive(Clone, Debug)]
 pub struct SphincsPublicKey(pub Vec<u8>);
 
-/// SPHINCS+-SHA2-128s secret key.
+/// SPHINCS+-SHAKE-256f-simple secret key.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct SphincsSecretKey(#[zeroize(skip)] pub Vec<u8>);
 
@@ -304,7 +304,7 @@ mod tests {
         let (ct, ss1) = kyber_encapsulate(&kp.public_key.0).unwrap();
         let ss2 = kyber_decapsulate(&ct, &kp.secret_key.0).unwrap();
         assert_eq!(ss1, ss2, "Shared secrets must match");
-        assert_eq!(ss1.len(), 32, "Kyber-768 shared secret is 32 bytes");
+        assert_eq!(ss1.len(), 32, "Kyber-1024 shared secret is 32 bytes");
     }
 
     #[test]

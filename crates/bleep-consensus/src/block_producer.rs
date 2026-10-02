@@ -652,7 +652,7 @@ impl BlockProducer {
         // ── Convert sig_hashes to raw_signatures for ParallelBatchSigProver ─
         // The prover recomputes sig_commitment_root internally; we pass the
         // sig_hashes as pre-computed values via a zero-copy shim so we don't
-        // re-hash 49,856-byte sigs a second time.
+        // re-hash 49,088-byte sigs a second time.
         // ParallelBatchSigProver::prove_block expects raw signatures, but the
         // heavy SHA3-256 hashing is already done. We pass fake 1-byte payloads
         // whose pre-computed hashes match exactly, which the prover accepts because

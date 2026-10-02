@@ -11,7 +11,7 @@
 // 6. Recommendations only (governance decides)
 
 use crate::feature_extractor::ExtractedFeatures;
-use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
 use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _, SignedMessage as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

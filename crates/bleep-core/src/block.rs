@@ -15,7 +15,7 @@
 //! ```
 //!
 //! `PK_LEN`  = 64 bytes  (SPHINCS+-SHAKE-256-simple)
-//! `SIG_LEN` = 7,856 bytes (SPHINCS+-SHAKE-256-simple detached sig)
+//! `SIG_LEN` = 49,088 bytes (SPHINCS+-SHAKE-256-simple detached sig)
 //! Total `validator_signature` = 7,888 bytes
 //!
 //! `verify_signature(public_key)` reconstructs the block hash, then calls
@@ -44,7 +44,7 @@ use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as
 /// pqcrypto_sphincsplus::sphincsshake256fsimple generates 64-byte public keys.
 pub const SPHINCS_PK_LEN: usize = 64;
 /// Byte length of a SPHINCS+-SHAKE-256-simple detached signature.
-pub const SPHINCS_SIG_LEN: usize = 49856;
+pub const SPHINCS_SIG_LEN: usize = 49088;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 
@@ -345,7 +345,7 @@ impl Block {
     /// (as returned by `generate_tx_keypair()` or `sphincsshake256fsimple::keypair()`).
     /// `sphincs_pk_bytes` must be raw SPHINCS+-SHAKE-256-simple public key bytes (64 bytes).
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49088)`.
     /// The block proof is generated separately by the consensus producer.
     pub fn sign_block(&mut self, seed_bytes: &[u8]) -> Result<(), String> {
         // For backward compatibility: derive keypair from seed
@@ -360,7 +360,7 @@ impl Block {
     /// `sphincs_sk_bytes` must be raw SPHINCS+-SHAKE-256-simple secret key bytes.
     /// `sphincs_pk_bytes` must be the corresponding 64-byte public key.
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49088)`.
     pub fn sign_block_with_pk(
         &mut self,
         sphincs_sk_bytes: &[u8],
@@ -387,7 +387,7 @@ impl Block {
         let sig = sphincsshake256fsimple::detached_sign(&block_hash_bytes, &sk);
         let sig_bytes = sig.as_bytes();
 
-        // Build signature: pk(64) || sig(49856)
+        // Build signature: pk(64) || sig(49088)
         let mut vsig = Vec::with_capacity(VALIDATOR_SIG_LEN);
         vsig.extend_from_slice(sphincs_pk_bytes); // [0..64]   validator public key
         vsig.extend_from_slice(sig_bytes); // [64..]    SPHINCS+ detached sig

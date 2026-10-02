@@ -1,7 +1,7 @@
 //! Production message protocol for bleep-p2p.
 //!
 //! Transport: async TCP with a 4-byte length-prefix framing.
-//! Encryption: Kyber-768 KEM session key → AES-256-GCM per message.
+//! Encryption: Kyber-1024 KEM session key → AES-256-GCM per message.
 //! Authentication: SPHINCS+ signature on every message.
 //! Anti-replay: 16-byte nonce + timestamp within ±30s window.
 
@@ -123,7 +123,7 @@ pub struct MessageProtocol {
     /// Anti-replay cache.
     nonce_cache: Arc<Mutex<NonceCache>>,
     /// Inbound message channel — consumers subscribe to this.
-    inbound_tx: mpsc::Sender<(NodeId, SecureMessage)>,
+    inbound_tx: mpsc::Sender<(NodeId, SecureMessage, Vec<u8>)>,
     peer_manager: Arc<PeerManager>,
 }
 
@@ -133,7 +133,7 @@ impl MessageProtocol {
         local_sphincs: SphincsKeypair,
         local_kyber: KyberKeypair,
         peer_manager: Arc<PeerManager>,
-    ) -> (Arc<Self>, mpsc::Receiver<(NodeId, SecureMessage)>) {
+    ) -> (Arc<Self>, mpsc::Receiver<(NodeId, SecureMessage, Vec<u8>)>) {
         let local_id = NodeId::from_bytes(&local_identity.public_key_bytes());
         let (tx, rx) = mpsc::channel(4096);
         let proto = Arc::new(MessageProtocol {
@@ -592,7 +592,7 @@ impl MessageProtocol {
         }
 
         // Verify and decrypt
-        let _plaintext = self
+        let plaintext = self
             .open_message(&msg, &sender_pk)
             .await
             .inspect_err(|_e| {
@@ -603,7 +603,7 @@ impl MessageProtocol {
         self.peer_manager.record_message(&sender_id);
         self.peer_manager.touch(&sender_id);
 
-        let _ = self.inbound_tx.send((sender_id, msg)).await;
+        let _ = self.inbound_tx.send((sender_id, msg, plaintext)).await;
         Ok(())
     }
 }
@@ -616,7 +616,7 @@ mod tests {
 
     fn make_proto() -> (
         Arc<MessageProtocol>,
-        mpsc::Receiver<(NodeId, SecureMessage)>,
+        mpsc::Receiver<(NodeId, SecureMessage, Vec<u8>)>,
         Arc<PeerManager>,
     ) {
         let identity = SphincsKeypair::generate();

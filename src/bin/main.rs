@@ -503,7 +503,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Arc::clone(&tx_pool),
         Arc::clone(&blockchain),
         Arc::clone(&state),
-        sphincs_sk.clone(),          // full SPHINCS+ SK bytes (64 bytes)
+        sphincs_sk.clone(),          // full SPHINCS+ SK bytes (128 bytes)
         sphincs_pk.clone(),          // full SPHINCS+ PK bytes (64 bytes, FIPS 205 SL5)
         Some(Arc::clone(&p2p_node)), // direct gossip broadcast
         Some(sal_bridge.clone()),

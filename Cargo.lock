@@ -1536,7 +1536,6 @@ dependencies = [
  "config",
  "criterion",
  "dashmap 5.5.3",
- "ed25519-dalek",
  "env_logger",
  "futures",
  "halo2_proofs",
@@ -1742,7 +1741,6 @@ dependencies = [
  "bip39",
  "blake2",
  "blake3",
- "ed25519-dalek",
  "hex",
  "log",
  "pqcrypto-kyber",
@@ -2940,7 +2938,6 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "subtle",

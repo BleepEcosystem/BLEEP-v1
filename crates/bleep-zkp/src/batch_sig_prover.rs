@@ -111,7 +111,7 @@ pub struct BatchProveResult {
     /// broadcast via `SigCommitmentAnnouncement`.
     pub sig_commitment_root: [u8; 32],
     /// Ordered `SHA3-256(sig_i)` values — broadcast alongside the block header
-    /// instead of the full 49,856-byte signatures.
+    /// instead of the full 49,088-byte signatures.
     pub sig_hashes: Vec<[u8; 32]>,
     /// Public inputs baked into the proof — hand to `bleep-consensus` for storage.
     pub pub_inputs: ExtendedBlockPublicInputs,
@@ -170,7 +170,7 @@ impl ParallelBatchSigProver {
         }
 
         // ── Step 1: parallel SHA3-256 hashing + Blake3 Merkle root ────────
-        // Approximately 45 ms for 512 × 49,856-byte signatures on 8 cores.
+        // Approximately 45 ms for 512 × 49,088-byte signatures on 8 cores.
         let (sig_commitment_root, sig_hashes) = compute_commitment_parallel(raw_signatures);
 
         // Verify the count is consistent with the public inputs template.

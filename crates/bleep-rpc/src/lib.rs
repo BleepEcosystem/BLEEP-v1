@@ -705,7 +705,7 @@ pub fn rpc_routes_with_state(
                     }
                 };
                 let proof = match req.proof.as_deref().and_then(|v| hex::decode(v).ok()) {
-                    Some(proof) if proof.len() == 49856 => proof,
+                    Some(proof) if proof.len() == 49088 => proof,
                     _ => {
                         return Ok(warp::reply::with_status(
                             warp::reply::json(&ErrResp {
