@@ -705,7 +705,7 @@ pub fn rpc_routes_with_state(
                     }
                 };
                 let proof = match req.proof.as_deref().and_then(|v| hex::decode(v).ok()) {
-                    Some(proof) if proof.len() == 49088 => proof,
+                    Some(proof) if !proof.is_empty() => proof,
                     _ => {
                         return Ok(warp::reply::with_status(
                             warp::reply::json(&ErrResp {
@@ -3138,6 +3138,16 @@ mod tests {
             tx_ids[0],
             format!("{}:{}:{}:{}", sender, receiver, amount, timestamp)
         );
+    }
+
+    #[tokio::test]
+    async fn validator_stake_accepts_valid_sphincs_signature() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let payload = tx_payload("validator-local-test", "validator", 1_000_000, 1_234_567);
+        let proof = sign_tx_payload(&payload, &secret_key).expect("sign payload");
+
+        assert!(!proof.is_empty());
+        assert!(verify_tx_signature(&payload, &proof, &public_key));
     }
 
     #[tokio::test]

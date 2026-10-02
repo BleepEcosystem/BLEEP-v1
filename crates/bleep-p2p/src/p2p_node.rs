@@ -106,7 +106,7 @@ pub struct P2PNode {
     pub gossip: Arc<GossipProtocol>,
     pub onion_router: Arc<OnionRouter>,
     /// Inbound messages decoded and verified by MessageProtocol.
-    inbound_rx: tokio::sync::Mutex<mpsc::Receiver<(NodeId, SecureMessage)>>,
+    inbound_rx: tokio::sync::Mutex<mpsc::Receiver<(NodeId, SecureMessage, Vec<u8>)>>,
 }
 
 impl P2PNode {
@@ -252,6 +252,16 @@ impl P2PNode {
 
     /// Receive the next verified inbound message (blocks until one arrives).
     pub async fn recv(&self) -> Option<(NodeId, SecureMessage)> {
+        self.inbound_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .map(|(sender_id, message, _)| (sender_id, message))
+    }
+
+    /// Receive the next authenticated inbound message with its decrypted payload.
+    pub async fn recv_with_payload(&self) -> Option<(NodeId, SecureMessage, Vec<u8>)> {
         self.inbound_rx.lock().await.recv().await
     }
 
@@ -325,6 +335,19 @@ mod tests {
         let config = P2PNodeConfig {
             listen_addr: format!("127.0.0.1:{port}").parse().unwrap(),
             bootstrap_peers: vec![],
+            peer_manager_config: PeerManagerConfig::default(),
+        };
+        P2PNode::start(config).await.unwrap()
+    }
+
+    async fn start_bootstrap_test_node(port: u16, seed_port: u16) -> (Arc<P2PNode>, NodeHandle) {
+        let config = P2PNodeConfig {
+            listen_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            bootstrap_peers: vec![BootstrapPeer {
+                addr: format!("127.0.0.1:{seed_port}").parse().unwrap(),
+                identity_public_key: vec![],
+                sphincs_pubkey: vec![],
+            }],
             peer_manager_config: PeerManagerConfig::default(),
         };
         P2PNode::start(config).await.unwrap()
@@ -423,6 +446,54 @@ mod tests {
 
         handle_a.shutdown().await;
         handle_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_three_nodes_exchange_authenticated_gossip() {
+        let node1_port = 17710;
+        let (node1, handle1) = start_test_node(node1_port).await;
+        let (node2, handle2) = start_bootstrap_test_node(17711, node1_port).await;
+        let (node3, handle3) = start_bootstrap_test_node(17712, node1_port).await;
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let connected = node1.peer_count() == 2
+                    && node2.peer_count() == 1
+                    && node3.peer_count() == 1
+                    && node1.message_protocol.has_session(&node2.node_id)
+                    && node1.message_protocol.has_session(&node3.node_id)
+                    && node2.message_protocol.has_session(&node1.node_id)
+                    && node3.message_protocol.has_session(&node1.node_id);
+                if connected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("all three nodes should establish authenticated sessions");
+
+        let payload = b"three-node authenticated gossip";
+        node1.broadcast(MessageType::Transaction, payload.to_vec());
+
+        for node in [&node2, &node3] {
+            let (sender_id, message, plaintext) = timeout(
+                Duration::from_secs(10),
+                node.recv_with_payload(),
+            )
+            .await
+            .expect("node should receive gossip")
+            .expect("inbound channel should remain open");
+
+            assert_eq!(sender_id, node1.node_id);
+            assert_eq!(message.sender_id, node1.node_id);
+            assert_eq!(message.message_type, MessageType::Gossip);
+            assert_eq!(plaintext, payload);
+        }
+
+        handle1.shutdown().await;
+        handle2.shutdown().await;
+        handle3.shutdown().await;
     }
 
     #[tokio::test]

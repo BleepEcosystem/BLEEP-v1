@@ -234,7 +234,7 @@ impl CrossShardTransaction {
     ///
     /// SAFETY: Signature verification is deterministic and must match on all nodes
     pub fn verify_signature(&self, public_key: &[u8]) -> bool {
-        use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
         use pqcrypto_traits::sign::{PublicKey as _, SignedMessage as _};
 
         let Ok(public_key) = sphincs::PublicKey::from_bytes(public_key) else {
@@ -253,7 +253,7 @@ impl CrossShardTransaction {
 
     /// Sign immutable transaction fields with the submitter's SPHINCS+ secret key.
     pub fn sign(&mut self, secret_key: &[u8]) -> Result<(), String> {
-        use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
         use pqcrypto_traits::sign::{SecretKey as _, SignedMessage as _};
 
         let secret_key = sphincs::SecretKey::from_bytes(secret_key)
@@ -405,7 +405,7 @@ pub struct PrepareVote {
     /// Reason for rejection (if any)
     pub rejection_reason: Option<String>,
 
-    /// Cryptographic signature by shard validators
+    /// Cryptographic signature by a shard validator
     pub signature: Vec<u8>,
 
     /// Block height where vote was included
@@ -413,14 +413,59 @@ pub struct PrepareVote {
 }
 
 impl PrepareVote {
-    /// Verify the vote is signed correctly
+    /// Verify the vote against the supplied shard validator keys; one valid signature is required.
     ///
     /// SAFETY: Signature must be verified deterministically on all nodes
     pub fn verify_signature(&self, shard_public_keys: &[Vec<u8>]) -> bool {
-        // Verify vote signature is present and non-empty
-        // In production, verify that signature is valid BFT quorum signature
-        // signed by at least 2/3 of the shard validators
-        !self.signature.is_empty() && !shard_public_keys.is_empty()
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+        use pqcrypto_traits::sign::{PublicKey as _, SignedMessage as _};
+
+        let Ok(message) = self.signing_bytes() else {
+            return false;
+        };
+        let mut signed_bytes = self.signature.clone();
+        signed_bytes.extend_from_slice(&message);
+        let Ok(signed_message) = sphincs::SignedMessage::from_bytes(&signed_bytes) else {
+            return false;
+        };
+
+        shard_public_keys.iter().any(|public_key| {
+            let Ok(public_key) = sphincs::PublicKey::from_bytes(public_key) else {
+                return false;
+            };
+            sphincs::open(&signed_message, &public_key).is_ok()
+        })
+    }
+
+    /// Sign the immutable vote fields with a shard validator's SPHINCS+ key.
+    pub fn sign(&mut self, secret_key: &[u8]) -> Result<(), String> {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+        use pqcrypto_traits::sign::{SecretKey as _, SignedMessage as _};
+
+        let secret_key = sphincs::SecretKey::from_bytes(secret_key)
+            .map_err(|e| format!("invalid SPHINCS+ secret key: {e}"))?;
+        let message = self.signing_bytes()?;
+        let signed = sphincs::sign(&message, &secret_key);
+        let signature_len = signed
+            .as_bytes()
+            .len()
+            .checked_sub(message.len())
+            .ok_or_else(|| "invalid SPHINCS+ signed message".to_string())?;
+        self.signature = signed.as_bytes()[..signature_len].to_vec();
+        Ok(())
+    }
+
+    fn signing_bytes(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&(
+            b"bleep-prepare-vote-v1".as_slice(),
+            self.transaction_id,
+            self.shard_id,
+            self.can_commit,
+            self.lock_id,
+            &self.rejection_reason,
+            self.vote_height,
+        ))
+        .map_err(|e| format!("failed to serialize prepare vote: {e}"))
     }
 }
 
@@ -453,6 +498,36 @@ impl StateLockId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prepare_vote_signature_authenticates_vote() {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+        use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _};
+
+        let (public_key, secret_key) = sphincs::keypair();
+        let mut vote = PrepareVote {
+            transaction_id: TransactionId::compute(b"prepare-vote", 7),
+            shard_id: ShardId(3),
+            can_commit: true,
+            lock_id: Some(StateLockId(42)),
+            rejection_reason: None,
+            signature: Vec::new(),
+            vote_height: 100,
+        };
+
+        assert!(!vote.verify_signature(&[public_key.as_bytes().to_vec()]));
+        vote.sign(secret_key.as_bytes()).unwrap();
+        let public_keys = [public_key.as_bytes().to_vec()];
+        assert!(vote.verify_signature(&public_keys));
+        assert!(!vote.verify_signature(&[]));
+
+        let mut tampered_vote = vote.clone();
+        tampered_vote.vote_height += 1;
+        assert!(!tampered_vote.verify_signature(&public_keys));
+
+        let (other_public_key, _) = sphincs::keypair();
+        assert!(!vote.verify_signature(&[other_public_key.as_bytes().to_vec()]));
+    }
 
     #[test]
     fn test_transaction_id_deterministic() {
@@ -499,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_cross_shard_signature_authenticates_transaction() {
-        use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
         use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _};
 
         let mut shards = BTreeSet::new();
