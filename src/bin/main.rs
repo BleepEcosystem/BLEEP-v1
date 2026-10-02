@@ -101,8 +101,6 @@ use bleep_telemetry::{
 // ── RPC ───────────────────────────────────────────────────────────────────────
 use base64::{engine::general_purpose, Engine as _};
 use bleep_rpc::{rpc_routes_with_state, RpcState};
-use hex;
-use warp;
 
 const DEFAULT_BLEEP_JWT_SECRET_B64: &str = "UtQcXNbNejElXUMcGocAuRh+YLiIgR9onZ1+PUJtJiU="; // Local dev fallback; set BLEEP_JWT_SECRET in production.
 
@@ -195,8 +193,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Generate real Kyber-1024 keypair for validator KEM binding.
     // KyberKem::keygen() returns (KyberPublicKey: 1568B, KyberSecretKey: 3168B).
-    let kyber_pk = kyber_pk;
-
     info!(
         "  ✅ SPHINCS+-SHAKE-256f-simple keypair generated (PK={} bytes, SK={} bytes).",
         sphincs_pk.len(),
@@ -439,8 +435,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("  🪙 Initialising PAT Registry…");
     let pat_registry = {
         use bleep_pat::PATRegistry;
-        let reg = Arc::new(Mutex::new(PATRegistry::new()));
-        reg
+        Arc::new(Mutex::new(PATRegistry::new()))
     };
     info!("  ✅ PAT Registry ready (create tokens via /rpc/pat/create).");
 

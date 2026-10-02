@@ -64,6 +64,7 @@ impl EngineResult {
 }
 
 /// Every execution engine implements this trait.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
     fn name(&self) -> &'static str;
