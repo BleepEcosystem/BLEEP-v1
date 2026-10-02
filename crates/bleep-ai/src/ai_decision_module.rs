@@ -472,6 +472,12 @@ impl AIDecisionModule {
     }
 }
 
+impl Default for AIDecisionModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

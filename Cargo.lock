@@ -967,6 +967,7 @@ dependencies = [
  "ndarray 0.15.6",
  "pqcrypto-kyber",
  "pqcrypto-sphincsplus",
+ "pqcrypto-traits",
  "rand 0.8.6",
  "rand_core 0.6.4",
  "rayon",
