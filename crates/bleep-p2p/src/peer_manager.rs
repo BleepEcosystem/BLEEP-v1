@@ -260,6 +260,16 @@ impl PeerManager {
             .collect()
     }
 
+    /// Peers that are authenticated and can participate in network traffic,
+    /// even before they have reached the Healthy threshold.
+    pub fn eligible_peers(&self) -> Vec<PeerInfo> {
+        self.peers
+            .iter()
+            .filter(|e| !matches!(e.value().status, PeerStatus::Malicious | PeerStatus::Banned))
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
     pub fn peer_count(&self) -> usize {
         self.peers.len()
     }

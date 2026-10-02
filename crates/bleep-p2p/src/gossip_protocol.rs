@@ -98,8 +98,16 @@ impl GossipProtocol {
     /// established.  If a session is missing, the peer is skipped and a warning
     /// is logged.  Messages are **never** sent unencrypted.
     pub async fn spread(&self, msg: SecureMessage, exclude: Option<&NodeId>) {
+        self.spread_inner(msg, exclude, false).await;
+    }
+
+    async fn spread_queued(&self, msg: SecureMessage, exclude: Option<&NodeId>) {
+        self.spread_inner(msg, exclude, true).await;
+    }
+
+    async fn spread_inner(&self, msg: SecureMessage, exclude: Option<&NodeId>, already_seen: bool) {
         let id = message_id(&msg);
-        {
+        if !already_seen {
             let mut seen = self.seen.lock();
             if seen.contains(&id) {
                 return;
@@ -107,10 +115,12 @@ impl GossipProtocol {
             seen.put(id, ());
         }
 
-        let healthy = self.peer_manager.healthy_peers();
+        let eligible = self.peer_manager.eligible_peers();
 
         // Select EAGER_FANOUT highest-scoring peers (excluding sender).
-        let candidates: Vec<NodeId> = healthy
+        // Newly authenticated peers begin in Candidate status and are still
+        // allowed to receive gossip until they are promoted or demoted.
+        let candidates: Vec<NodeId> = eligible
             .iter()
             .filter(|p| exclude != Some(&p.id))
             .map(|p| p.id.clone())
@@ -131,13 +141,11 @@ impl GossipProtocol {
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
         let eager: Vec<NodeId> = scored
             .into_iter()
             .take(EAGER_FANOUT)
             .map(|(id, _)| id)
             .collect();
-
         let attempted = eager.len();
         let mut delivered = 0;
         for peer_id in &eager {
@@ -183,7 +191,7 @@ impl GossipProtocol {
                 std::mem::take(&mut *pending)
             };
             for (msg, exclude) in batch {
-                self.spread(msg, exclude.as_ref()).await;
+                self.spread_queued(msg, exclude.as_ref()).await;
             }
         }
     }

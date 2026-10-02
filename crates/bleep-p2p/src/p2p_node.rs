@@ -204,6 +204,13 @@ impl P2PNode {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 loop {
                     for seed in &seeds {
+                        let connected = peer_manager
+                            .all_peers()
+                            .iter()
+                            .any(|peer| peer.addr == seed.addr && protocol.has_session(&peer.id));
+                        if connected {
+                            continue;
+                        }
                         match protocol.establish_outbound(seed.addr).await {
                             Ok(peer) => {
                                 if let Some(peer_info) = peer_manager.get_peer(&peer) {
@@ -477,13 +484,11 @@ mod tests {
         node1.broadcast(MessageType::Transaction, payload.to_vec());
 
         for node in [&node2, &node3] {
-            let (sender_id, message, plaintext) = timeout(
-                Duration::from_secs(10),
-                node.recv_with_payload(),
-            )
-            .await
-            .expect("node should receive gossip")
-            .expect("inbound channel should remain open");
+            let (sender_id, message, plaintext) =
+                timeout(Duration::from_secs(10), node.recv_with_payload())
+                    .await
+                    .expect("node should receive gossip")
+                    .expect("inbound channel should remain open");
 
             assert_eq!(sender_id, node1.node_id);
             assert_eq!(message.sender_id, node1.node_id);

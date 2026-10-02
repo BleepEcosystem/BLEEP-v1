@@ -167,7 +167,8 @@ impl MessageProtocol {
         peer_kyber_pk_bytes: &[u8],
     ) -> P2PResult<Vec<u8>> {
         let (ciphertext, shared_secret) = kyber_encapsulate(peer_kyber_pk_bytes)?;
-        let session_key = SessionKey::from_shared_secret(&shared_secret, peer_id.as_bytes());
+        let context = self.session_context(peer_id);
+        let session_key = SessionKey::from_shared_secret(&shared_secret, &context);
         self.sessions.insert(
             peer_id.clone(),
             Session {
@@ -182,7 +183,8 @@ impl MessageProtocol {
     /// Respond to a Kyber KEM session initiation.
     pub fn accept_session(&self, peer_id: &NodeId, kem_ciphertext: &[u8]) -> P2PResult<()> {
         let shared_secret = kyber_decapsulate(kem_ciphertext, &self.local_kyber.secret_key.0)?;
-        let session_key = SessionKey::from_shared_secret(&shared_secret, peer_id.as_bytes());
+        let context = self.session_context(peer_id);
+        let session_key = SessionKey::from_shared_secret(&shared_secret, &context);
         self.sessions.insert(
             peer_id.clone(),
             Session {
@@ -196,6 +198,18 @@ impl MessageProtocol {
 
     pub fn has_session(&self, peer_id: &NodeId) -> bool {
         self.sessions.contains_key(peer_id)
+    }
+
+    fn session_context(&self, peer_id: &NodeId) -> [u8; 64] {
+        let (first, second) = if self.local_id.as_bytes() < peer_id.as_bytes() {
+            (self.local_id.as_bytes(), peer_id.as_bytes())
+        } else {
+            (peer_id.as_bytes(), self.local_id.as_bytes())
+        };
+        let mut context = [0u8; 64];
+        context[..32].copy_from_slice(first);
+        context[32..].copy_from_slice(second);
+        context
     }
 
     fn local_handshake(&self) -> HandshakeHello {
@@ -651,6 +665,34 @@ mod tests {
         // Verify the signing bytes are non-empty
         assert!(!msg.signature.is_empty());
         assert!(!msg.payload.is_empty());
+    }
+
+    #[test]
+    fn test_session_keys_match_on_both_sides() {
+        let (proto_a, _, _) = make_proto();
+        let (proto_b, _, _) = make_proto();
+
+        let ciphertext = proto_a
+            .initiate_session(&proto_b.local_id, &proto_b.local_kyber.public_key.0)
+            .unwrap();
+        proto_b
+            .accept_session(&proto_a.local_id, &ciphertext)
+            .unwrap();
+
+        assert_eq!(
+            proto_a
+                .sessions
+                .get(&proto_b.local_id)
+                .unwrap()
+                .key
+                .key_material,
+            proto_b
+                .sessions
+                .get(&proto_a.local_id)
+                .unwrap()
+                .key
+                .key_material
+        );
     }
 
     #[test]
