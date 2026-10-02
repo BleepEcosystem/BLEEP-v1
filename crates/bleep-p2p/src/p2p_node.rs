@@ -53,7 +53,7 @@ pub struct P2PNodeConfig {
 #[derive(Debug, Clone)]
 pub struct BootstrapPeer {
     pub addr: SocketAddr,
-    pub ed25519_pubkey: Vec<u8>,
+    pub identity_public_key: Vec<u8>,
     pub sphincs_pubkey: Vec<u8>,
 }
 
@@ -85,7 +85,7 @@ impl P2PNodeConfig {
                     addr: seed
                         .parse()
                         .map_err(|e| format!("invalid BLEEP_P2P_SEEDS entry '{seed}': {e}"))?,
-                    ed25519_pubkey: vec![],
+                    identity_public_key: vec![],
                     sphincs_pubkey: vec![],
                 });
             }
@@ -124,7 +124,7 @@ impl P2PNode {
             PeerManager::new(node_id.clone(), config.peer_manager_config.clone());
 
         let (message_protocol, inbound_rx) = MessageProtocol::new(
-            identity.ed_keypair.clone(),
+            identity.identity_keypair.clone(),
             identity.sphincs_keypair.clone(),
             identity.kyber_keypair.clone(),
             peer_manager.clone(),
@@ -259,17 +259,17 @@ impl P2PNode {
     pub async fn connect_peer(
         &self,
         addr: SocketAddr,
-        ed25519_pubkey: Vec<u8>,
+        identity_public_key: Vec<u8>,
         sphincs_pubkey: Vec<u8>,
         challenge: &[u8],
         sphincs_signature: &[u8],
     ) -> P2PResult<NodeId> {
-        let peer_id = NodeId::from_bytes(&ed25519_pubkey);
+        let peer_id = NodeId::from_bytes(&identity_public_key);
         self.peer_manager
             .add_peer(
                 peer_id.clone(),
                 addr,
-                ed25519_pubkey,
+                identity_public_key,
                 sphincs_pubkey,
                 challenge,
                 sphincs_signature,
@@ -356,16 +356,16 @@ mod tests {
         let (node_a, handle_a) = start_test_node(17702).await;
         let (node_b, handle_b) = start_test_node(17703).await;
 
-        let b_ed_pk = node_b.identity.ed_keypair.public_key_bytes();
+        let b_identity_pk = node_b.identity.identity_keypair.public_key_bytes();
         let b_sphincs_pk = node_b.identity.sphincs_keypair.public_key.0.clone();
         let challenge = b"handshake-test-challenge";
         let sig = node_b.make_identity_proof(challenge).unwrap();
-        let expected_peer_id = NodeId::from_bytes(&b_ed_pk);
+        let expected_peer_id = NodeId::from_bytes(&b_identity_pk);
 
         let peer_id = node_a
             .connect_peer(
                 "127.0.0.1:17703".parse().unwrap(),
-                b_ed_pk,
+                b_identity_pk,
                 b_sphincs_pk,
                 challenge,
                 &sig,
@@ -388,7 +388,7 @@ mod tests {
             listen_addr: "127.0.0.1:17707".parse().unwrap(),
             bootstrap_peers: vec![BootstrapPeer {
                 addr: "127.0.0.1:17706".parse().unwrap(),
-                ed25519_pubkey: vec![],
+                identity_public_key: vec![],
                 sphincs_pubkey: vec![],
             }],
             peer_manager_config: PeerManagerConfig::default(),

@@ -103,7 +103,7 @@ pub struct RouterConfig {
     pub max_gas_per_intent: u64,
     /// Maximum call-stack depth across nested calls.
     pub max_call_depth: usize,
-    /// Whether to verify Ed25519 signatures on intents.
+    /// Whether to verify SPHINCS+ signatures on intents.
     pub verify_signatures: bool,
     /// Whether to validate bytecode in sandbox before execution.
     pub sandbox_validation: bool,
@@ -228,7 +228,7 @@ impl VmRouter {
         if self.config.verify_signatures && intent.signer != [0u8; 32] && !intent.verify_signature()
         {
             return Err(VmError::ValidationError(
-                "Invalid Ed25519 signature on intent".into(),
+                "Invalid SPHINCS+ signature on intent".into(),
             ));
         }
 

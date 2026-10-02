@@ -5,7 +5,7 @@
 //! - Lazy-push (IHave) to the rest for bandwidth efficiency.
 //! - Deduplication via a bounded LRU seen-message cache.
 //! - Anti-flood: per-peer message-rate tracking via PeerScoring.
-//! - All outbound messages are sealed via MessageProtocol (AES-GCM + Ed25519).
+//! - All outbound messages are sealed via MessageProtocol (AES-GCM + SPHINCS+).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -193,15 +193,15 @@ impl GossipProtocol {
 mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, SphincsKeypair};
+    use crate::quantum_crypto::{KyberKeypair, SphincsKeypair};
     use crate::types::{unix_now, MessageType};
 
     fn make_gossip() -> Arc<GossipProtocol> {
         let local_id = NodeId::random();
         let (pm, _) = PeerManager::new(local_id.clone(), PeerManagerConfig::default());
-        let ed = Ed25519Keypair::generate();
+        let identity = SphincsKeypair::generate();
         let kyber = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(ed, SphincsKeypair::generate(), kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, SphincsKeypair::generate(), kyber, pm.clone());
         GossipProtocol::new(pm, mp)
     }
 

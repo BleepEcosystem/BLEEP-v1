@@ -33,6 +33,7 @@ sha3          = "0.10"
 blake3        = "1.5"
 pqcrypto-kyber = "0.8.1"
 pqcrypto-sphincsplus = "0.7"
+pqcrypto-traits = "0.3.5"
 bincode = { version = "2.0.1", features = ["serde"] }
 
 rand_core             = "0.6"

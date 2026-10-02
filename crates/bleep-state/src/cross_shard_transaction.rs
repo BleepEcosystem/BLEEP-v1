@@ -234,9 +234,52 @@ impl CrossShardTransaction {
     ///
     /// SAFETY: Signature verification is deterministic and must match on all nodes
     pub fn verify_signature(&self, public_key: &[u8]) -> bool {
-        // Signature verification: check that signature is present and non-empty
-        // In production, use ECDSA or Ed25519 signature verification
-        !self.signature.is_empty() && !public_key.is_empty()
+        use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+        use pqcrypto_traits::sign::{PublicKey as _, SignedMessage as _};
+
+        let Ok(public_key) = sphincs::PublicKey::from_bytes(public_key) else {
+            return false;
+        };
+        let Ok(message) = self.signing_bytes() else {
+            return false;
+        };
+        let mut signed_bytes = self.signature.clone();
+        signed_bytes.extend_from_slice(&message);
+        let Ok(signed_message) = sphincs::SignedMessage::from_bytes(&signed_bytes) else {
+            return false;
+        };
+        sphincs::open(&signed_message, &public_key).is_ok()
+    }
+
+    /// Sign immutable transaction fields with the submitter's SPHINCS+ secret key.
+    pub fn sign(&mut self, secret_key: &[u8]) -> Result<(), String> {
+        use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+        use pqcrypto_traits::sign::{SecretKey as _, SignedMessage as _};
+
+        let secret_key = sphincs::SecretKey::from_bytes(secret_key)
+            .map_err(|e| format!("invalid SPHINCS+ secret key: {e}"))?;
+        let message = self.signing_bytes()?;
+        let signed = sphincs::sign(&message, &secret_key);
+        let signature_len = signed
+            .as_bytes()
+            .len()
+            .checked_sub(message.len())
+            .ok_or_else(|| "invalid SPHINCS+ signed message".to_string())?;
+        self.signature = signed.as_bytes()[..signature_len].to_vec();
+        Ok(())
+    }
+
+    fn signing_bytes(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&(
+            b"bleep-cross-shard-transaction-v1".as_slice(),
+            self.id,
+            &self.payload,
+            &self.involved_shards,
+            &self.execution_plan,
+            self.timeout_epoch,
+            self.nonce,
+        ))
+        .map_err(|e| format!("failed to serialize cross-shard transaction: {e}"))
     }
 
     /// Check if transaction is single-shard (optimization path)
@@ -452,6 +495,28 @@ mod tests {
 
         assert!(tx.is_ok());
         assert_eq!(tx.unwrap().status, CrossShardTransactionStatus::Pending);
+    }
+
+    #[test]
+    fn test_cross_shard_signature_authenticates_transaction() {
+        use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+        use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _};
+
+        let mut shards = BTreeSet::new();
+        shards.insert(ShardId(0));
+        let mut transaction =
+            CrossShardTransaction::new(vec![1, 2, 3], shards, EpochId(5), 42).unwrap();
+        let (public_key, secret_key) = sphincs::keypair();
+
+        assert!(!transaction.verify_signature(public_key.as_bytes()));
+        transaction.sign(secret_key.as_bytes()).unwrap();
+        assert!(transaction.verify_signature(public_key.as_bytes()));
+
+        transaction.payload.push(4);
+        assert!(!transaction.verify_signature(public_key.as_bytes()));
+
+        let (other_public_key, _) = sphincs::keypair();
+        assert!(!transaction.verify_signature(other_public_key.as_bytes()));
     }
 
     #[test]

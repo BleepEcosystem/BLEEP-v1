@@ -255,14 +255,14 @@ impl OnionRouter {
 mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, SphincsKeypair};
+    use crate::quantum_crypto::{KyberKeypair, SphincsKeypair};
 
     fn make_router() -> (OnionRouter, Arc<PeerManager>) {
         let local = NodeId::random();
         let (pm, _) = PeerManager::new(local.clone(), PeerManagerConfig::default());
-        let ed = Ed25519Keypair::generate();
+        let identity = SphincsKeypair::generate();
         let kyber = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(ed, SphincsKeypair::generate(), kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, SphincsKeypair::generate(), kyber, pm.clone());
         let scoring = Arc::new(PeerScoring::new());
         (OnionRouter::new(pm.clone(), mp, scoring), pm)
     }

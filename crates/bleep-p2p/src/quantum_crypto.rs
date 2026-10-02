@@ -133,9 +133,6 @@ pub fn sphincs_verify(message: &[u8], signature_bytes: &[u8], pk_bytes: &[u8]) -
         .map_err(|_| P2PError::AuthenticationFailed)
 }
 
-/// Compatibility alias for callers that used the pre-PQ P2P API.
-pub type Ed25519Keypair = SphincsKeypair;
-
 /// Verify a SPHINCS+ signature.
 pub fn sphincs_verify_message(
     message: &[u8],
@@ -143,15 +140,6 @@ pub fn sphincs_verify_message(
     public_key_bytes: &[u8],
 ) -> P2PResult<()> {
     sphincs_verify(message, signature_bytes, public_key_bytes)
-}
-
-/// Compatibility alias for the pre-PQ verifier API.
-pub fn ed25519_verify(
-    message: &[u8],
-    signature_bytes: &[u8],
-    public_key_bytes: &[u8],
-) -> P2PResult<()> {
-    sphincs_verify_message(message, signature_bytes, public_key_bytes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,7 +234,7 @@ pub struct ProofOfIdentity {
 
 impl ProofOfIdentity {
     /// Create a proof of identity for `context` (e.g., `b"bleep-p2p-handshake"` ‖ peer_nonce).
-    pub fn create(keypair: &Ed25519Keypair, context: &[u8]) -> Self {
+    pub fn create(keypair: &SphincsKeypair, context: &[u8]) -> Self {
         // Challenge = SHA-256(public_key ‖ context ‖ random_nonce)
         let mut rng_bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut rng_bytes);
@@ -266,7 +254,7 @@ impl ProofOfIdentity {
 
     /// Verify the proof.
     pub fn verify(&self) -> P2PResult<()> {
-        ed25519_verify(&self.challenge, &self.signature, &self.public_key)
+        sphincs_verify(&self.challenge, &self.signature, &self.public_key)
     }
 }
 
@@ -276,7 +264,7 @@ impl ProofOfIdentity {
 
 /// A complete node identity that holds both classical and post-quantum keys.
 pub struct NodeIdentity {
-    pub ed_keypair: Ed25519Keypair,
+    pub identity_keypair: SphincsKeypair,
     pub sphincs_keypair: SphincsKeypair,
     pub kyber_keypair: KyberKeypair,
 }
@@ -284,7 +272,7 @@ pub struct NodeIdentity {
 impl NodeIdentity {
     pub fn generate() -> Self {
         NodeIdentity {
-            ed_keypair: Ed25519Keypair::generate(),
+            identity_keypair: SphincsKeypair::generate(),
             sphincs_keypair: SphincsKeypair::generate(),
             kyber_keypair: KyberKeypair::generate(),
         }
@@ -292,12 +280,12 @@ impl NodeIdentity {
 
     /// Derive the NodeId from the SPHINCS+ public key.
     pub fn node_id(&self) -> crate::types::NodeId {
-        crate::types::NodeId::from_bytes(&self.ed_keypair.public_key_bytes())
+        crate::types::NodeId::from_bytes(&self.identity_keypair.public_key_bytes())
     }
 
     /// Sign message with SPHINCS+ for quantum-safe gossip authentication.
-    pub fn sign_ed(&self, message: &[u8]) -> Vec<u8> {
-        self.ed_keypair.sign(message)
+    pub fn sign_identity(&self, message: &[u8]) -> Vec<u8> {
+        self.identity_keypair.sign(message)
     }
 
     /// Sign message with SPHINCS+ (quantum-safe — used for identity proofs).
@@ -335,20 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ed25519_sign_verify() {
-        let kp = Ed25519Keypair::generate();
-        let msg = b"test message";
-        let sig = kp.sign(msg);
-        ed25519_verify(msg, &sig, &kp.public_key_bytes()).unwrap();
-    }
-
-    #[test]
-    fn test_ed25519_verify_wrong_sig_fails() {
-        let kp = Ed25519Keypair::generate();
+    fn test_sphincs_verify_wrong_sig_fails() {
+        let kp = SphincsKeypair::generate();
         let msg = b"test message";
         let mut sig = kp.sign(msg);
         sig[0] ^= 0xff;
-        assert!(ed25519_verify(msg, &sig, &kp.public_key_bytes()).is_err());
+        assert!(sphincs_verify(msg, &sig, &kp.public_key_bytes()).is_err());
     }
 
     #[test]
@@ -381,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_proof_of_identity() {
-        let kp = Ed25519Keypair::generate();
+        let kp = SphincsKeypair::generate();
         let proof = ProofOfIdentity::create(&kp, b"bleep-p2p-handshake-context");
         proof.verify().unwrap();
     }
@@ -390,7 +370,7 @@ mod tests {
     fn test_node_identity_node_id_is_deterministic() {
         let id = NodeIdentity::generate();
         let n1 = id.node_id();
-        let n2 = crate::types::NodeId::from_bytes(&id.ed_keypair.public_key_bytes());
+        let n2 = crate::types::NodeId::from_bytes(&id.identity_keypair.public_key_bytes());
         assert_eq!(n1.0, n2.0);
     }
 }

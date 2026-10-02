@@ -183,16 +183,17 @@ impl DarkRouting {
 mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair};
+    use crate::quantum_crypto::{KyberKeypair, SphincsKeypair};
     use crate::message_protocol::MessageProtocol;
 
     /// Helper: build a `DarkRouting` with an empty peer table.
     fn make_dark_routing() -> DarkRouting {
         let local   = NodeId::random();
         let (pm, _) = PeerManager::new(local.clone(), PeerManagerConfig::default());
-        let ed      = Ed25519Keypair::generate();
+        let identity = SphincsKeypair::generate();
+        let sphincs = SphincsKeypair::generate();
         let kyber   = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(ed, kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, sphincs, kyber, pm.clone());
         let scoring = Arc::new(PeerScoring::new());
         DarkRouting::new(pm, mp, scoring)
     }

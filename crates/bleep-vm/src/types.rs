@@ -115,9 +115,9 @@ pub struct SignedTransaction {
     pub gas_price: u64,
     /// Contract bytecode *or* calldata for an already-deployed contract.
     pub payload: Vec<u8>,
-    /// Ed25519 signature over canonical signing bytes.
+    /// Signature over canonical signing bytes.
     pub signature: Vec<u8>,
-    /// Ed25519 public key (32 bytes).
+    /// Signer public key.
     pub signer: Vec<u8>,
     /// Call arguments serialised by the caller (ABI / Borsh / BCS depending on format).
     pub calldata: Vec<u8>,

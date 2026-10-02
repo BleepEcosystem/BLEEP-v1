@@ -74,9 +74,10 @@ impl AIAssessmentProposal {
         signature: AISignature,
         recommendation: RecoveryRecommendation,
         created_epoch: u64,
+        trusted_ai_key: &[u8],
     ) -> Result<Self, GovernanceError> {
         // Verify signature
-        if !signature.verify() {
+        if !signature.verify(trusted_ai_key) {
             return Err(GovernanceError::AssessmentVerificationFailed(
                 "AI signature invalid".to_string(),
             ));
@@ -86,6 +87,11 @@ impl AIAssessmentProposal {
         if signature.assessment_hash != assessment.assessment_hash {
             return Err(GovernanceError::AssessmentVerificationFailed(
                 "Assessment hash mismatch".to_string(),
+            ));
+        }
+        if !assessment.verify_integrity() {
+            return Err(GovernanceError::AssessmentVerificationFailed(
+                "Assessment contents do not match its hash".to_string(),
             ));
         }
 
@@ -147,6 +153,9 @@ pub struct AIFeedback {
 
 /// Governance Integration Module
 pub struct GovernanceIntegration {
+    /// Trusted SPHINCS+ public key for AI assessment signatures.
+    trusted_ai_key: Vec<u8>,
+
     /// All AI assessment proposals (immutable)
     proposals: Vec<AIAssessmentProposal>,
 
@@ -158,12 +167,19 @@ pub struct GovernanceIntegration {
 }
 
 impl GovernanceIntegration {
+    /// Create governance with no trusted AI signer configured. Proposal
+    /// registration fails until `set_trusted_ai_key` is called.
     pub fn new() -> Self {
         GovernanceIntegration {
+            trusted_ai_key: Vec::new(),
             proposals: Vec::new(),
             decisions: Vec::new(),
             executed: Vec::new(),
         }
+    }
+
+    pub fn set_trusted_ai_key(&mut self, trusted_ai_key: Vec<u8>) {
+        self.trusted_ai_key = trusted_ai_key;
     }
 
     /// Register AI assessment as proposal
@@ -175,7 +191,13 @@ impl GovernanceIntegration {
         epoch: u64,
     ) -> Result<Vec<u8>, GovernanceError> {
         // Create proposal (this validates signature)
-        let proposal = AIAssessmentProposal::new(assessment, signature, recommendation, epoch)?;
+        let proposal = AIAssessmentProposal::new(
+            assessment,
+            signature,
+            recommendation,
+            epoch,
+            &self.trusted_ai_key,
+        )?;
 
         let proposal_id = proposal.id.clone();
         self.proposals.push(proposal);
@@ -281,12 +303,15 @@ impl GovernanceIntegration {
             })?;
 
         // Verify signature
-        if !proposal.signature.verify() {
+        if !proposal.signature.verify(&self.trusted_ai_key) {
             return Ok(false);
         }
 
         // Verify assessment hash matches signature
         if proposal.signature.assessment_hash != proposal.assessment.assessment_hash {
+            return Ok(false);
+        }
+        if !proposal.assessment.verify_integrity() {
             return Ok(false);
         }
 
@@ -357,16 +382,11 @@ impl GovernanceIntegration {
     }
 }
 
-impl Default for GovernanceIntegration {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ai_decision_module::{AISignature, AnomalyClass};
+    use pqcrypto_traits::sign::{PublicKey, SecretKey};
 
     fn create_test_assessment() -> (AnomalyAssessment, AISignature) {
         let assessment = AnomalyAssessment {
@@ -375,10 +395,23 @@ mod tests {
             confidence: 85.0,
             input_feature_hash: b"test_input".to_vec(),
             epoch: 1,
-            assessment_hash: Sha256::digest(b"test_assessment").to_vec(),
+            assessment_hash: AnomalyAssessment::compute_hash(
+                30.0,
+                AnomalyClass::Degraded,
+                85.0,
+                b"test_input",
+                1,
+            ),
         };
 
-        let signature = AISignature::sign(b"ai_key", &assessment.assessment_hash, 1);
+        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincssha2128ssimple::keypair();
+        let signature = AISignature::sign(
+            public_key.as_bytes(),
+            secret_key.as_bytes(),
+            &assessment.assessment_hash,
+            1,
+        )
+        .unwrap();
 
         (assessment, signature)
     }
@@ -396,8 +429,11 @@ mod tests {
     fn test_proposal_creation() {
         let (assessment, signature) = create_test_assessment();
         let recommendation = create_test_recommendation();
+        let trusted_ai_key = signature.ai_key.clone();
 
-        let proposal = AIAssessmentProposal::new(assessment, signature, recommendation, 1).unwrap();
+        let proposal =
+            AIAssessmentProposal::new(assessment, signature, recommendation, 1, &trusted_ai_key)
+                .unwrap();
 
         assert_eq!(proposal.vote_status, VoteStatus::Pending);
     }
@@ -406,17 +442,53 @@ mod tests {
     fn test_signature_verification_in_proposal() {
         let (assessment, signature) = create_test_assessment();
         let recommendation = create_test_recommendation();
+        let trusted_ai_key = signature.ai_key.clone();
 
         // Valid signature
-        let result =
-            AIAssessmentProposal::new(assessment.clone(), signature, recommendation.clone(), 1);
+        let result = AIAssessmentProposal::new(
+            assessment.clone(),
+            signature,
+            recommendation.clone(),
+            1,
+            &trusted_ai_key,
+        );
         assert!(result.is_ok());
 
         // Invalid signature (wrong assessment hash)
-        let mut bad_signature = AISignature::sign(b"ai_key", b"wrong_hash", 1);
+        let (bad_public_key, bad_secret_key) =
+            pqcrypto_sphincsplus::sphincssha2128ssimple::keypair();
+        let mut bad_signature = AISignature::sign(
+            bad_public_key.as_bytes(),
+            bad_secret_key.as_bytes(),
+            b"wrong_hash",
+            1,
+        )
+        .unwrap();
         bad_signature.assessment_hash = b"wrong".to_vec();
 
-        let result = AIAssessmentProposal::new(assessment, bad_signature, recommendation, 1);
+        let result = AIAssessmentProposal::new(
+            assessment,
+            bad_signature,
+            recommendation,
+            1,
+            &trusted_ai_key,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_proposal_rejects_tampered_assessment_fields() {
+        let (mut assessment, signature) = create_test_assessment();
+        let trusted_ai_key = signature.ai_key.clone();
+        assessment.anomaly_score += 1.0;
+
+        let result = AIAssessmentProposal::new(
+            assessment,
+            signature,
+            create_test_recommendation(),
+            1,
+            &trusted_ai_key,
+        );
         assert!(result.is_err());
     }
 
@@ -424,6 +496,7 @@ mod tests {
     fn test_governance_accept() {
         let mut gov = GovernanceIntegration::new();
         let (assessment, signature) = create_test_assessment();
+        gov.set_trusted_ai_key(signature.ai_key.clone());
         let recommendation = create_test_recommendation();
 
         let proposal_id = gov
@@ -441,6 +514,7 @@ mod tests {
     fn test_governance_reject() {
         let mut gov = GovernanceIntegration::new();
         let (assessment, signature) = create_test_assessment();
+        gov.set_trusted_ai_key(signature.ai_key.clone());
         let recommendation = create_test_recommendation();
 
         let proposal_id = gov
@@ -463,6 +537,7 @@ mod tests {
     fn test_governance_execute() {
         let mut gov = GovernanceIntegration::new();
         let (assessment, signature) = create_test_assessment();
+        gov.set_trusted_ai_key(signature.ai_key.clone());
         let recommendation = create_test_recommendation();
 
         let proposal_id = gov
@@ -484,6 +559,7 @@ mod tests {
     fn test_cannot_execute_without_accept() {
         let mut gov = GovernanceIntegration::new();
         let (assessment, signature) = create_test_assessment();
+        gov.set_trusted_ai_key(signature.ai_key.clone());
         let recommendation = create_test_recommendation();
 
         let proposal_id = gov
@@ -499,6 +575,7 @@ mod tests {
     fn test_ai_cannot_bypass_governance() {
         let mut gov = GovernanceIntegration::new();
         let (assessment, signature) = create_test_assessment();
+        gov.set_trusted_ai_key(signature.ai_key.clone());
         let recommendation = create_test_recommendation();
 
         let proposal_id = gov
@@ -533,6 +610,7 @@ mod tests {
     fn test_proposal_verification() {
         let mut gov = GovernanceIntegration::new();
         let (assessment, signature) = create_test_assessment();
+        gov.set_trusted_ai_key(signature.ai_key.clone());
         let recommendation = create_test_recommendation();
 
         let proposal_id = gov
@@ -541,5 +619,15 @@ mod tests {
 
         // Verify proposal
         assert!(gov.verify_proposal(&proposal_id).unwrap());
+    }
+
+    #[test]
+    fn test_governance_rejects_unconfigured_signer() {
+        let mut gov = GovernanceIntegration::new();
+        let (assessment, signature) = create_test_assessment();
+
+        let result =
+            gov.register_assessment(assessment, signature, create_test_recommendation(), 1);
+        assert!(result.is_err());
     }
 }
