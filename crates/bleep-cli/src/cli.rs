@@ -188,7 +188,7 @@ async fn run(cmd: Commands) -> Result<()> {
                     let seed_32 = mnemonic_to_bleep_seed(&phrase, "")
                         .map_err(|e| anyhow!("BIP-39 derivation failed: {}", e))?;
                     use sha3::{Digest, Sha3_256};
-                    let pk: Vec<u8> = Sha3_256::digest(&seed_32).to_vec();
+                    let pk: Vec<u8> = Sha3_256::digest(seed_32).to_vec();
                     let sk: Vec<u8> = seed_32.to_vec();
                     let kyber_pk = pk.clone();
                     let wallet =
@@ -261,7 +261,7 @@ async fn run(cmd: Commands) -> Result<()> {
                             let detached_sig = sign_tx_payload(&payload, &sk_plain)
                                 .map_err(|e| anyhow!("SPHINCS+ signing failed: {}", e))?;
 
-                            // Wire format: pk_bytes(64) || sphincs_detached_sig(49856)
+                            // Wire format: pk_bytes(64) || sphincs_detached_sig(49088)
                             // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes
                             eprintln!(
                                 "[DEBUG] Wallet falcon_keys size: {} bytes",
@@ -436,7 +436,7 @@ async fn run(cmd: Commands) -> Result<()> {
                     ];
                     let mut found = false;
                     for state in &all_states {
-                        for p in engine.get_proposals_by_state(state.clone()) {
+                        for p in engine.get_proposals_by_state(*state) {
                             found = true;
                             println!("  {} — {} [{:?}]", p.id, p.title, p.state);
                         }
@@ -855,7 +855,7 @@ async fn run(cmd: Commands) -> Result<()> {
                         let fmt = |key: &str| {
                             body.get(key)
                                 .and_then(|v| v.as_str())
-                                .map(|s| format_micro_bleep(s))
+                                .map(format_micro_bleep)
                                 .unwrap_or_else(|| "n/a".to_string())
                         };
                         println!("  Circulating : {} BLEEP", fmt("circulating_supply"));

@@ -183,7 +183,7 @@ impl AiCrossShardOptimizationManager {
     }
 
     /// Create with no-op extension
-    pub fn default() -> Self {
+    fn default_manager() -> Self {
         AiCrossShardOptimizationManager {
             extension: Box::new(NoOpCrossShardOptimization),
         }
@@ -274,6 +274,12 @@ impl AiCrossShardOptimizationManager {
                 (shard_count * 2) as u64
             }
         }
+    }
+}
+
+impl Default for AiCrossShardOptimizationManager {
+    fn default() -> Self {
+        Self::default_manager()
     }
 }
 

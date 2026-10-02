@@ -140,6 +140,8 @@ pub mod integration {
     }
 }
 
+pub use runtime::{BleepEconomicsRuntime, EpochInput, EpochOutput, RuntimeError};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +159,3 @@ mod tests {
         assert!(econ.verify_epoch_invariants().is_ok());
     }
 }
-
-pub use runtime::{BleepEconomicsRuntime, EpochInput, EpochOutput, RuntimeError};

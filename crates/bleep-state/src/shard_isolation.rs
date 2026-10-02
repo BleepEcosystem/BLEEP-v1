@@ -111,6 +111,12 @@ pub struct ShardIsolationManager {
     frozen_shards: HashSet<ShardId>,
 }
 
+impl Default for ShardIsolationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShardIsolationManager {
     /// Create a new isolation manager
     pub fn new() -> Self {
@@ -150,7 +156,7 @@ impl ShardIsolationManager {
 
         self.isolation_records
             .entry(shard_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(record);
 
         Ok(())
@@ -274,7 +280,7 @@ impl ShardIsolationManager {
     ///
     /// SAFETY: May trigger network-level responses if too many shards isolated.
     pub fn has_critical_isolation(&self) -> bool {
-        self.isolated_shards.len() > 0
+        !self.isolated_shards.is_empty()
     }
 }
 

@@ -223,7 +223,7 @@ impl AdaptiveGasPricer {
     }
 
     pub fn base_fee(&self) -> u64 {
-        self.base_fee.load(Ordering::Relaxed) / 1_000
+        (self.base_fee.load(Ordering::Relaxed) + 500) / 1_000
     }
 
     pub fn effective_gas_price(&self, tip: u64) -> u64 {
@@ -372,6 +372,7 @@ mod tests {
     #[test]
     fn test_gas_overflow_protection() {
         let mut m = GasMeter::new(MAX_GAS_PER_TX, default_schedule()).unwrap();
+        m.charge(1).unwrap();
         let result = m.charge(u64::MAX);
         assert!(matches!(result, Err(VmError::GasOverflow)));
     }

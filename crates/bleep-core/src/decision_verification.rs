@@ -65,7 +65,7 @@ impl VerificationResult {
         verification_id_hasher.update(decision_id.as_bytes());
         verification_id_hasher.update(timestamp.to_le_bytes());
         let hash = verification_id_hasher.finalize();
-        let verification_id = hex::encode(&hash);
+        let verification_id = hex::encode(hash);
 
         Self {
             verification_id,

@@ -11,6 +11,8 @@
 // 6. Recommendations only (governance decides)
 
 use crate::feature_extractor::ExtractedFeatures;
+use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _, SignedMessage as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -22,6 +24,9 @@ pub enum AIError {
 
     #[error("Classification failed: {0}")]
     ClassificationFailed(String),
+
+    #[error("Invalid AI signing key: {0}")]
+    InvalidSigningKey(String),
 }
 
 /// Anomaly classification
@@ -61,13 +66,13 @@ impl AnomalyClass {
 /// AI signature (sign and verify outputs)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AISignature {
-    /// AI public key (identity)
+    /// SPHINCS+ public key (identity)
     pub ai_key: Vec<u8>,
 
     /// Assessment hash (commitment)
     pub assessment_hash: Vec<u8>,
 
-    /// Signature (Ed25519 or similar)
+    /// SPHINCS+ detached signature
     pub signature: Vec<u8>,
 
     /// Epoch signed
@@ -75,32 +80,74 @@ pub struct AISignature {
 }
 
 impl AISignature {
-    /// Create signature (in practice: real Ed25519)
-    /// For now: deterministic hash-based signature
-    pub fn sign(ai_key: &[u8], assessment_hash: &[u8], epoch: u64) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(ai_key);
-        hasher.update(assessment_hash);
-        hasher.update(epoch.to_le_bytes());
-        let signature = hasher.finalize().to_vec();
-
-        AISignature {
+    /// Sign an assessment with the AI identity's SPHINCS+ keypair.
+    pub fn sign(
+        ai_key: &[u8],
+        secret_key: &[u8],
+        assessment_hash: &[u8],
+        epoch: u64,
+    ) -> Result<Self, AIError> {
+        let public_key = sphincs::PublicKey::from_bytes(ai_key)
+            .map_err(|e| AIError::InvalidSigningKey(format!("public key: {e}")))?;
+        let secret_key = sphincs::SecretKey::from_bytes(secret_key)
+            .map_err(|e| AIError::InvalidSigningKey(format!("secret key: {e}")))?;
+        let message = Self::signing_bytes(ai_key, assessment_hash, epoch)?;
+        let signed = sphincs::sign(&message, &secret_key);
+        let signature_len = signed
+            .as_bytes()
+            .len()
+            .checked_sub(message.len())
+            .ok_or_else(|| AIError::InvalidSigningKey("invalid signed message".into()))?;
+        let signature = signed.as_bytes()[..signature_len].to_vec();
+        let mut signed_bytes = signature.clone();
+        signed_bytes.extend_from_slice(&message);
+        let signed = sphincs::SignedMessage::from_bytes(&signed_bytes)
+            .map_err(|e| AIError::InvalidSigningKey(format!("signed message: {e}")))?;
+        if sphincs::open(&signed, &public_key).is_err() {
+            return Err(AIError::InvalidSigningKey(
+                "public and secret keys do not match".into(),
+            ));
+        }
+        Ok(AISignature {
             ai_key: ai_key.to_vec(),
             assessment_hash: assessment_hash.to_vec(),
             signature,
             epoch,
-        }
+        })
     }
 
-    /// Verify signature (deterministic)
-    pub fn verify(&self) -> bool {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.ai_key);
-        hasher.update(&self.assessment_hash);
-        hasher.update(self.epoch.to_le_bytes());
-        let computed = hasher.finalize().to_vec();
+    /// Verify the signature and require the configured trusted AI public key.
+    pub fn verify(&self, trusted_ai_key: &[u8]) -> bool {
+        if self.ai_key != trusted_ai_key {
+            return false;
+        }
+        let Ok(public_key) = sphincs::PublicKey::from_bytes(trusted_ai_key) else {
+            return false;
+        };
+        let Ok(message) = Self::signing_bytes(&self.ai_key, &self.assessment_hash, self.epoch)
+        else {
+            return false;
+        };
+        let mut signed_bytes = self.signature.clone();
+        signed_bytes.extend_from_slice(&message);
+        let Ok(signed) = sphincs::SignedMessage::from_bytes(&signed_bytes) else {
+            return false;
+        };
+        sphincs::open(&signed, &public_key).is_ok()
+    }
 
-        computed == self.signature
+    fn signing_bytes(
+        ai_key: &[u8],
+        assessment_hash: &[u8],
+        epoch: u64,
+    ) -> Result<Vec<u8>, AIError> {
+        serde_json::to_vec(&(
+            b"bleep-ai-assessment-signature-v1".as_slice(),
+            ai_key,
+            assessment_hash,
+            epoch,
+        ))
+        .map_err(|e| AIError::InvalidSigningKey(format!("message serialization: {e}")))
     }
 }
 
@@ -143,6 +190,16 @@ impl AnomalyAssessment {
         hasher.update(epoch.to_le_bytes());
         hasher.finalize().to_vec()
     }
+
+    pub fn verify_integrity(&self) -> bool {
+        Self::compute_hash(
+            self.anomaly_score,
+            self.classification,
+            self.confidence,
+            &self.input_feature_hash,
+            self.epoch,
+        ) == self.assessment_hash
+    }
 }
 
 /// Recovery recommendation (AI advisory)
@@ -163,8 +220,9 @@ pub struct RecoveryRecommendation {
 
 /// AI Decision Module
 pub struct AIDecisionModule {
-    /// AI identity key
-    ai_key: Vec<u8>,
+    /// SPHINCS+ AI identity keypair.
+    ai_public_key: Vec<u8>,
+    ai_secret_key: Vec<u8>,
 
     /// Assessment history (immutable)
     assessments: Vec<(AnomalyAssessment, AISignature)>,
@@ -180,16 +238,41 @@ pub struct AIDecisionModule {
 }
 
 impl AIDecisionModule {
-    /// Create module with AI identity
-    pub fn new(ai_key: Vec<u8>) -> Self {
+    /// Create a module with a newly generated SPHINCS+ identity.
+    pub fn new() -> Self {
+        let (public_key, secret_key) = sphincs::keypair();
         AIDecisionModule {
-            ai_key,
+            ai_public_key: public_key.as_bytes().to_vec(),
+            ai_secret_key: secret_key.as_bytes().to_vec(),
             assessments: Vec::new(),
             healthy_threshold: 20.0,
             degraded_threshold: 50.0,
             anomalous_threshold: 75.0,
             min_confidence: 60.0,
         }
+    }
+
+    /// Import a SPHINCS+ identity and verify that its keys form a pair.
+    pub fn from_keypair(ai_public_key: Vec<u8>, ai_secret_key: Vec<u8>) -> Result<Self, AIError> {
+        let proof = AISignature::sign(&ai_public_key, &ai_secret_key, b"keypair-check", 0)?;
+        if !proof.verify(&ai_public_key) {
+            return Err(AIError::InvalidSigningKey(
+                "public and secret keys do not match".into(),
+            ));
+        }
+        Ok(Self {
+            ai_public_key,
+            ai_secret_key,
+            assessments: Vec::new(),
+            healthy_threshold: 20.0,
+            degraded_threshold: 50.0,
+            anomalous_threshold: 75.0,
+            min_confidence: 60.0,
+        })
+    }
+
+    pub fn public_key(&self) -> &[u8] {
+        &self.ai_public_key
     }
 
     /// Analyze features and produce assessment
@@ -230,10 +313,15 @@ impl AIDecisionModule {
         };
 
         // Sign assessment
-        let signature = AISignature::sign(&self.ai_key, &assessment_hash, features.epoch);
+        let signature = AISignature::sign(
+            &self.ai_public_key,
+            &self.ai_secret_key,
+            &assessment_hash,
+            features.epoch,
+        )?;
 
         // Verify signature
-        if !signature.verify() {
+        if !signature.verify(&self.ai_public_key) {
             return Err(AIError::ClassificationFailed(
                 "Signature verification failed".to_string(),
             ));
@@ -380,7 +468,13 @@ impl AIDecisionModule {
 
     /// Verify assessment signature
     pub fn verify_assessment(&self, signature: &AISignature) -> bool {
-        signature.verify() && signature.ai_key == self.ai_key
+        signature.verify(&self.ai_public_key)
+    }
+}
+
+impl Default for AIDecisionModule {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -416,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_healthy_classification() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
         let features = create_test_features(10.0);
 
         let (assessment, _sig) = module.analyze(&features).unwrap();
@@ -427,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_critical_classification() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
         let features = create_test_features(80.0);
 
         let (assessment, _sig) = module.analyze(&features).unwrap();
@@ -438,20 +532,20 @@ mod tests {
 
     #[test]
     fn test_signature_verification() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
         let features = create_test_features(30.0);
 
         let (_assessment, sig) = module.analyze(&features).unwrap();
 
         // Verify signature
-        assert!(sig.verify());
+        assert!(sig.verify(module.public_key()));
         assert!(module.verify_assessment(&sig));
     }
 
     #[test]
     fn test_deterministic_assessment() {
-        let mut module1 = AIDecisionModule::new(b"ai_key".to_vec());
-        let mut module2 = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module1 = AIDecisionModule::new();
+        let mut module2 = AIDecisionModule::new();
 
         let features = create_test_features(40.0);
 
@@ -466,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_confidence_computation() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
         let features = create_test_features(50.0);
 
         let (assessment, _) = module.analyze(&features).unwrap();
@@ -478,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_recovery_recommendation() {
-        let module = AIDecisionModule::new(b"ai_key".to_vec());
+        let module = AIDecisionModule::new();
 
         let mut assessment = AnomalyAssessment {
             anomaly_score: 10.0,
@@ -502,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_invalid_features() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
         let mut features = create_test_features(30.0);
         features.features.clear(); // Remove all features
 
@@ -512,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_assessment_history() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         let features1 = create_test_features(20.0);
         let features2 = create_test_features(80.0);

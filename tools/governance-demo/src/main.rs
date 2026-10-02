@@ -133,7 +133,7 @@ fn main() {
                         Err(e) => println!("keystore error: {}", e),
                     },
                     "unlock" => {
-                        if parts.len() < 1 {
+                        if parts.is_empty() {
                             println!("usage: keystore unlock <name>");
                             continue;
                         }
@@ -254,7 +254,7 @@ fn main() {
                 }
             }
             "status" => {
-                if parts.len() < 1 {
+                if parts.is_empty() {
                     println!("usage: status <proposal_id>");
                     continue;
                 }
@@ -282,7 +282,7 @@ fn main() {
                 }
             }
             "tally" => {
-                if parts.len() < 1 {
+                if parts.is_empty() {
                     println!("usage: tally <proposal_id>");
                     continue;
                 }
@@ -302,7 +302,7 @@ fn main() {
                 }
             }
             "execute" => {
-                if parts.len() < 1 {
+                if parts.is_empty() {
                     println!("usage: execute <proposal_id>");
                     continue;
                 }
@@ -325,7 +325,7 @@ fn main() {
                 }
             }
             "advance" => {
-                if parts.len() < 1 {
+                if parts.is_empty() {
                     println!("usage: advance <blocks>");
                     continue;
                 }
@@ -361,7 +361,7 @@ fn main() {
                 }
             }
             "save" => {
-                let path = parts.get(0).map(|s| s.as_str()).unwrap_or("state.json");
+                let path = parts.first().map(|s| s.as_str()).unwrap_or("state.json");
                 match engine.export_state() {
                     Ok(j) => match fs::write(path, j) {
                         Ok(_) => println!("saved {}", path),
@@ -371,7 +371,7 @@ fn main() {
                 }
             }
             "load" => {
-                let path = parts.get(0).map(|s| s.as_str()).unwrap_or("state.json");
+                let path = parts.first().map(|s| s.as_str()).unwrap_or("state.json");
                 match fs::read_to_string(path) {
                     Ok(s) => match engine.import_state(&s) {
                         Ok(_) => println!("loaded {}", path),

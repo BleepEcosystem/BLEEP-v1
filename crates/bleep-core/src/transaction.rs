@@ -216,16 +216,13 @@ impl TransactionManager {
 
     /// Processes incoming P2P transaction messages
     pub async fn process_p2p_message(&self, message: P2PMessage) {
-        match message {
-            P2PMessage::Transaction(tx) => {
-                if tx.verify(&self.quantum_secure) {
-                    let _ = self.peer_manager.add_transaction_to_pool(tx).await;
-                    println!("✅ Valid transaction received and added to mempool.");
-                } else {
-                    println!("❌ Invalid transaction rejected.");
-                }
+        if let P2PMessage::Transaction(tx) = message {
+            if tx.verify(&self.quantum_secure) {
+                let _ = self.peer_manager.add_transaction_to_pool(tx).await;
+                println!("✅ Valid transaction received and added to mempool.");
+            } else {
+                println!("❌ Invalid transaction rejected.");
             }
-            _ => {}
         }
     }
 }

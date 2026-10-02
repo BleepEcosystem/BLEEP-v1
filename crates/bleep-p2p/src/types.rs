@@ -34,8 +34,8 @@ impl NodeId {
     /// XOR distance metric used by Kademlia.
     pub fn xor_distance(&self, other: &NodeId) -> [u8; 32] {
         let mut dist = [0u8; 32];
-        for i in 0..32 {
-            dist[i] = self.0[i] ^ other.0[i];
+        for (i, value) in dist.iter_mut().enumerate() {
+            *value = self.0[i] ^ other.0[i];
         }
         dist
     }
@@ -53,7 +53,7 @@ impl fmt::Debug for NodeId {
 
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", hex::encode(&self.0))
+        write!(f, "{}", hex::encode(self.0))
     }
 }
 
@@ -100,7 +100,7 @@ pub struct PeerInfo {
     pub success_count: u64,
     /// Number of failed / anomalous interactions.
     pub failure_count: u64,
-    /// Ed25519 public key bytes (32 bytes).
+    /// SPHINCS+ identity public key bytes.
     pub public_key: Vec<u8>,
     /// SPHINCS+ public key bytes for post-quantum identity.
     pub sphincs_public_key: Vec<u8>,
@@ -183,7 +183,7 @@ pub struct SecureMessage {
     pub message_type: MessageType,
     /// Encrypted payload bytes (AES-256-GCM over bincode-serialised inner data).
     pub payload: Vec<u8>,
-    /// Ed25519 signature over (version ‖ sender_id ‖ message_type_tag ‖ payload).
+    /// SPHINCS+ signature over (version ‖ sender_id ‖ message_type_tag ‖ payload).
     pub signature: Vec<u8>,
     /// Number of relay hops this message has traversed.
     pub hop_count: u8,

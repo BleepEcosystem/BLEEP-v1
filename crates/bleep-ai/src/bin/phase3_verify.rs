@@ -6,7 +6,6 @@
 ///   cargo run --bin phase3_verify --package bleep-ai -- --test
 ///
 /// This will execute all Phase 3 AI tests in complete isolation.
-
 /// Test: Deterministic rounding consistency
 fn test_output_rounding() -> Result<(), String> {
     // Simulate deterministic output rounding
@@ -35,12 +34,12 @@ fn test_proposal_confidence_bounds() -> Result<(), String> {
 
     // Valid range [0.0, 1.0]
     assert!(
-        valid_confidence >= 0.0 && valid_confidence <= 1.0,
+        (0.0..=1.0).contains(&valid_confidence),
         "Valid confidence should pass"
     );
 
     assert!(
-        !(invalid_confidence >= 0.0 && invalid_confidence <= 1.0),
+        !(0.0..=1.0).contains(&invalid_confidence),
         "Invalid confidence should fail"
     );
 
@@ -53,12 +52,9 @@ fn test_risk_score_bounds() -> Result<(), String> {
     let valid_risk = 50;
     let invalid_risk = 101;
 
+    assert!((0..=100).contains(&valid_risk), "Valid risk should pass");
     assert!(
-        valid_risk >= 0 && valid_risk <= 100,
-        "Valid risk should pass"
-    );
-    assert!(
-        !(invalid_risk >= 0 && invalid_risk <= 100),
+        !(0..=100).contains(&invalid_risk),
         "Invalid risk should fail"
     );
 
@@ -213,7 +209,7 @@ fn test_accuracy_metrics() -> Result<(), String> {
 /// Test: Confidence calibration binning
 fn test_confidence_calibration() -> Result<(), String> {
     // Simulate 10 confidence buckets [0.0-0.1, 0.1-0.2, ..., 0.9-1.0]
-    let mut buckets = vec![0u32; 10];
+    let mut buckets = [0u32; 10];
 
     let confidences: Vec<f64> = vec![0.05, 0.15, 0.25, 0.95, 0.05, 0.85];
 

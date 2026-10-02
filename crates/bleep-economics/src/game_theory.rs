@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_non_participation_safety() {
         let analysis = SafetyVerifier::verify_non_participation_safety(
-            1 * 10u128.pow(6),    // 0.01 BLEEP participation reward
+            10u128.pow(6),        // 0.01 BLEEP participation reward
             100_000,              // Small cost
             1000 * 10u128.pow(8), // 1000 BLEEP stake
             3200,                 // 32% slash
@@ -267,7 +267,7 @@ mod tests {
             5000,                 // 50% slash (high enough to deter attacks)
             32 * 10u128.pow(6),   // 0.32 BLEEP reward per block
             4 * 10u128.pow(6),    // 0.04 BLEEP participation reward
-            1 * 10u128.pow(6),    // 0.01 BLEEP participation cost
+            10u128.pow(6),        // 0.01 BLEEP participation cost
             1000 * 10u128.pow(8), // 1000 BLEEP stake
             1_000_000,            // spam fee
         );

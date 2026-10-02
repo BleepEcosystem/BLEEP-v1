@@ -67,7 +67,7 @@ impl TpsWindow {
         if self.window_secs == 0 {
             0
         } else {
-            total / self.window_secs
+            total.checked_div(self.window_secs).unwrap_or(0)
         }
     }
 }
@@ -159,7 +159,7 @@ impl PerformanceBenchmark {
     /// Returns TPS for this second.
     pub fn tick_second(&mut self, second: u64) -> u64 {
         let blocks_this_second = self.num_shards; // one block per shard per ~3s → ~0.33/s per shard → simulate with one per shard every 3 ticks
-        let txs_per_block = if second % 3 == 0 {
+        let txs_per_block = if second.is_multiple_of(3) {
             MAX_TXS_PER_BLOCK
         } else {
             MAX_TXS_PER_BLOCK * 2 / 3
@@ -193,7 +193,7 @@ impl PerformanceBenchmark {
         if current_tps < self.min_tps {
             self.min_tps = current_tps;
         }
-        if second % 60 == 0 {
+        if second.is_multiple_of(60) {
             self.tps_samples.push(current_tps);
         }
 
@@ -212,17 +212,21 @@ impl PerformanceBenchmark {
         let avg_tps = if self.duration_secs == 0 {
             0
         } else {
-            self.total_txs / self.duration_secs
+            self.total_txs.checked_div(self.duration_secs).unwrap_or(0)
         };
         let avg_block_time_ms = if self.total_blocks == 0 {
             0
         } else {
-            self.total_block_ms / self.total_blocks
+            self.total_block_ms
+                .checked_div(self.total_blocks)
+                .unwrap_or(0)
         };
         let avg_proof_time_ms = if self.total_blocks == 0 {
             0
         } else {
-            self.total_proof_ms / self.total_blocks
+            self.total_proof_ms
+                .checked_div(self.total_blocks)
+                .unwrap_or(0)
         };
         let full_pct = if self.total_blocks == 0 {
             0.0

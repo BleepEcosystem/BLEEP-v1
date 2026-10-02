@@ -1,9 +1,9 @@
 //! Production post-quantum and classical cryptography for bleep-p2p.
 //!
 //! Algorithms used:
-//! - Key encapsulation : Kyber-768 (NIST PQC round 3 winner)
-//! - Signatures        : SPHINCS+-SHA2-128s (stateless hash-based, NIST PQC winner)
-//! - Signatures        : SPHINCS+-SHA2-128s for all protocol authentication
+//! - Key encapsulation : Kyber-1024
+//! - Signatures        : SPHINCS+-SHAKE-256f-simple (FIPS 205, security level 5)
+//! - Signatures        : SPHINCS+-SHAKE-256f-simple for all protocol authentication
 //! - Symmetric         : AES-256-GCM with random 12-byte nonce prepended
 //! - KDF               : HKDF-SHA256
 
@@ -12,8 +12,8 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use hkdf::Hkdf;
-use pqcrypto_kyber::kyber768;
-use pqcrypto_sphincsplus::sphincssha2128ssimple as sphincs;
+use pqcrypto_kyber::kyber1024;
+use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
 use pqcrypto_traits::{
     kem::{Ciphertext as KemCiphertext, PublicKey as KemPk, SecretKey as KemSk, SharedSecret},
     sign::{PublicKey as SignPk, SecretKey as SignSk, SignedMessage},
@@ -28,11 +28,11 @@ use crate::error::{P2PError, P2PResult};
 // KYBER KEY ENCAPSULATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Kyber-768 public key.
+/// Kyber-1024 public key.
 #[derive(Clone)]
 pub struct KyberPublicKey(pub Vec<u8>);
 
-/// Kyber-768 secret key.
+/// Kyber-1024 secret key.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct KyberSecretKey(#[zeroize(skip)] pub Vec<u8>);
 
@@ -44,9 +44,9 @@ pub struct KyberKeypair {
 }
 
 impl KyberKeypair {
-    /// Generate a fresh Kyber-768 keypair.
+    /// Generate a fresh Kyber-1024 keypair.
     pub fn generate() -> Self {
-        let (pk, sk) = kyber768::keypair();
+        let (pk, sk) = kyber1024::keypair();
         KyberKeypair {
             public_key: KyberPublicKey(pk.as_bytes().to_vec()),
             secret_key: KyberSecretKey(sk.as_bytes().to_vec()),
@@ -57,19 +57,19 @@ impl KyberKeypair {
 /// Encapsulate a shared secret to `recipient_pk`.
 /// Returns `(ciphertext_bytes, shared_secret_bytes)`.
 pub fn kyber_encapsulate(recipient_pk_bytes: &[u8]) -> P2PResult<(Vec<u8>, Vec<u8>)> {
-    let pk = kyber768::PublicKey::from_bytes(recipient_pk_bytes)
+    let pk = kyber1024::PublicKey::from_bytes(recipient_pk_bytes)
         .map_err(|e| P2PError::Crypto(format!("Kyber pk parse: {e}")))?;
-    let (ss, ct) = kyber768::encapsulate(&pk);
+    let (ss, ct) = kyber1024::encapsulate(&pk);
     Ok((ct.as_bytes().to_vec(), ss.as_bytes().to_vec()))
 }
 
 /// Decapsulate to recover the shared secret.
 pub fn kyber_decapsulate(ciphertext_bytes: &[u8], sk_bytes: &[u8]) -> P2PResult<Vec<u8>> {
-    let ct = kyber768::Ciphertext::from_bytes(ciphertext_bytes)
+    let ct = kyber1024::Ciphertext::from_bytes(ciphertext_bytes)
         .map_err(|e| P2PError::Crypto(format!("Kyber ct parse: {e}")))?;
-    let sk = kyber768::SecretKey::from_bytes(sk_bytes)
+    let sk = kyber1024::SecretKey::from_bytes(sk_bytes)
         .map_err(|e| P2PError::Crypto(format!("Kyber sk parse: {e}")))?;
-    let ss = kyber768::decapsulate(&ct, &sk);
+    let ss = kyber1024::decapsulate(&ct, &sk);
     Ok(ss.as_bytes().to_vec())
 }
 
@@ -77,11 +77,11 @@ pub fn kyber_decapsulate(ciphertext_bytes: &[u8], sk_bytes: &[u8]) -> P2PResult<
 // SPHINCS+ SIGNATURES
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// SPHINCS+-SHA2-128s public key.
+/// SPHINCS+-SHAKE-256f-simple public key.
 #[derive(Clone, Debug)]
 pub struct SphincsPublicKey(pub Vec<u8>);
 
-/// SPHINCS+-SHA2-128s secret key.
+/// SPHINCS+-SHAKE-256f-simple secret key.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct SphincsSecretKey(#[zeroize(skip)] pub Vec<u8>);
 
@@ -133,9 +133,6 @@ pub fn sphincs_verify(message: &[u8], signature_bytes: &[u8], pk_bytes: &[u8]) -
         .map_err(|_| P2PError::AuthenticationFailed)
 }
 
-/// Compatibility alias for callers that used the pre-PQ P2P API.
-pub type Ed25519Keypair = SphincsKeypair;
-
 /// Verify a SPHINCS+ signature.
 pub fn sphincs_verify_message(
     message: &[u8],
@@ -143,15 +140,6 @@ pub fn sphincs_verify_message(
     public_key_bytes: &[u8],
 ) -> P2PResult<()> {
     sphincs_verify(message, signature_bytes, public_key_bytes)
-}
-
-/// Compatibility alias for the pre-PQ verifier API.
-pub fn ed25519_verify(
-    message: &[u8],
-    signature_bytes: &[u8],
-    public_key_bytes: &[u8],
-) -> P2PResult<()> {
-    sphincs_verify_message(message, signature_bytes, public_key_bytes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,14 +234,14 @@ pub struct ProofOfIdentity {
 
 impl ProofOfIdentity {
     /// Create a proof of identity for `context` (e.g., `b"bleep-p2p-handshake"` ‖ peer_nonce).
-    pub fn create(keypair: &Ed25519Keypair, context: &[u8]) -> Self {
+    pub fn create(keypair: &SphincsKeypair, context: &[u8]) -> Self {
         // Challenge = SHA-256(public_key ‖ context ‖ random_nonce)
         let mut rng_bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut rng_bytes);
         let mut hasher = Sha256::new();
-        hasher.update(&keypair.public_key_bytes());
+        hasher.update(keypair.public_key_bytes());
         hasher.update(context);
-        hasher.update(&rng_bytes);
+        hasher.update(rng_bytes);
         let challenge = hasher.finalize().to_vec();
 
         let signature = keypair.sign(&challenge);
@@ -266,7 +254,7 @@ impl ProofOfIdentity {
 
     /// Verify the proof.
     pub fn verify(&self) -> P2PResult<()> {
-        ed25519_verify(&self.challenge, &self.signature, &self.public_key)
+        sphincs_verify(&self.challenge, &self.signature, &self.public_key)
     }
 }
 
@@ -276,7 +264,7 @@ impl ProofOfIdentity {
 
 /// A complete node identity that holds both classical and post-quantum keys.
 pub struct NodeIdentity {
-    pub ed_keypair: Ed25519Keypair,
+    pub identity_keypair: SphincsKeypair,
     pub sphincs_keypair: SphincsKeypair,
     pub kyber_keypair: KyberKeypair,
 }
@@ -284,7 +272,7 @@ pub struct NodeIdentity {
 impl NodeIdentity {
     pub fn generate() -> Self {
         NodeIdentity {
-            ed_keypair: Ed25519Keypair::generate(),
+            identity_keypair: SphincsKeypair::generate(),
             sphincs_keypair: SphincsKeypair::generate(),
             kyber_keypair: KyberKeypair::generate(),
         }
@@ -292,12 +280,12 @@ impl NodeIdentity {
 
     /// Derive the NodeId from the SPHINCS+ public key.
     pub fn node_id(&self) -> crate::types::NodeId {
-        crate::types::NodeId::from_bytes(&self.ed_keypair.public_key_bytes())
+        crate::types::NodeId::from_bytes(&self.identity_keypair.public_key_bytes())
     }
 
     /// Sign message with SPHINCS+ for quantum-safe gossip authentication.
-    pub fn sign_ed(&self, message: &[u8]) -> Vec<u8> {
-        self.ed_keypair.sign(message)
+    pub fn sign_identity(&self, message: &[u8]) -> Vec<u8> {
+        self.identity_keypair.sign(message)
     }
 
     /// Sign message with SPHINCS+ (quantum-safe — used for identity proofs).
@@ -316,7 +304,7 @@ mod tests {
         let (ct, ss1) = kyber_encapsulate(&kp.public_key.0).unwrap();
         let ss2 = kyber_decapsulate(&ct, &kp.secret_key.0).unwrap();
         assert_eq!(ss1, ss2, "Shared secrets must match");
-        assert_eq!(ss1.len(), 32, "Kyber-768 shared secret is 32 bytes");
+        assert_eq!(ss1.len(), 32, "Kyber-1024 shared secret is 32 bytes");
     }
 
     #[test]
@@ -335,20 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ed25519_sign_verify() {
-        let kp = Ed25519Keypair::generate();
-        let msg = b"test message";
-        let sig = kp.sign(msg);
-        ed25519_verify(msg, &sig, &kp.public_key_bytes()).unwrap();
-    }
-
-    #[test]
-    fn test_ed25519_verify_wrong_sig_fails() {
-        let kp = Ed25519Keypair::generate();
+    fn test_sphincs_verify_wrong_sig_fails() {
+        let kp = SphincsKeypair::generate();
         let msg = b"test message";
         let mut sig = kp.sign(msg);
         sig[0] ^= 0xff;
-        assert!(ed25519_verify(msg, &sig, &kp.public_key_bytes()).is_err());
+        assert!(sphincs_verify(msg, &sig, &kp.public_key_bytes()).is_err());
     }
 
     #[test]
@@ -381,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_proof_of_identity() {
-        let kp = Ed25519Keypair::generate();
+        let kp = SphincsKeypair::generate();
         let proof = ProofOfIdentity::create(&kp, b"bleep-p2p-handshake-context");
         proof.verify().unwrap();
     }
@@ -390,7 +370,7 @@ mod tests {
     fn test_node_identity_node_id_is_deterministic() {
         let id = NodeIdentity::generate();
         let n1 = id.node_id();
-        let n2 = crate::types::NodeId::from_bytes(&id.ed_keypair.public_key_bytes());
+        let n2 = crate::types::NodeId::from_bytes(&id.identity_keypair.public_key_bytes());
         assert_eq!(n1.0, n2.0);
     }
 }

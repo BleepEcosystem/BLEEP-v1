@@ -87,7 +87,7 @@ pub async fn run_mempool_bridge(mempool: Arc<Mempool>, tx_pool: Arc<TransactionP
 
         // Prune seen set on overflow to prevent unbounded growth
         if seen.len() > MAX_SEEN {
-            let keep: HashSet<String> = seen.iter().cloned().take(MAX_SEEN / 2).collect();
+            let keep: HashSet<String> = seen.iter().take(MAX_SEEN / 2).cloned().collect();
             let pruned = seen.len() - keep.len();
             seen = keep;
             warn!("[MempoolBridge] Pruned {} entries from seen-set", pruned);

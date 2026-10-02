@@ -7,6 +7,12 @@ pub struct BlockchainState {
     pub transactions: Mutex<HashMap<String, Transaction>>,
 }
 
+impl Default for BlockchainState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockchainState {
     pub fn new() -> Self {
         BlockchainState {

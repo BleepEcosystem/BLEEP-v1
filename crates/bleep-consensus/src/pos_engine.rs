@@ -151,7 +151,7 @@ impl PoSConsensusEngine {
     pub fn compute_seed(height: u64, prev_hash: &str) -> u64 {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
-        h.update(&height.to_le_bytes());
+        h.update(height.to_le_bytes());
         h.update(prev_hash.as_bytes());
         let d = h.finalize();
         u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
@@ -402,7 +402,7 @@ mod tests {
     fn test_compute_seed_matches_sha256() {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
-        h.update(&55u64.to_le_bytes());
+        h.update(55u64.to_le_bytes());
         h.update(b"prev_abc");
         let d = h.finalize();
         let expected = u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]);

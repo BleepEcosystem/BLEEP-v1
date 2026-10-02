@@ -15,7 +15,7 @@
 //! ```
 //!
 //! `PK_LEN`  = 64 bytes  (SPHINCS+-SHAKE-256-simple)
-//! `SIG_LEN` = 7,856 bytes (SPHINCS+-SHAKE-256-simple detached sig)
+//! `SIG_LEN` = 49,088 bytes (SPHINCS+-SHAKE-256-simple detached sig)
 //! Total `validator_signature` = 7,888 bytes
 //!
 //! `verify_signature(public_key)` reconstructs the block hash, then calls
@@ -44,7 +44,7 @@ use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as
 /// pqcrypto_sphincsplus::sphincsshake256fsimple generates 64-byte public keys.
 pub const SPHINCS_PK_LEN: usize = 64;
 /// Byte length of a SPHINCS+-SHAKE-256-simple detached signature.
-pub const SPHINCS_SIG_LEN: usize = 49856;
+pub const SPHINCS_SIG_LEN: usize = 49088;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 
@@ -63,8 +63,8 @@ impl Transaction {
         let mut h = Sha3_256::new();
         h.update(self.sender.as_bytes());
         h.update(self.receiver.as_bytes());
-        h.update(&self.amount.to_le_bytes());
-        h.update(&self.timestamp.to_le_bytes());
+        h.update(self.amount.to_le_bytes());
+        h.update(self.timestamp.to_le_bytes());
         h.finalize().into()
     }
 
@@ -225,6 +225,7 @@ impl Block {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_consensus_and_sharding(
         index: u64,
         transactions: Vec<Transaction>,
@@ -322,7 +323,7 @@ impl Block {
         ));
         // Bind sig_commitment_root into the block hash so the SPHINCS+ signature
         // commits to the SAL root. Non-zero only for blocks with real tx signatures.
-        h.update(&self.sig_commitment_root);
+        h.update(self.sig_commitment_root);
         hex::encode(h.finalize())
     }
 
@@ -344,7 +345,7 @@ impl Block {
     /// (as returned by `generate_tx_keypair()` or `sphincsshake256fsimple::keypair()`).
     /// `sphincs_pk_bytes` must be raw SPHINCS+-SHAKE-256-simple public key bytes (64 bytes).
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49088)`.
     /// The block proof is generated separately by the consensus producer.
     pub fn sign_block(&mut self, seed_bytes: &[u8]) -> Result<(), String> {
         // For backward compatibility: derive keypair from seed
@@ -359,7 +360,7 @@ impl Block {
     /// `sphincs_sk_bytes` must be raw SPHINCS+-SHAKE-256-simple secret key bytes.
     /// `sphincs_pk_bytes` must be the corresponding 64-byte public key.
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49088)`.
     pub fn sign_block_with_pk(
         &mut self,
         sphincs_sk_bytes: &[u8],
@@ -386,7 +387,7 @@ impl Block {
         let sig = sphincsshake256fsimple::detached_sign(&block_hash_bytes, &sk);
         let sig_bytes = sig.as_bytes();
 
-        // Build signature: pk(64) || sig(49856)
+        // Build signature: pk(64) || sig(49088)
         let mut vsig = Vec::with_capacity(VALIDATOR_SIG_LEN);
         vsig.extend_from_slice(sphincs_pk_bytes); // [0..64]   validator public key
         vsig.extend_from_slice(sig_bytes); // [64..]    SPHINCS+ detached sig
@@ -694,7 +695,7 @@ pub fn derive_block_keypair(seed: &[u8]) -> Result<([u8; 32], [u8; 32]), String>
     sk.copy_from_slice(&seed[..32]);
 
     let mut h = Sha3_256::new();
-    h.update(&sk);
+    h.update(sk);
     let pk_bytes = h.finalize();
     let mut pk = [0u8; 32];
     pk.copy_from_slice(&pk_bytes);
@@ -758,8 +759,8 @@ mod tests {
         h2.update(b.compute_hash().as_bytes());
         let msg: [u8; 32] = h2.finalize().into();
         let mut h3 = Sha3_256::new();
-        h3.update(&msg);
-        h3.update(&sk);
+        h3.update(msg);
+        h3.update(sk);
         let prf: [u8; 32] = h3.finalize().into();
         let mut sig = Vec::with_capacity(96);
         sig.extend_from_slice(&pk);

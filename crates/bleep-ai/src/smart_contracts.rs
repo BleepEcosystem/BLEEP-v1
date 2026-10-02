@@ -14,6 +14,12 @@ use tokio::sync::RwLock;
 // **Smart Contract Optimizer Module**
 pub struct SmartContractOptimizer;
 
+impl Default for SmartContractOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SmartContractOptimizer {
     pub fn new() -> Self {
         Self
@@ -55,6 +61,12 @@ pub struct SmartContractAutomation {
     interoperability: Arc<BLEEPInteroperabilityModule>,
     bleep_connect: Arc<BLEEPConnect>,
     consensus: Arc<RwLock<BLEEPAdaptiveConsensus>>,
+}
+
+impl Default for SmartContractAutomation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SmartContractAutomation {
@@ -184,7 +196,7 @@ impl SmartContractAutomation {
         hasher.update(&input.contract_name);
         hasher.update(&input.creator);
         hasher.update(&input.network);
-        hasher.update(&input.proposal_id.to_le_bytes());
+        hasher.update(input.proposal_id.to_le_bytes());
         let hash = hasher.finalize();
         let transaction_hash = format!("0x{}", hex::encode(hash));
 

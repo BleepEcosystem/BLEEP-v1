@@ -14,6 +14,7 @@
 // 10. Recovery determinism across nodes
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod phase4_integration_tests {
     use crate::phase4_recovery_orchestrator::{RecoveryOrchestrator, RecoveryStage};
     use crate::phase4_safety_invariants::{InvariantViolation, SafetyInvariantChecker};
@@ -341,8 +342,8 @@ mod phase4_integration_tests {
 
         manager.slash_validator(record).unwrap();
 
-        assert!(manager.is_validator_disabled(&vec![1, 2, 3]));
-        assert_eq!(manager.get_slashed_amount(&vec![1, 2, 3]), 1000);
+        assert!(manager.is_validator_disabled(&[1, 2, 3]));
+        assert_eq!(manager.get_slashed_amount(&[1, 2, 3]), 1000);
     }
 
     #[test]

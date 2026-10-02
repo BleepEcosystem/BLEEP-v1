@@ -51,9 +51,9 @@ impl ExecutionProof {
         hasher.update(b"BLEEP_PQ_EXECUTION_PROOF_V1");
         hasher.update(state_before);
         hasher.update(state_after);
-        hasher.update(&gas_used.to_be_bytes());
+        hasher.update(gas_used.to_be_bytes());
         hasher.update(tx_hash);
-        hasher.update(&trace_hash);
+        hasher.update(trace_hash);
         let proof_commitment: [u8; 32] = hasher.finalize().into();
 
         ExecutionProof {
@@ -333,7 +333,7 @@ mod tests {
         let verifier = PostQuantumVerifier::new(42).expect("verifier failed");
 
         // Create a corrupted proof
-        let mut proof = vec![0u8; 168 + 7856];
+        let mut proof = vec![0u8; 168 + 49088];
         proof[0] = 0xFF;
         proof[1] = 0xFF;
 

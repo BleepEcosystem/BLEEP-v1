@@ -223,7 +223,7 @@ mod phase2_integration_tests {
         assert!(fault.is_some());
         let ev = fault.unwrap();
         assert_eq!(ev.severity, FaultSeverity::Critical);
-        assert_eq!(ev.confirmed, true);
+        assert!(ev.confirmed);
     }
 
     /// Test 6: Liveness failure triggers recovery

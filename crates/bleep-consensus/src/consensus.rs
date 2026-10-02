@@ -64,7 +64,7 @@ use bleep_crypto::zkp_verification::BLEEPError;
 // ── SPHINCS+-SHAKE-256-simple constants ───────────────────────────────────────
 
 /// Raw byte length of a SPHINCS+-SHAKE-256-simple detached signature.
-const SPHINCS_SIG_LEN: usize = 49856;
+const SPHINCS_SIG_LEN: usize = 49088;
 
 /// Raw byte length of a SPHINCS+-SHAKE-256-simple public key.
 #[allow(dead_code)]
@@ -309,8 +309,8 @@ impl BLEEPAdaptiveConsensus {
 
         for nonce in 0u64..10_000_000 {
             let mut h = Sha256::new();
-            h.update(&commitment);
-            h.update(&nonce.to_le_bytes());
+            h.update(commitment);
+            h.update(nonce.to_le_bytes());
             let hash_hex = hex::encode(h.finalize());
             if hash_hex.starts_with(&target) {
                 info!(
@@ -538,7 +538,7 @@ impl BLEEPAdaptiveConsensus {
     /// **Fix:** `SHA-256(height_le8 || prev_hash_utf8)`, first 8 bytes → `u64`.
     pub fn compute_proposer_seed(height: u64, prev_hash: &str) -> u64 {
         let mut h = Sha256::new();
-        h.update(&height.to_le_bytes());
+        h.update(height.to_le_bytes());
         h.update(prev_hash.as_bytes());
         let d = h.finalize();
         u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
@@ -648,7 +648,7 @@ mod tests {
     fn test_proposer_seed_matches_sha256() {
         // Verify the implementation matches our documented formula.
         let mut h = Sha256::new();
-        h.update(&42u64.to_le_bytes());
+        h.update(42u64.to_le_bytes());
         h.update(b"genesis_hash");
         let d = h.finalize();
         let expected = u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]);
@@ -669,8 +669,8 @@ mod tests {
 
         let hash_fn = |n: u64| {
             let mut h = Sha256::new();
-            h.update(&commit);
-            h.update(&n.to_le_bytes());
+            h.update(commit);
+            h.update(n.to_le_bytes());
             hex::encode(h.finalize())
         };
 

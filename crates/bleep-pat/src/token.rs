@@ -56,6 +56,7 @@ pub struct PATToken {
 
 impl PATToken {
     /// Validate and create a new token definition.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         symbol: String,
         name: String,
@@ -149,7 +150,7 @@ impl TokenLedger {
         let entry = self.balances.entry(key.clone()).or_insert(0);
         *entry = entry
             .checked_add(amount)
-            .ok_or_else(|| PATError::BalanceOverflow(key))?;
+            .ok_or(PATError::BalanceOverflow(key))?;
         Ok(*entry)
     }
 

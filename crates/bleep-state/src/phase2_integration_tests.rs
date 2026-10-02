@@ -11,6 +11,7 @@
 // 7. AI advisory isolation (non-authoritative)
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod phase2_integration_tests {
     use crate::shard_ai_extension::*;
     use crate::shard_epoch_binding::*;
@@ -195,7 +196,7 @@ mod phase2_integration_tests {
     fn test_shard_merge_combines_state_safely() {
         let mut registry = ShardRegistry::new(EpochId(0), 1);
 
-        let _validators = vec![vec![1]];
+        let _validators = [vec![1]];
 
         let _validator_set = ValidatorSet::new(
             vec![ValidatorInfo {
@@ -363,7 +364,7 @@ mod phase2_integration_tests {
         assert_eq!(report.split_recommendation.as_u8(), 100);
 
         // Report is advisory, not a command
-        assert!(report.verify_signature(&vec![1, 2, 3]));
+        assert!(report.verify_signature(&[1, 2, 3]));
     }
 
     /// Test 9: Multiple AI reports are aggregated safely using median

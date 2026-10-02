@@ -39,6 +39,12 @@ pub struct MetricsStore {
     pub per_task: DashMap<String, TaskMetrics>,
 }
 
+impl Default for MetricsStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsStore {
     pub fn new() -> Self {
         Self {

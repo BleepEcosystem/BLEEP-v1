@@ -31,7 +31,7 @@ load_config() {
   while IFS='=' read -r key value; do value=${value#\"}; value=${value%\"}; case "$key" in
     name) NAME=$value;; rpc_url) RPC_URL=$value;; seed) SEED=$value;; p2p_port) P2P_PORT=$value;; rpc_port) RPC_PORT=$value;;
     state_dir) STATE_DIR=$value;; binary) NODE_BIN=$value;; stake) STAKE=$value;; network) NETWORK=$value;; address) ADDRESS=$value;; validator_id) VALIDATOR_ID=$value;; esac
-  done < <(sed -n '/^\[validator\]/,/^\[/p' "$CONFIG_FILE" | sed -n 's/^\([a-z_]*\) *= *"\{0,1\}\([^"#]*\)"*.*/\1=\2/p')
+  done < <(sed -n '/^\[validator\]/,/^\[/p' "$CONFIG_FILE" | sed -n 's/^\([a-z0-9_]*\) *= *"\{0,1\}\([^"#]*\)"*.*/\1=\2/p')
 }
 save_config() { mkdir -p "$(dirname "$CONFIG_FILE")"; umask 077; cat >"$CONFIG_FILE" <<EOF
 [validator]

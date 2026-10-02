@@ -315,16 +315,14 @@ impl StateManager {
         let prefix = PREFIX_ACCOUNT;
         let iter = self.db.prefix_iterator(prefix);
 
-        for item in iter {
-            if let Ok((k, v)) = item {
-                if !k.starts_with(prefix) {
-                    break;
-                }
-                if let Ok(addr) = std::str::from_utf8(&k[prefix.len()..]) {
-                    if let Ok(acct) = serde_json::from_slice::<AccountState>(&v) {
-                        if acct.balance > 0 {
-                            balances.insert(addr.to_string(), acct.balance);
-                        }
+        for (k, v) in iter.flatten() {
+            if !k.starts_with(prefix) {
+                break;
+            }
+            if let Ok(addr) = std::str::from_utf8(&k[prefix.len()..]) {
+                if let Ok(acct) = serde_json::from_slice::<AccountState>(&v) {
+                    if acct.balance > 0 {
+                        balances.insert(addr.to_string(), acct.balance);
                     }
                 }
             }

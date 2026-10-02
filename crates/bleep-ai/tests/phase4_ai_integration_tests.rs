@@ -17,7 +17,13 @@ mod phase4_ai_integration_tests {
     use bleep_ai::feature_extractor::*;
     use bleep_ai::governance_integration::*;
 
+    use pqcrypto_traits::sign::{PublicKey, SecretKey};
     use sha2::{Digest, Sha256};
+
+    fn test_signature(hash: &[u8], epoch: u64) -> AISignature {
+        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
+        AISignature::sign(public_key.as_bytes(), secret_key.as_bytes(), hash, epoch).unwrap()
+    }
 
     // ============================================================================
     // TEST 1-5: INPUT TAMPERING DETECTION
@@ -59,7 +65,7 @@ mod phase4_ai_integration_tests {
     #[test]
     fn test_03_assessment_signature_tampering() {
         // Verify that tampering with assessment is detected
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
         let features = create_test_features(30.0);
 
         let (_assessment, signature) = module.analyze(&features).unwrap();
@@ -68,7 +74,7 @@ mod phase4_ai_integration_tests {
         let mut bad_signature = signature.clone();
         bad_signature.signature[0] ^= 1; // Flip a bit
 
-        assert!(!bad_signature.verify());
+        assert!(!bad_signature.verify(&bad_signature.ai_key));
     }
 
     #[test]
@@ -80,20 +86,34 @@ mod phase4_ai_integration_tests {
             confidence: 85.0,
             input_feature_hash: b"test".to_vec(),
             epoch: 1,
-            assessment_hash: Sha256::digest(b"test").to_vec(),
+            assessment_hash: AnomalyAssessment::compute_hash(
+                30.0,
+                AnomalyClass::Degraded,
+                85.0,
+                b"test",
+                1,
+            ),
         };
 
         // Create valid signature
-        let signature = AISignature::sign(b"ai_key", &assessment.assessment_hash, 1);
+        let signature = test_signature(&assessment.assessment_hash, 1);
 
         // Tamper with assessment after signing
         assessment.anomaly_score = 70.0;
-        assessment.assessment_hash = Sha256::digest(b"tampered").to_vec();
+        assessment.assessment_hash = AnomalyAssessment::compute_hash(
+            assessment.anomaly_score,
+            assessment.classification,
+            assessment.confidence,
+            &assessment.input_feature_hash,
+            assessment.epoch,
+        );
 
         let recommendation = create_test_recommendation();
 
         // Proposal creation should fail (signature doesn't match)
-        let result = AIAssessmentProposal::new(assessment, signature, recommendation, 1);
+        let trusted_ai_key = signature.ai_key.clone();
+        let result =
+            AIAssessmentProposal::new(assessment, signature, recommendation, 1, &trusted_ai_key);
 
         assert!(result.is_err());
     }
@@ -120,10 +140,11 @@ mod phase4_ai_integration_tests {
     #[test]
     fn test_06_governance_accepts_recommendation() {
         let mut gov = GovernanceIntegration::new();
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         let features = create_test_features(30.0);
         let (assessment, signature) = module.analyze(&features).unwrap();
+        gov.set_trusted_ai_key(module.public_key().to_vec());
         let recommendation = module.recommend_recovery(&assessment).unwrap();
 
         let proposal_id = gov
@@ -138,10 +159,11 @@ mod phase4_ai_integration_tests {
     #[test]
     fn test_07_governance_rejects_recommendation() {
         let mut gov = GovernanceIntegration::new();
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         let features = create_test_features(30.0);
         let (assessment, signature) = module.analyze(&features).unwrap();
+        gov.set_trusted_ai_key(module.public_key().to_vec());
         let recommendation = module.recommend_recovery(&assessment).unwrap();
 
         let proposal_id = gov
@@ -157,10 +179,11 @@ mod phase4_ai_integration_tests {
     #[test]
     fn test_08_governance_executes_recommendation() {
         let mut gov = GovernanceIntegration::new();
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         let features = create_test_features(80.0); // Critical
         let (assessment, signature) = module.analyze(&features).unwrap();
+        gov.set_trusted_ai_key(module.public_key().to_vec());
         let recommendation = module.recommend_recovery(&assessment).unwrap();
 
         let proposal_id = gov
@@ -175,7 +198,7 @@ mod phase4_ai_integration_tests {
 
     #[test]
     fn test_09_recommendation_severity_levels() {
-        let module = AIDecisionModule::new(b"ai_key".to_vec());
+        let module = AIDecisionModule::new();
 
         let mut assessment = AnomalyAssessment {
             anomaly_score: 10.0,
@@ -213,10 +236,11 @@ mod phase4_ai_integration_tests {
     fn test_10_ai_cannot_execute_directly() {
         // Critical test: AI cannot bypass governance
         let mut gov = GovernanceIntegration::new();
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         let features = create_test_features(95.0); // Critical
         let (assessment, signature) = module.analyze(&features).unwrap();
+        gov.set_trusted_ai_key(module.public_key().to_vec());
         let recommendation = module.recommend_recovery(&assessment).unwrap();
 
         // Register assessment
@@ -275,7 +299,7 @@ mod phase4_ai_integration_tests {
 
     #[test]
     fn test_13_invalid_features_handled_gracefully() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
         let mut features = create_test_features(30.0);
         features.features.clear(); // Remove all features
 
@@ -337,8 +361,8 @@ mod phase4_ai_integration_tests {
 
     #[test]
     fn test_17_deterministic_ai_assessment() {
-        let mut module1 = AIDecisionModule::new(b"ai_key".to_vec());
-        let mut module2 = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module1 = AIDecisionModule::new();
+        let mut module2 = AIDecisionModule::new();
 
         let features = create_test_features(50.0);
 
@@ -348,7 +372,8 @@ mod phase4_ai_integration_tests {
         // Same assessment from both modules
         assert_eq!(assessment1.anomaly_score, assessment2.anomaly_score);
         assert_eq!(assessment1.classification, assessment2.classification);
-        assert_eq!(sig1.signature, sig2.signature);
+        assert!(sig1.verify(module1.public_key()));
+        assert!(sig2.verify(module2.public_key()));
     }
 
     #[test]
@@ -382,27 +407,40 @@ mod phase4_ai_integration_tests {
     }
 
     #[test]
-    fn test_19_signature_reproducibility() {
-        let ai_key = b"ai_key".to_vec();
+    fn test_19_signature_authentication() {
+        let (public_key, secret_key) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
         let assessment_hash = b"assessment_hash".to_vec();
         let epoch = 10;
 
-        let sig1 = AISignature::sign(&ai_key, &assessment_hash, epoch);
-        let sig2 = AISignature::sign(&ai_key, &assessment_hash, epoch);
+        let sig1 = AISignature::sign(
+            public_key.as_bytes(),
+            secret_key.as_bytes(),
+            &assessment_hash,
+            epoch,
+        )
+        .unwrap();
+        let sig2 = AISignature::sign(
+            public_key.as_bytes(),
+            secret_key.as_bytes(),
+            &assessment_hash,
+            epoch,
+        )
+        .unwrap();
 
-        // Same signature from same inputs
-        assert_eq!(sig1.signature, sig2.signature);
-        assert!(sig1.verify());
-        assert!(sig2.verify());
+        assert!(sig1.verify(public_key.as_bytes()));
+        assert!(sig2.verify(public_key.as_bytes()));
+        let (untrusted_key, _) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
+        assert!(!sig1.verify(untrusted_key.as_bytes()));
     }
 
     #[test]
     fn test_20_proposal_immutability() {
         let mut gov = GovernanceIntegration::new();
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         let features = create_test_features(40.0);
         let (assessment, signature) = module.analyze(&features).unwrap();
+        gov.set_trusted_ai_key(module.public_key().to_vec());
         let recommendation = module.recommend_recovery(&assessment).unwrap();
 
         let original_hash = assessment.assessment_hash.clone();
@@ -422,10 +460,11 @@ mod phase4_ai_integration_tests {
 
     #[test]
     fn test_21_ai_key_mismatch_detection() {
-        let mut module = AIDecisionModule::new(b"legitimate_ai".to_vec());
+        let mut module = AIDecisionModule::new();
 
         let features = create_test_features(50.0);
         let (assessment, mut signature) = module.analyze(&features).unwrap();
+        let trusted_ai_key = module.public_key().to_vec();
 
         // Change AI key in signature
         signature.ai_key = b"malicious_ai".to_vec();
@@ -433,7 +472,8 @@ mod phase4_ai_integration_tests {
         let recommendation = create_test_recommendation();
 
         // Proposal creation should fail (signature doesn't match)
-        let result = AIAssessmentProposal::new(assessment, signature, recommendation, 1);
+        let result =
+            AIAssessmentProposal::new(assessment, signature, recommendation, 1, &trusted_ai_key);
         assert!(result.is_err());
     }
 
@@ -445,10 +485,17 @@ mod phase4_ai_integration_tests {
             confidence: 80.0,
             input_feature_hash: b"input".to_vec(),
             epoch: 2,
-            assessment_hash: Sha256::digest(b"correct").to_vec(),
+            assessment_hash: AnomalyAssessment::compute_hash(
+                60.0,
+                AnomalyClass::Anomalous,
+                80.0,
+                b"input",
+                2,
+            ),
         };
 
-        let signature = AISignature::sign(b"ai_key", &assessment.assessment_hash, 2);
+        let signature = test_signature(&assessment.assessment_hash, 2);
+        let trusted_ai_key = signature.ai_key.clone();
         let recommendation = create_test_recommendation();
 
         // Valid proposal
@@ -457,6 +504,7 @@ mod phase4_ai_integration_tests {
             signature.clone(),
             recommendation.clone(),
             2,
+            &trusted_ai_key,
         );
         assert!(result.is_ok());
 
@@ -464,13 +512,19 @@ mod phase4_ai_integration_tests {
         let mut bad_assessment = assessment;
         bad_assessment.assessment_hash = Sha256::digest(b"wrong").to_vec();
 
-        let result = AIAssessmentProposal::new(bad_assessment, signature, recommendation, 2);
+        let result = AIAssessmentProposal::new(
+            bad_assessment,
+            signature,
+            recommendation,
+            2,
+            &trusted_ai_key,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_23_confidence_reflects_uncertainty() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         // Highly discrepant features
         let mut features = create_test_features(50.0);
@@ -484,7 +538,7 @@ mod phase4_ai_integration_tests {
 
     #[test]
     fn test_24_threshold_boundary_testing() {
-        let mut module = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut module = AIDecisionModule::new();
 
         // Test boundary: just below healthy
         let features = create_test_features(15.0);
@@ -501,13 +555,14 @@ mod phase4_ai_integration_tests {
     fn test_25_complete_workflow_determinism() {
         // Full pipeline: telemetry → features → assessment → proposal → governance
         let extractor = FeatureExtractor::new();
-        let mut ai = AIDecisionModule::new(b"ai_key".to_vec());
+        let mut ai = AIDecisionModule::new();
         let mut gov = GovernanceIntegration::new();
 
         let telemetry = create_test_telemetry(10);
 
         let features = extractor.extract(&telemetry).unwrap();
         let (assessment, signature) = ai.analyze(&features).unwrap();
+        gov.set_trusted_ai_key(ai.public_key().to_vec());
         let recommendation = ai.recommend_recovery(&assessment).unwrap();
 
         let proposal_id = gov

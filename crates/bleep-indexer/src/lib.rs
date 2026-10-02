@@ -29,7 +29,7 @@ pub mod reorg;
 pub use errors::{IndexerError, IndexerResult};
 pub use events::*;
 pub use indexes::*;
-pub use query::{ChainStats, Page, QueryEngine};
+pub use query::{ChainStats, Page, QueryEngine, QueryIndexes};
 pub use reorg::{CheckpointEngine, IndexCheckpoint, ReorgHandler};
 
 use log::{error, info, warn};
@@ -60,6 +60,20 @@ pub struct IndexerService {
     event_tx: mpsc::Sender<IndexerEvent>,
 }
 
+struct IndexerState {
+    blocks: Arc<BlockIndex>,
+    txs: Arc<TxIndex>,
+    accounts: Arc<AccountIndex>,
+    governance: Arc<GovernanceIndex>,
+    validators: Arc<ValidatorIndex>,
+    shards: Arc<ShardIndex>,
+    cross_shard: Arc<CrossShardIndex>,
+    ai_events: Arc<AiEventIndex>,
+    reorg: Arc<RwLock<ReorgHandler>>,
+    checkpoint: Arc<RwLock<CheckpointEngine>>,
+    stats: Arc<RwLock<IndexerStats>>,
+}
+
 impl IndexerService {
     /// Start the indexer. Returns an Arc to the service and a JoinHandle for
     /// the background event loop.
@@ -77,24 +91,7 @@ impl IndexerService {
         let stats = Arc::new(RwLock::new(IndexerStats::default()));
 
         let (event_tx, event_rx) = mpsc::channel(channel_capacity);
-
-        let svc = Arc::new(Self {
-            blocks: Arc::clone(&blocks),
-            txs: Arc::clone(&txs),
-            accounts: Arc::clone(&accounts),
-            governance: Arc::clone(&governance),
-            validators: Arc::clone(&validators),
-            shards: Arc::clone(&shards),
-            cross_shard: Arc::clone(&cross_shard),
-            ai_events: Arc::clone(&ai_events),
-            reorg: Arc::clone(&reorg),
-            checkpoint: Arc::clone(&checkpoint),
-            stats: Arc::clone(&stats),
-            event_tx,
-        });
-
-        let handle = tokio::spawn(event_loop(
-            event_rx,
+        let state = IndexerState {
             blocks,
             txs,
             accounts,
@@ -106,7 +103,24 @@ impl IndexerService {
             reorg,
             checkpoint,
             stats,
-        ));
+        };
+
+        let svc = Arc::new(Self {
+            blocks: Arc::clone(&state.blocks),
+            txs: Arc::clone(&state.txs),
+            accounts: Arc::clone(&state.accounts),
+            governance: Arc::clone(&state.governance),
+            validators: Arc::clone(&state.validators),
+            shards: Arc::clone(&state.shards),
+            cross_shard: Arc::clone(&state.cross_shard),
+            ai_events: Arc::clone(&state.ai_events),
+            reorg: Arc::clone(&state.reorg),
+            checkpoint: Arc::clone(&state.checkpoint),
+            stats: Arc::clone(&state.stats),
+            event_tx,
+        });
+
+        let handle = tokio::spawn(event_loop(event_rx, state));
 
         (svc, handle)
     }
@@ -121,16 +135,16 @@ impl IndexerService {
 
     /// Returns a lock-free QueryEngine backed by all sub-indexes.
     pub fn query(&self) -> QueryEngine {
-        QueryEngine::new(
-            Arc::clone(&self.blocks),
-            Arc::clone(&self.txs),
-            Arc::clone(&self.accounts),
-            Arc::clone(&self.governance),
-            Arc::clone(&self.validators),
-            Arc::clone(&self.shards),
-            Arc::clone(&self.cross_shard),
-            Arc::clone(&self.ai_events),
-        )
+        QueryEngine::new(QueryIndexes {
+            blocks: Arc::clone(&self.blocks),
+            txs: Arc::clone(&self.txs),
+            accounts: Arc::clone(&self.accounts),
+            governance: Arc::clone(&self.governance),
+            validators: Arc::clone(&self.validators),
+            shards: Arc::clone(&self.shards),
+            cross_shard: Arc::clone(&self.cross_shard),
+            ai_events: Arc::clone(&self.ai_events),
+        })
     }
 
     pub async fn stats(&self) -> IndexerStats {
@@ -148,42 +162,17 @@ impl IndexerService {
     }
 }
 
-async fn event_loop(
-    mut rx: mpsc::Receiver<IndexerEvent>,
-    blocks: Arc<BlockIndex>,
-    txs: Arc<TxIndex>,
-    accounts: Arc<AccountIndex>,
-    governance: Arc<GovernanceIndex>,
-    validators: Arc<ValidatorIndex>,
-    shards: Arc<ShardIndex>,
-    cross_shard: Arc<CrossShardIndex>,
-    ai_events: Arc<AiEventIndex>,
-    reorg: Arc<RwLock<ReorgHandler>>,
-    checkpoint: Arc<RwLock<CheckpointEngine>>,
-    stats: Arc<RwLock<IndexerStats>>,
-) {
+async fn event_loop(mut rx: mpsc::Receiver<IndexerEvent>, state: IndexerState) {
     info!("[Indexer] Event loop started");
     let mut events_since_cp = 0u64;
 
     while let Some(event) = rx.recv().await {
         let shutdown = matches!(event, IndexerEvent::Shutdown);
 
-        let result = dispatch(
-            &event,
-            &blocks,
-            &txs,
-            &accounts,
-            &governance,
-            &validators,
-            &shards,
-            &cross_shard,
-            &ai_events,
-            &reorg,
-        )
-        .await;
+        let result = dispatch(&event, &state).await;
 
         {
-            let mut s = stats.write().await;
+            let mut s = state.stats.write().await;
             match result {
                 Ok(()) => {
                     s.events_processed += 1;
@@ -200,16 +189,24 @@ async fn event_loop(
 
         events_since_cp += 1;
         if events_since_cp >= 1000 {
-            if let Some(h) = blocks.head_hash() {
-                checkpoint.write().await.record(blocks.head_height(), h);
-                stats.write().await.checkpoints_created += 1;
+            if let Some(h) = state.blocks.head_hash() {
+                state
+                    .checkpoint
+                    .write()
+                    .await
+                    .record(state.blocks.head_height(), h);
+                state.stats.write().await.checkpoints_created += 1;
             }
             events_since_cp = 0;
         }
 
         if shutdown {
-            if let Some(h) = blocks.head_hash() {
-                checkpoint.write().await.record(blocks.head_height(), h);
+            if let Some(h) = state.blocks.head_hash() {
+                state
+                    .checkpoint
+                    .write()
+                    .await
+                    .record(state.blocks.head_height(), h);
             }
             info!("[Indexer] Shutdown complete");
             break;
@@ -217,49 +214,39 @@ async fn event_loop(
     }
 }
 
-async fn dispatch(
-    event: &IndexerEvent,
-    blocks: &Arc<BlockIndex>,
-    txs: &Arc<TxIndex>,
-    accounts: &Arc<AccountIndex>,
-    governance: &Arc<GovernanceIndex>,
-    validators: &Arc<ValidatorIndex>,
-    shards: &Arc<ShardIndex>,
-    cross_shard: &Arc<CrossShardIndex>,
-    ai_events: &Arc<AiEventIndex>,
-    reorg: &Arc<RwLock<ReorgHandler>>,
-) -> IndexerResult<()> {
+async fn dispatch(event: &IndexerEvent, state: &IndexerState) -> IndexerResult<()> {
     match event {
         IndexerEvent::Block(data) => {
-            reorg
+            state
+                .reorg
                 .write()
                 .await
                 .observe(data.height, data.hash.clone(), data.parent_hash.clone())
                 .map_err(|e| IndexerError::ReorgError(e.to_string()))?;
-            blocks.ingest(data)?;
+            state.blocks.ingest(data)?;
             for tx in &data.transactions {
-                txs.ingest_confirmed(tx, data.height, &data.hash)?;
-                accounts.apply_tx(tx, data.height);
+                state.txs.ingest_confirmed(tx, data.height, &data.hash)?;
+                state.accounts.apply_tx(tx, data.height);
             }
             info!("[Indexer] Block {} hash={:.8}", data.height, data.hash);
         }
         IndexerEvent::MempoolTx(data) => {
-            txs.ingest_mempool(data)?;
+            state.txs.ingest_mempool(data)?;
         }
         IndexerEvent::Governance(data) => {
-            governance.apply(data);
+            state.governance.apply(data);
         }
         IndexerEvent::Validator(data) => {
-            validators.apply(data);
+            state.validators.apply(data);
         }
         IndexerEvent::Shard(data) => {
-            shards.apply(data);
+            state.shards.apply(data);
         }
         IndexerEvent::CrossShard(data) => {
-            cross_shard.apply(data);
+            state.cross_shard.apply(data);
         }
         IndexerEvent::Ai(data) => {
-            ai_events.apply(data);
+            state.ai_events.apply(data);
         }
         IndexerEvent::Reorg {
             from_height,
@@ -267,9 +254,13 @@ async fn dispatch(
             new_tip_hash,
         } => {
             warn!("[Indexer] Reorg {from_height}→{to_height} new_tip={new_tip_hash:.8}");
-            reorg.write().await.rollback(*from_height, *to_height)?;
-            blocks.rollback_to(*to_height)?;
-            txs.rollback_to(*to_height)?;
+            state
+                .reorg
+                .write()
+                .await
+                .rollback(*from_height, *to_height)?;
+            state.blocks.rollback_to(*to_height)?;
+            state.txs.rollback_to(*to_height)?;
         }
         IndexerEvent::Shutdown => {}
     }

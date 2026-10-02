@@ -10,6 +10,7 @@
 // - Attack resistance
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod phase4_governance_tests {
     use crate::constitution::*;
     use crate::forkless_upgrades::*;

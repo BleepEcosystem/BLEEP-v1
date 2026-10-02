@@ -11,7 +11,7 @@
 //! 4. Returns the result (or a receipt if async)
 //!
 //! Security: cross-chain calls go through BLEEP Connect which provides:
-//! - Kyber-768 KEM encrypted transport
+//! - Kyber-1024 KEM encrypted transport
 //! - SPHINCS+ signed messages
 //! - ZK proof of source execution (optional)
 //! - Relayer stake slashing on fraud
@@ -178,6 +178,7 @@ pub struct CrossChainMessage {
 }
 
 impl CrossChainMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_chain: ChainId,
         destination_chain: ChainId,
@@ -232,7 +233,7 @@ impl CrossChainMessage {
         h.update(sender);
         h.update(contract);
         h.update(calldata);
-        h.update(&ts.to_le_bytes());
+        h.update(ts.to_le_bytes());
         h.finalize().into()
     }
 }

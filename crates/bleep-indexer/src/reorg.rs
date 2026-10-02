@@ -99,6 +99,12 @@ impl ReorgHandler {
     }
 }
 
+impl Default for ReorgHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Checkpoint Engine ─────────────────────────────────────────────────────────
 
 /// An integrity-verified snapshot of index state at a specific block height.
@@ -172,6 +178,12 @@ impl CheckpointEngine {
             .iter()
             .rev()
             .find(|c| c.block_height <= height)
+    }
+}
+
+impl Default for CheckpointEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

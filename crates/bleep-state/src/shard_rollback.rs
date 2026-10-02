@@ -170,7 +170,7 @@ impl RollbackEngine {
 
         self.rollback_history
             .entry(shard_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(record.clone());
 
         Ok(record)
@@ -349,7 +349,7 @@ impl RollbackEngine {
     pub fn add_state_lock(&mut self, shard_id: ShardId, lock_id: String) {
         self.state_locks
             .entry(shard_id)
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(lock_id);
     }
 }

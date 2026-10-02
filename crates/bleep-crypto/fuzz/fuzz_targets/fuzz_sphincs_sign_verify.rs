@@ -23,13 +23,13 @@ fuzz_target!(|data: &[u8]| {
     let message = data;
 
     // Generate a fresh keypair for this fuzz iteration
-    let (pk, sk) = pqcrypto_sphincsplus::sphincsshake256ssimple::keypair();
+    let (pk, sk) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
 
     // ── Invariant 1: sign produces verifiable output ──
-    let sm = pqcrypto_sphincsplus::sphincsshake256ssimple::sign(message, &sk);
+    let sm = pqcrypto_sphincsplus::sphincsshake256fsimple::sign(message, &sk);
 
     // Verify returns Ok(original_message) on success
-    match pqcrypto_sphincsplus::sphincsshake256ssimple::open(&sm, &pk) {
+    match pqcrypto_sphincsplus::sphincsshake256fsimple::open(&sm, &pk) {
         Ok(recovered) => {
             assert_eq!(recovered, message, "Recovered message must match original");
         }
@@ -47,8 +47,8 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // ── Invariant 2: wrong key → verification fails ──
-    let (pk2, _sk2) = pqcrypto_sphincsplus::sphincsshake256ssimple::keypair();
-    let wrong_key_result = pqcrypto_sphincsplus::sphincsshake256ssimple::open(&sm, &pk2);
+    let (pk2, _sk2) = pqcrypto_sphincsplus::sphincsshake256fsimple::keypair();
+    let wrong_key_result = pqcrypto_sphincsplus::sphincsshake256fsimple::open(&sm, &pk2);
     assert!(
         wrong_key_result.is_err(),
         "Signature verified under wrong public key — catastrophic SPHINCS+ failure"

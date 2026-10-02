@@ -100,7 +100,7 @@ mod phase3_self_healing_tests {
         let cycle = orchestrator.execute_cycle(8).unwrap();
 
         // Should detect multiple incidents
-        assert!(cycle.incidents_detected.len() > 0);
+        assert!(!cycle.incidents_detected.is_empty());
     }
 
     #[test]
@@ -128,8 +128,8 @@ mod phase3_self_healing_tests {
         let cycle = orchestrator.execute_cycle(8).unwrap();
 
         // Should attempt recovery
-        assert!(cycle.incidents_detected.len() > 0);
-        assert!(cycle.recovery_actions.len() > 0);
+        assert!(!cycle.incidents_detected.is_empty());
+        assert!(!cycle.recovery_actions.is_empty());
     }
 
     #[test]
@@ -157,17 +157,17 @@ mod phase3_self_healing_tests {
         orchestrator.observe_finality(1, 1, 1); // No new finality
         let cycle2 = orchestrator.execute_cycle(6).unwrap();
         assert_eq!(cycle2.state_after, OrchestratorState::Critical);
-        assert!(cycle2.incidents_detected.len() > 0);
+        assert!(!cycle2.incidents_detected.is_empty());
 
         // Recovery should execute automatically
-        assert!(cycle2.recovery_actions.len() > 0);
+        assert!(!cycle2.recovery_actions.is_empty());
 
         // Simulate recovery success (timeout, recovery works)
         orchestrator.observe_finality(10, 6, 6);
         let _cycle3 = orchestrator.execute_cycle(7).unwrap();
 
         // Should transition back toward healthy (or at least not worse)
-        assert!(orchestrator.get_validators().len() >= 1);
+        assert!(!orchestrator.get_validators().is_empty());
     }
 
     #[test]
@@ -193,7 +193,7 @@ mod phase3_self_healing_tests {
             if epoch > 1 {
                 // After first detection, should continue detecting
                 assert!(
-                    cycle.incidents_detected.len() > 0 || orchestrator.get_health_score() < 100
+                    !cycle.incidents_detected.is_empty() || orchestrator.get_health_score() < 100
                 );
             }
         }
@@ -657,7 +657,7 @@ mod phase3_self_healing_tests {
         );
 
         // Should enforce minimum validators
-        assert!(recovery.get_validators().len() >= 1);
+        assert!(!recovery.get_validators().is_empty());
     }
 
     #[test]
@@ -722,10 +722,10 @@ mod phase3_self_healing_tests {
         let cycle = orchestrator.execute_cycle(8).unwrap();
 
         // Should execute recovery (safety action)
-        assert!(cycle.incidents_detected.len() > 0);
+        assert!(!cycle.incidents_detected.is_empty());
 
         // Chain should still have validators (liveness)
-        assert!(orchestrator.get_validators().len() > 0);
+        assert!(!orchestrator.get_validators().is_empty());
     }
 
     // ============================================================================
@@ -927,7 +927,7 @@ mod phase3_self_healing_tests {
         let final_cycle = orchestrator.execute_cycle(8).unwrap();
 
         // Chain should be functional (have validators, not diverged)
-        assert!(orchestrator.get_validators().len() > 0);
+        assert!(!orchestrator.get_validators().is_empty());
         assert!(orchestrator.get_validators().len() <= 4);
 
         // Health score should improve

@@ -71,7 +71,7 @@ impl CheckpointConfig {
 
     /// Determine if a shard block should create a checkpoint
     pub fn should_create_checkpoint(&self, shard_height: u64) -> bool {
-        shard_height > 0 && shard_height % self.blocks_per_checkpoint == 0
+        shard_height > 0 && shard_height.is_multiple_of(self.blocks_per_checkpoint)
     }
 
     /// Compute checkpoint ID for a shard height
@@ -299,7 +299,7 @@ impl ShardCheckpointManager {
         // Store checkpoint
         self.checkpoints
             .entry(shard_id)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(checkpoint_id, checkpoint);
 
         self.latest_checkpoint.insert(shard_id, checkpoint_id);

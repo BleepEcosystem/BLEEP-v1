@@ -98,6 +98,10 @@ impl MemoryChunk {
         self.data.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     /// Grow by `delta_pages`.  Returns `Err` if the new size would exceed the
     /// limit, otherwise extends the buffer with zeroed bytes.
     pub fn grow(&mut self, delta_pages: u32) -> VmResult<u32> {
@@ -112,7 +116,7 @@ impl MemoryChunk {
             });
         }
         let extra = delta_pages as usize * WASM_PAGE_SIZE;
-        self.data.extend(std::iter::repeat(0u8).take(extra));
+        self.data.extend(std::iter::repeat_n(0u8, extra));
         debug!(pages = new_pages, "MemoryChunk grown");
         Ok(current_pages) // Returns previous page count (WASM spec)
     }

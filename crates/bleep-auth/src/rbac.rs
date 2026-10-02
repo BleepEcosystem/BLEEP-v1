@@ -172,6 +172,12 @@ pub struct RbacEngine {
     assignments: DashMap<String, HashSet<Role>>,
 }
 
+impl Default for RbacEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RbacEngine {
     pub fn new() -> Self {
         Self {

@@ -118,6 +118,12 @@ pub struct ValidatorSlashingManager {
     disabled_validators: HashSet<Vec<u8>>,
 }
 
+impl Default for ValidatorSlashingManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ValidatorSlashingManager {
     /// Create a new slashing manager
     pub fn new() -> Self {
@@ -284,7 +290,7 @@ impl ValidatorReassignmentManager {
 
             plan.validator_assignments
                 .entry(ShardId(shard_idx))
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(validator.clone());
         }
 
@@ -333,7 +339,7 @@ impl ValidatorReassignmentManager {
         };
 
         // Simple equal distribution
-        let per_shard = (validators.len() as u64 + num_shards - 1) / num_shards;
+        let per_shard = (validators.len() as u64).div_ceil(num_shards);
 
         for (idx, validator) in validators.iter().enumerate() {
             let shard_idx = (idx as u64) / per_shard;
@@ -341,7 +347,7 @@ impl ValidatorReassignmentManager {
 
             plan.validator_assignments
                 .entry(shard_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(validator.clone());
         }
 
@@ -428,6 +434,6 @@ mod tests {
         let record = SlashingRecord::from_fault_evidence(evidence, vec![1, 2, 3], 1000, 0);
 
         manager.slash_validator(record).unwrap();
-        assert!(manager.is_validator_disabled(&vec![1, 2, 3]));
+        assert!(manager.is_validator_disabled(&[1, 2, 3]));
     }
 }

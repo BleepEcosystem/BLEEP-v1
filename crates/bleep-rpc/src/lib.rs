@@ -689,27 +689,41 @@ pub fn rpc_routes_with_state(
                     );
                     return Ok::<_, warp::Rejection>(resp);
                 }
-                let signing_public_key = match req.signing_public_key.as_deref().and_then(|v| hex::decode(v).ok()) {
+                let signing_public_key = match req
+                    .signing_public_key
+                    .as_deref()
+                    .and_then(|v| hex::decode(v).ok())
+                {
                     Some(key) if key.len() == 64 => key,
                     _ => {
                         return Ok(warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: "signing_public_key is required".into() }),
+                            warp::reply::json(&ErrResp {
+                                error: "signing_public_key is required".into(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ));
                     }
                 };
                 let proof = match req.proof.as_deref().and_then(|v| hex::decode(v).ok()) {
-                    Some(proof) if proof.len() == 49856 => proof,
+                    Some(proof) if !proof.is_empty() => proof,
                     _ => {
                         return Ok(warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: "proof is required".into() }),
+                            warp::reply::json(&ErrResp {
+                                error: "proof is required".into(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ));
                     }
                 };
-                if !verify_tx_signature(&tx_payload(&req.label, "validator", req.amount, req.timestamp), &proof, &signing_public_key) {
+                if !verify_tx_signature(
+                    &tx_payload(&req.label, "validator", req.amount, req.timestamp),
+                    &proof,
+                    &signing_public_key,
+                ) {
                     return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrResp { error: "proof-of-possession verification failed".into() }),
+                        warp::reply::json(&ErrResp {
+                            error: "proof-of-possession verification failed".into(),
+                        }),
                         warp::http::StatusCode::UNAUTHORIZED,
                     ));
                 }
@@ -721,7 +735,7 @@ pub fn rpc_routes_with_state(
                             }),
                             warp::http::StatusCode::SERVICE_UNAVAILABLE,
                         );
-                        return Ok::<_, warp::Rejection>(resp);
+                        Ok::<_, warp::Rejection>(resp)
                     }
                     Some(reg_arc) => {
                         let mut reg = reg_arc.lock();
@@ -738,16 +752,20 @@ pub fn rpc_routes_with_state(
                                     status: "already_registered".into(),
                                     stake: v.stake,
                                 };
-                                return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                                Ok::<_, warp::Rejection>(warp::reply::with_status(
                                     warp::reply::json(&resp),
                                     warp::http::StatusCode::OK,
-                                ));
+                                ))
                             }
                             None => {
                                 // Create new validator identity.
                                 // ValidatorIdentity::new(id, kyber_pk[1568], signing_key_id, stake, epoch)
                                 // Kyber pk is zeroed here; real integration in Sprint 7.
-                                let mock_kyber_pk = req.kyber_public_key.as_deref().and_then(|v| hex::decode(v).ok()).unwrap_or_default();
+                                let mock_kyber_pk = req
+                                    .kyber_public_key
+                                    .as_deref()
+                                    .and_then(|v| hex::decode(v).ok())
+                                    .unwrap_or_default();
                                 let signing_key_id = hex::encode(&signing_public_key);
                                 let identity = ValidatorIdentity::new(
                                     validator_id.clone(),
@@ -762,7 +780,7 @@ pub fn rpc_routes_with_state(
                                             warp::reply::json(&ErrResp { error: e }),
                                             warp::http::StatusCode::BAD_REQUEST,
                                         );
-                                        return Ok::<_, warp::Rejection>(resp);
+                                        Ok::<_, warp::Rejection>(resp)
                                     }
                                     Ok(ident) => {
                                         let current_stake = ident.stake;
@@ -773,10 +791,10 @@ pub fn rpc_routes_with_state(
                                             status: "registered".into(),
                                             stake: current_stake,
                                         };
-                                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                                        Ok::<_, warp::Rejection>(warp::reply::with_status(
                                             warp::reply::json(&resp),
                                             warp::http::StatusCode::OK,
-                                        ));
+                                        ))
                                     }
                                 }
                             }
@@ -802,7 +820,7 @@ pub fn rpc_routes_with_state(
                             }),
                             warp::http::StatusCode::SERVICE_UNAVAILABLE,
                         );
-                        return Ok::<_, warp::Rejection>(resp);
+                        Ok::<_, warp::Rejection>(resp)
                     }
                     Some(reg_arc) => {
                         let mut reg = reg_arc.lock();
@@ -1755,7 +1773,7 @@ fn pat_create(
         .and(with_arc_state(state))
         .map(
             |req: PatCreateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -1816,7 +1834,7 @@ fn pat_mint(
         .and(with_arc_state(state))
         .map(
             |req: PatMintReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let caller = match hex_to_address(&req.caller) {
                         Ok(a) => a,
@@ -1877,7 +1895,7 @@ fn pat_burn(
         .and(with_arc_state(state))
         .map(
             |req: PatBurnReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let from = match hex_to_address(&req.from) {
                         Ok(a) => a,
@@ -1930,7 +1948,7 @@ fn pat_transfer(
         .map(
             |req: PatTransferReq, _claims: SessionClaims, st: Arc<RpcState>| {
                 match &st.pat_registry {
-                    None => return pat_not_initialised(),
+                    None => pat_not_initialised(),
                     Some(reg) => {
                         let from = match hex_to_address(&req.from) {
                             Ok(a) => a,
@@ -1993,7 +2011,7 @@ fn pat_balance(
         .and(with_arc_state(state))
         .map(
             |symbol: String, address: String, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let addr = match hex_to_address(&address) {
                         Ok(a) => a,
@@ -2027,7 +2045,7 @@ fn pat_info(
         .and(warp::get())
         .and(with_arc_state(state))
         .map(|symbol: String, st: Arc<RpcState>| match &st.pat_registry {
-            None => return pat_not_initialised(),
+            None => pat_not_initialised(),
             Some(reg) => {
                 let r = reg.lock();
                 match r.get_token(&symbol) {
@@ -2065,7 +2083,7 @@ fn pat_list(
         .and(warp::get())
         .and(with_arc_state(state))
         .map(|st: Arc<RpcState>| match &st.pat_registry {
-            None => return pat_not_initialised(),
+            None => pat_not_initialised(),
             Some(reg) => {
                 let r = reg.lock();
                 let tokens: Vec<serde_json::Value> = r
@@ -2114,7 +2132,7 @@ fn pat_approve(
         .and(with_arc_state(state))
         .map(
             |req: PatApproveReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2191,7 +2209,7 @@ fn pat_freeze(
         .and(with_arc_state(state))
         .map(
             |req: PatFreezeReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2257,7 +2275,7 @@ fn pat_set_burn_rate(
             |req: PatSetBurnRateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st
                 .pat_registry
             {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2322,7 +2340,7 @@ fn pat_set_owner(
         .map(
             |req: PatSetOwnerReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry
             {
-                None => return pat_not_initialised(),
+                None => pat_not_initialised(),
                 Some(reg) => {
                     let owner = match hex_to_address(&req.owner) {
                         Ok(a) => a,
@@ -2536,7 +2554,7 @@ fn faucet_drip(
             if let Some(blockchain) = &st.blockchain {
                 let bc = blockchain.read().unwrap();
                 let mut core_state = bc.state.write().unwrap();
-                core_state.credit(&address, RpcState::FAUCET_DRIP_AMOUNT as u64);
+                core_state.credit(&address, RpcState::FAUCET_DRIP_AMOUNT);
             }
 
             Box::new(warp::reply::with_status(
@@ -3120,6 +3138,16 @@ mod tests {
             tx_ids[0],
             format!("{}:{}:{}:{}", sender, receiver, amount, timestamp)
         );
+    }
+
+    #[tokio::test]
+    async fn validator_stake_accepts_valid_sphincs_signature() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let payload = tx_payload("validator-local-test", "validator", 1_000_000, 1_234_567);
+        let proof = sign_tx_payload(&payload, &secret_key).expect("sign payload");
+
+        assert!(!proof.is_empty());
+        assert!(verify_tx_signature(&payload, &proof, &public_key));
     }
 
     #[tokio::test]

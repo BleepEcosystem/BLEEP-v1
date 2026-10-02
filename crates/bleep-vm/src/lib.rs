@@ -127,6 +127,7 @@ pub fn architecture_summary() -> &'static str {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use crate::engines::zk_engine::ExecutionProof;
     use crate::types::ChainId;
 
     fn executor() -> Executor {
@@ -199,7 +200,14 @@ mod integration_tests {
         let exec = executor();
         let intent = Intent::new_unsigned(
             IntentKind::ZkVerify(ZkVerifyIntent {
-                proof_bytes: vec![0u8; 10],
+                proof_bytes: ExecutionProof::new(
+                    &[0u8; 32],
+                    &[1u8; 32],
+                    1_000,
+                    &[2u8; 32],
+                    b"test trace",
+                )
+                .serialize(),
                 public_inputs: vec![vec![0u8; 32]],
                 vk_id: "test-vk".into(),
                 post_verify_wasm: None,

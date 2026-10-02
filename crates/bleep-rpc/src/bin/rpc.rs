@@ -29,6 +29,12 @@ pub struct RpcState {
     pub chain_height: Arc<std::sync::atomic::AtomicU64>,
 }
 
+impl Default for RpcState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RpcState {
     pub fn new() -> Self {
         Self {

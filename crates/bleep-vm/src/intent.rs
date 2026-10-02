@@ -13,6 +13,7 @@
 
 use crate::types::ChainId;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -144,37 +145,6 @@ pub struct ZkVerifyIntent {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SERDE HELPERS FOR FIXED-SIZE ARRAYS
-// ─────────────────────────────────────────────────────────────────────────────
-
-mod serde_arrays {
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(array: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(array)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 64], D::Error> {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = [u8; 64];
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a 64-byte array")
-            }
-            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<[u8; 64], E> {
-                if v.len() != 64 {
-                    return Err(E::custom(format!("expected 64 bytes, got {}", v.len())));
-                }
-                let mut arr = [0u8; 64];
-                arr.copy_from_slice(v);
-                Ok(arr)
-            }
-        }
-        deserializer.deserialize_bytes(Visitor)
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // UNIFIED INTENT ENVELOPE
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -196,11 +166,12 @@ pub struct Intent {
     pub id: Uuid,
     /// The specific intent.
     pub kind: IntentKind,
-    /// Ed25519 public key of the submitter (32 bytes).
+    /// SHA-256 address derived from the submitter's SPHINCS+ public key.
     pub signer: [u8; 32],
-    /// Ed25519 signature over `canonical_bytes()`.
-    #[serde(with = "serde_arrays")]
-    pub signature: [u8; 64],
+    /// Full SPHINCS+-SHAKE-256f-simple public key used for signature verification.
+    pub signer_pubkey: Vec<u8>,
+    /// SPHINCS+ signature over `canonical_bytes()`.
+    pub signature: Vec<u8>,
     /// Sequential nonce for replay protection.
     pub nonce: u64,
     /// Unix timestamp of submission.
@@ -219,7 +190,8 @@ impl Intent {
             id: Uuid::new_v4(),
             kind,
             signer: [0u8; 32],
-            signature: [0u8; 64],
+            signer_pubkey: Vec::new(),
+            signature: Vec::new(),
             nonce: 0,
             submitted_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -233,25 +205,78 @@ impl Intent {
     /// Canonical bytes used for signature verification.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let payload = serde_json::to_vec(&self.kind).unwrap_or_default();
-        let mut buf = Vec::with_capacity(16 + 32 + payload.len());
+        let mut buf = Vec::with_capacity(16 + 32 + self.signer_pubkey.len() + payload.len());
         buf.extend_from_slice(self.id.as_bytes());
         buf.extend_from_slice(&self.nonce.to_le_bytes());
         buf.extend_from_slice(&self.submitted_at.to_le_bytes());
         buf.extend_from_slice(&self.signer);
+        buf.extend_from_slice(&self.signer_pubkey);
         buf.extend_from_slice(self.source_chain.to_string().as_bytes());
         buf.extend_from_slice(&payload);
         buf
     }
 
-    /// Verify the Ed25519 signature on this intent.
+    /// Sign this intent with the submitter's SPHINCS+ keypair.
+    pub fn sign(&mut self, public_key: &[u8], secret_key: &[u8]) -> Result<(), String> {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+        use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _, SignedMessage as _};
+
+        let public_key = sphincs::PublicKey::from_bytes(public_key)
+            .map_err(|e| format!("invalid SPHINCS+ public key: {e}"))?;
+        let secret_key = sphincs::SecretKey::from_bytes(secret_key)
+            .map_err(|e| format!("invalid SPHINCS+ secret key: {e}"))?;
+        let signer: [u8; 32] = Sha256::digest(public_key.as_bytes()).into();
+
+        let previous_signer = self.signer;
+        let previous_signer_pubkey = self.signer_pubkey.clone();
+        self.signer = signer;
+        self.signer_pubkey = public_key.as_bytes().to_vec();
+        let message = self.canonical_bytes();
+        let signed = sphincs::sign(&message, &secret_key);
+        let Some(signature_len) = signed.as_bytes().len().checked_sub(message.len()) else {
+            self.signer = previous_signer;
+            self.signer_pubkey = previous_signer_pubkey;
+            return Err("invalid SPHINCS+ signed message".to_string());
+        };
+        let signature = signed.as_bytes()[..signature_len].to_vec();
+        let mut signed_bytes = signature.clone();
+        signed_bytes.extend_from_slice(&message);
+        let signed_message = match sphincs::SignedMessage::from_bytes(&signed_bytes) {
+            Ok(signed_message) => signed_message,
+            Err(error) => {
+                self.signer = previous_signer;
+                self.signer_pubkey = previous_signer_pubkey;
+                return Err(format!("invalid SPHINCS+ signed message: {error}"));
+            }
+        };
+        if sphincs::open(&signed_message, &public_key).is_err() {
+            self.signer = previous_signer;
+            self.signer_pubkey = previous_signer_pubkey;
+            return Err("SPHINCS+ public and secret keys do not match".to_string());
+        }
+        self.signature = signature;
+        Ok(())
+    }
+
+    /// Verify the SPHINCS+ signature on this intent.
     pub fn verify_signature(&self) -> bool {
-        use ed25519_dalek::{Signature, VerifyingKey};
-        let Ok(vk) = VerifyingKey::from_bytes(&self.signer) else {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+        use pqcrypto_traits::sign::{PublicKey as _, SignedMessage as _};
+
+        let Ok(public_key) = sphincs::PublicKey::from_bytes(&self.signer_pubkey) else {
             return false;
         };
-        let sig = Signature::from_bytes(&self.signature);
-        use ed25519_dalek::Verifier;
-        vk.verify(&self.canonical_bytes(), &sig).is_ok()
+        let signer: [u8; 32] = Sha256::digest(public_key.as_bytes()).into();
+        if signer != self.signer {
+            return false;
+        }
+        let message = self.canonical_bytes();
+        let mut signed_bytes = self.signature.clone();
+        signed_bytes.extend_from_slice(&message);
+        let Ok(signed_message) = sphincs::SignedMessage::from_bytes(&signed_bytes) else {
+            return false;
+        };
+        sphincs::open(&signed_message, &public_key).is_ok()
     }
 
     /// Extract the gas limit regardless of intent kind.
@@ -422,6 +447,36 @@ mod tests {
             intent1.canonical_bytes().len(),
             intent2.canonical_bytes().len()
         );
+    }
+
+    #[test]
+    fn test_sphincs_intent_signature_authenticates_canonical_intent() {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+        use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _};
+
+        let (public_key, secret_key) = sphincs::keypair();
+        let mut intent = Intent::new_unsigned(
+            IntentKind::Transfer(TransferIntent {
+                from: [1; 32],
+                to: [2; 32],
+                amount: 100,
+                memo: None,
+            }),
+            ChainId::Bleep,
+        );
+        intent
+            .sign(public_key.as_bytes(), secret_key.as_bytes())
+            .unwrap();
+
+        assert!(intent.verify_signature());
+        intent.nonce += 1;
+        assert!(!intent.verify_signature());
+
+        let (other_public_key, _) = sphincs::keypair();
+        intent.nonce -= 1;
+        let mut mismatched_key = intent.clone();
+        mismatched_key.signer_pubkey = other_public_key.as_bytes().to_vec();
+        assert!(!mismatched_key.verify_signature());
     }
 
     #[test]

@@ -113,10 +113,8 @@ impl SafetyInvariantChecker {
     ) -> Result<(), InvariantViolation> {
         // If rolled-back shard was involved in any cross-shard txs,
         // all must be aborted
-        if involved_shards.contains(&rolled_back_shard) {
-            if aborted_count != expected_abort_count {
-                return Err(InvariantViolation::CrossShardCorruption);
-            }
+        if involved_shards.contains(&rolled_back_shard) && aborted_count != expected_abort_count {
+            return Err(InvariantViolation::CrossShardCorruption);
         }
 
         Ok(())
@@ -239,12 +237,11 @@ impl SafetyInvariantChecker {
                     return Err(InvariantViolation::InvalidStateTransition);
                 }
             }
-            FaultSeverity::High => {
+            FaultSeverity::High
                 // High severity must be frozen or isolated
-                if !is_isolated && !is_frozen {
+                if !is_isolated && !is_frozen => {
                     return Err(InvariantViolation::InvalidStateTransition);
                 }
-            }
             _ => {}
         }
 

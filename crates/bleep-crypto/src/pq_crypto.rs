@@ -5,7 +5,7 @@
 ///
 /// Algorithms:
 /// - Kyber1024: Key Encapsulation Mechanism (KEM)
-/// - SPHINCS-SHA2-256s: Digital signatures
+/// - SPHINCS+-SHAKE-256f-simple: Digital signatures
 /// - AES-256-GCM: AEAD encryption (hybrid with Kyber)
 ///
 /// SAFETY GUARANTEES:
@@ -292,14 +292,14 @@ impl KyberKem {
 
 // ==================== DIGITAL SIGNATURES (SPHINCS+-SHAKE-256f-simple) ====================
 
-/// SPHINCS+-SHAKE-256f-simple detached signature (7,856 bytes).
+/// SPHINCS+-SHAKE-256f-simple detached signature (49,088 bytes).
 ///
 /// This is the production post-quantum signature scheme used for all
 /// BLEEP signing operations: transactions, block headers, and P2P messages.
 /// NIST PQC Level 5 (≥256-bit post-quantum security).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DigitalSignature {
-    /// Raw SPHINCS+-SHAKE-256f-simple detached signature bytes (49,856 bytes).
+    /// Raw SPHINCS+-SHAKE-256f-simple detached signature bytes (49,088 bytes).
     sig_bytes: Vec<u8>,
     /// SHA3-256 of the signed message (for quick pre-check).
     message_hash: [u8; 32],
@@ -309,7 +309,7 @@ impl DigitalSignature {
     /// SPHINCS+-SHAKE-256f-simple detached signature length.
     pub const SIG_LEN: usize = 49_856;
 
-    /// Serialise to `message_hash(32) || sig_bytes(49856)`.
+    /// Serialise to `message_hash(32) || sig_bytes(49088)`.
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + Self::SIG_LEN);
         out.extend_from_slice(&self.message_hash);
@@ -317,7 +317,7 @@ impl DigitalSignature {
         out
     }
 
-    /// Deserialise from `message_hash(32) || sig_bytes(7856)`.
+    /// Deserialise from `message_hash(32) || sig_bytes(49088)`.
     pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
         if bytes.len() != 32 + Self::SIG_LEN {
             return Err(CryptoError::InvalidSignatureFormat(format!(
@@ -729,7 +729,7 @@ mod tests {
         let message = b"test message for signing - BLEEP Protocol v3";
         let sig = SignatureScheme::sign(message, &sk).expect("sign");
 
-        // Signature size must be 7856 bytes (SPHINCS+-SHAKE-256f-simple)
+        // Signature size must be 49088 bytes (SPHINCS+-SHAKE-256f-simple)
         assert_eq!(
             sig.sig_bytes().len(),
             DigitalSignature::SIG_LEN,

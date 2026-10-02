@@ -134,7 +134,7 @@ impl Credential {
         let mut salt = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut salt);
         let mut h = Sha3_256::new();
-        h.update(&salt);
+        h.update(salt);
         h.update(secret);
         let hash = h.finalize();
         (hex::encode(salt), hex::encode(hash))
@@ -151,6 +151,12 @@ impl Credential {
 pub struct CredentialStore {
     /// identity_id → list of credential records (multiple kinds supported)
     inner: HashMap<String, Vec<Credential>>,
+}
+
+impl Default for CredentialStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CredentialStore {

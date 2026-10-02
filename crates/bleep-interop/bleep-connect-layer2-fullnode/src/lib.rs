@@ -513,7 +513,7 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_connect_comm11itment_chain::{CommitmentChain, Validator};
+    use bleep_connect_commitment_chain::{CommitmentChain, Validator};
     use tempfile::tempdir;
 
     async fn make_layer2(endpoint: String) -> Layer2FullNode {
@@ -538,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_full_verification() {
-        use std::io::{Read, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
         use std::thread;
 
@@ -563,9 +563,25 @@ mod tests {
                 body.len(), body
             );
             for _ in 0..3 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0u8; 4096];
-                stream.read(&mut request).unwrap();
+                let (stream, _) = listener.accept().unwrap();
+                let mut request = BufReader::new(stream);
+                let mut request_line = String::new();
+                request.read_line(&mut request_line).unwrap();
+                let mut content_length = 0;
+                loop {
+                    let mut header = String::new();
+                    if request.read_line(&mut header).unwrap() == 0 || header == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                let mut body = vec![0; content_length];
+                request.read_exact(&mut body).unwrap();
+                let mut stream = request.into_inner();
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });

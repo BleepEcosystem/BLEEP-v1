@@ -105,6 +105,12 @@ pub struct BaseFeeParams {
     pub elasticity_multiplier: u16,
 }
 
+impl Default for BaseFeeParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BaseFeeParams {
     pub fn new() -> Self {
         BaseFeeParams {
@@ -193,7 +199,7 @@ impl FeeMarket {
         // Final fee = base_fee * type_cost * resource_units * congestion_multiplier / 1000
         let fee = (base_fee as u64)
             .saturating_mul(*type_cost)
-            .saturating_mul(resource_usage.total_units() as u64)
+            .saturating_mul(resource_usage.total_units())
             .saturating_mul(cong_mult)
             / 1_000_000; // Normalize multipliers
 
@@ -234,7 +240,7 @@ impl FeeMarket {
         };
 
         // Apply bounds
-        let bounded_fee = std::cmp::max(MIN_BASE_FEE, std::cmp::min(new_fee, MAX_BASE_FEE));
+        let bounded_fee = new_fee.clamp(MIN_BASE_FEE, MAX_BASE_FEE);
 
         self.base_fee_params.current_base_fee = bounded_fee;
         self.fee_history.insert(epoch, bounded_fee);

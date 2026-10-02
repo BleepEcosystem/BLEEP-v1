@@ -28,7 +28,6 @@ pqcrypto-sphincsplus = "0.7.1"
 # Classical crypto
 aes-gcm      = { version = "0.10", features = ["aes"] }
 zeroize      = "1.6"
-ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 blake3       = "1.5"
 sha2         = "0.10"
 sha3         = "0.10"

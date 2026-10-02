@@ -78,6 +78,12 @@ pub struct EpochBoundaryHandler {
     transactions_to_abort: Vec<TransactionId>,
 }
 
+impl Default for EpochBoundaryHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EpochBoundaryHandler {
     /// Create a new boundary handler
     pub fn new() -> Self {
@@ -107,6 +113,12 @@ impl EpochBoundaryHandler {
 pub struct ByzantineFailureDetector {
     /// Misbehavior count by shard
     misbehavior_counts: BTreeMap<String, u32>,
+}
+
+impl Default for ByzantineFailureDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ByzantineFailureDetector {
@@ -153,6 +165,12 @@ pub struct RecoveryOrchestrator {
 
     /// Current block height
     current_height: u64,
+}
+
+impl Default for RecoveryOrchestrator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecoveryOrchestrator {

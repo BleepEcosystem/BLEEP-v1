@@ -253,7 +253,7 @@ impl ShardTopologyBuilder {
             let end_key = if shard_idx == num_shards - 1 {
                 256u64 // Include all remaining in last shard
             } else {
-                ((shard_idx + 1) * keys_per_shard) as u64
+                (shard_idx + 1) * keys_per_shard
             };
 
             // Assign validators to shard (round-robin)
@@ -307,7 +307,7 @@ impl ShardTopologyBuilder {
             ShardRegistry::new(EpochId(current_epoch.0 + 1), self.protocol_version);
 
         // Start with current shards
-        for (_, shard) in &current_registry.shards {
+        for shard in current_registry.shards.values() {
             let mut new_shard = shard.clone();
             new_shard.epoch_id = EpochId(current_epoch.0 + 1);
             new_registry.add_shard(new_shard)?;
