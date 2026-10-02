@@ -71,9 +71,7 @@ mod governance_integration_tests {
             let quorum_met = total_voted > quorum_threshold;
 
             let approval_percentage = if total_voted > 0 {
-                (stake_approve * 100)
-                    .checked_div(total_voted)
-                    .unwrap_or(0) as u64
+                (stake_approve * 100).checked_div(total_voted).unwrap_or(0) as u64
             } else {
                 0
             };

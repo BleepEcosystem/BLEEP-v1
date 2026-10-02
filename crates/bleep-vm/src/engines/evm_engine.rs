@@ -459,10 +459,7 @@ mod tests {
         let bytecode = hex::decode("600054").unwrap();
         let engine = EvmEngine::new();
         let ctx = test_ctx(22_000);
-        let result = engine
-            .execute(&ctx, &bytecode, &[], 22_000)
-            .await
-            .unwrap();
+        let result = engine.execute(&ctx, &bytecode, &[], 22_000).await.unwrap();
         assert!(!result.success);
     }
 

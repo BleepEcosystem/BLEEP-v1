@@ -106,7 +106,7 @@ impl WasmEngineAdapter {
 
         for entry in &entry_points {
             if let Ok(func) = instance.exports.get_function(entry) {
-            attempted_entry = true;
+                attempted_entry = true;
                 let args = vec![Value::I32(calldata.len() as i32)];
                 match func.call(&mut store, &args) {
                     Ok(results) => {

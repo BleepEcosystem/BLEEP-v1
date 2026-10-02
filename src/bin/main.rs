@@ -169,7 +169,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Generate real SPHINCS+-SHAKE-256f-simple keypair for block signing.
     // generate_tx_keypair() returns (pk_bytes: 64B, sk_bytes: 128B).
-    let key_dir = std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
+    let key_dir =
+        std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
     let key_paths = (
         format!("{}/sphincs.public", key_dir),
         format!("{}/sphincs.secret", key_dir),
@@ -181,11 +182,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     {
         let public = hex::decode(std::fs::read_to_string(&key_paths.0)?.trim())?;
         let secret = hex::decode(std::fs::read_to_string(&key_paths.1)?.trim())?;
-        let kyber = KyberPublicKey::from_bytes(hex::decode(std::fs::read_to_string(&key_paths.2)?.trim())?)?;
+        let kyber = KyberPublicKey::from_bytes(hex::decode(
+            std::fs::read_to_string(&key_paths.2)?.trim(),
+        )?)?;
         (public, secret, kyber)
     } else {
         let (public, secret) = generate_tx_keypair();
-        let (kyber, _) = KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
+        let (kyber, _) =
+            KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
         (public, secret, kyber)
     };
 
@@ -759,7 +763,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "0.0.0.0:8545".to_string())
         .parse::<std::net::SocketAddr>()
         .map_err(|e| format!("Invalid BLEEP_RPC_LISTEN_ADDR: {}", e))?;
-    info!("🔌 [16/16] Starting JSON-RPC server on {}…", rpc_listen_addr);
+    info!(
+        "🔌 [16/16] Starting JSON-RPC server on {}…",
+        rpc_listen_addr
+    );
 
     // Share atomic counters with the relay task (blocks/txs/height)
     let rpc_blocks = Arc::clone(&rpc_state.blocks_produced);

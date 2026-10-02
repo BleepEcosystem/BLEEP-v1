@@ -52,10 +52,7 @@ fn test_risk_score_bounds() -> Result<(), String> {
     let valid_risk = 50;
     let invalid_risk = 101;
 
-    assert!(
-        (0..=100).contains(&valid_risk),
-        "Valid risk should pass"
-    );
+    assert!((0..=100).contains(&valid_risk), "Valid risk should pass");
     assert!(
         !(0..=100).contains(&invalid_risk),
         "Invalid risk should fail"

@@ -153,7 +153,6 @@ impl AIAdaptiveConsensus {
             weighted_sum += reliability * weight;
         }
 
-        
         (weighted_sum / total_weight).clamp(0.0, 1.0)
     }
 

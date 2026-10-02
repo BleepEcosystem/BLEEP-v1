@@ -110,9 +110,7 @@ impl VotingResult {
         self.total_votes = votes_for + votes_against;
 
         if self.total_votes > 0 {
-            self.approval_percentage = (votes_for * 100)
-                .checked_div(self.total_votes)
-                .unwrap_or(0);
+            self.approval_percentage = (votes_for * 100).checked_div(self.total_votes).unwrap_or(0);
         }
 
         self.approved = self.approval_percentage >= threshold;

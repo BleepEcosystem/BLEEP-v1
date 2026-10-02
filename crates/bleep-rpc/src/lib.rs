@@ -689,11 +689,17 @@ pub fn rpc_routes_with_state(
                     );
                     return Ok::<_, warp::Rejection>(resp);
                 }
-                let signing_public_key = match req.signing_public_key.as_deref().and_then(|v| hex::decode(v).ok()) {
+                let signing_public_key = match req
+                    .signing_public_key
+                    .as_deref()
+                    .and_then(|v| hex::decode(v).ok())
+                {
                     Some(key) if key.len() == 64 => key,
                     _ => {
                         return Ok(warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: "signing_public_key is required".into() }),
+                            warp::reply::json(&ErrResp {
+                                error: "signing_public_key is required".into(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ));
                     }
@@ -702,14 +708,22 @@ pub fn rpc_routes_with_state(
                     Some(proof) if proof.len() == 49856 => proof,
                     _ => {
                         return Ok(warp::reply::with_status(
-                            warp::reply::json(&ErrResp { error: "proof is required".into() }),
+                            warp::reply::json(&ErrResp {
+                                error: "proof is required".into(),
+                            }),
                             warp::http::StatusCode::BAD_REQUEST,
                         ));
                     }
                 };
-                if !verify_tx_signature(&tx_payload(&req.label, "validator", req.amount, req.timestamp), &proof, &signing_public_key) {
+                if !verify_tx_signature(
+                    &tx_payload(&req.label, "validator", req.amount, req.timestamp),
+                    &proof,
+                    &signing_public_key,
+                ) {
                     return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrResp { error: "proof-of-possession verification failed".into() }),
+                        warp::reply::json(&ErrResp {
+                            error: "proof-of-possession verification failed".into(),
+                        }),
                         warp::http::StatusCode::UNAUTHORIZED,
                     ));
                 }
@@ -747,7 +761,11 @@ pub fn rpc_routes_with_state(
                                 // Create new validator identity.
                                 // ValidatorIdentity::new(id, kyber_pk[1568], signing_key_id, stake, epoch)
                                 // Kyber pk is zeroed here; real integration in Sprint 7.
-                                let mock_kyber_pk = req.kyber_public_key.as_deref().and_then(|v| hex::decode(v).ok()).unwrap_or_default();
+                                let mock_kyber_pk = req
+                                    .kyber_public_key
+                                    .as_deref()
+                                    .and_then(|v| hex::decode(v).ok())
+                                    .unwrap_or_default();
                                 let signing_key_id = hex::encode(&signing_public_key);
                                 let identity = ValidatorIdentity::new(
                                     validator_id.clone(),

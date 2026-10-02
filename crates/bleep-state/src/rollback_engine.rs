@@ -555,7 +555,9 @@ impl RollbackEngine {
 
         if !matches {
             record.mark_failed();
-            return Err("INVARIANT VIOLATION: Restored state does not match snapshot root".to_string());
+            return Err(
+                "INVARIANT VIOLATION: Restored state does not match snapshot root".to_string(),
+            );
         }
 
         info!(

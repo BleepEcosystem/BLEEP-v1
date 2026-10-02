@@ -125,10 +125,9 @@ impl FaultEvidence {
                     return Err("State roots should not match for mismatch fault".to_string());
                 }
             }
-            FaultType::ValidatorEquivocation { hash1, hash2, .. }
-                if hash1 == hash2 => {
-                    return Err("Block hashes should differ for equivocation".to_string());
-                }
+            FaultType::ValidatorEquivocation { hash1, hash2, .. } if hash1 == hash2 => {
+                return Err("Block hashes should differ for equivocation".to_string());
+            }
             _ => {}
         }
 

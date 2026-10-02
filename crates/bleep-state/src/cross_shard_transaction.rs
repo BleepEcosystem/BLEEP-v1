@@ -85,18 +85,12 @@ impl ShardExecutionPlan {
 
     /// Add write operation for a shard
     pub fn add_write(&mut self, shard: ShardId, key: Vec<u8>) {
-        self.shard_writes
-            .entry(shard)
-            .or_default()
-            .push(key);
+        self.shard_writes.entry(shard).or_default().push(key);
     }
 
     /// Add read operation for a shard
     pub fn add_read(&mut self, shard: ShardId, key: Vec<u8>) {
-        self.shard_reads
-            .entry(shard)
-            .or_default()
-            .push(key);
+        self.shard_reads.entry(shard).or_default().push(key);
     }
 
     /// Verify execution plan is valid

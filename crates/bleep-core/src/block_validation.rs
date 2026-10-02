@@ -56,14 +56,13 @@ impl BlockValidator {
         // Skipped for gossip-stripped blocks (empty signatures) — the SAL root
         // and STARK proof guarantee signature availability and correctness.
         let all_sigs_stripped = block.transactions.iter().all(|tx| tx.signature.is_empty());
-        if !all_sigs_stripped
-            && !Self::verify_transaction_signatures(&block.transactions) {
-                log::error!(
-                    "Block {} contains invalid transaction signatures",
-                    block.index
-                );
-                return false;
-            }
+        if !all_sigs_stripped && !Self::verify_transaction_signatures(&block.transactions) {
+            log::error!(
+                "Block {} contains invalid transaction signatures",
+                block.index
+            );
+            return false;
+        }
 
         true
     }

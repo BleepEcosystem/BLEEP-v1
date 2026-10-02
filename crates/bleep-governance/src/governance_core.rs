@@ -221,9 +221,7 @@ impl VoteTally {
         let approval_percentage = if stake_total == 0 {
             0
         } else {
-            (stake_approve * 100)
-                .checked_div(stake_total)
-                .unwrap_or(0) as u64
+            (stake_approve * 100).checked_div(stake_total).unwrap_or(0) as u64
         };
 
         // Approved if quorum met AND approval >= threshold

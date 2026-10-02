@@ -170,9 +170,7 @@ impl PATEngine {
 
         // Supply cap check
         if token.total_supply_cap > 0 {
-            let new_supply = token
-                .current_supply
-                .saturating_add(i.amount);
+            let new_supply = token.current_supply.saturating_add(i.amount);
             if new_supply > token.total_supply_cap {
                 return Err(PATError::SupplyCapExceeded {
                     cap: token.total_supply_cap,

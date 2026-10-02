@@ -461,7 +461,7 @@ impl BlockProducer {
             self.config.protocol_version,
             hex::encode(&state_root[..16]), // shard_registry_root = first 16 bytes of state root
             0,                              // shard_id: main chain
-            hex::encode(state_root),       // shard_state_root = full state root
+            hex::encode(state_root),        // shard_state_root = full state root
         );
 
         // ── 7a: Compute sig_commitment_root from raw signatures ───────────────

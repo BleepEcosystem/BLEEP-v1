@@ -113,10 +113,9 @@ impl SafetyInvariantChecker {
     ) -> Result<(), InvariantViolation> {
         // If rolled-back shard was involved in any cross-shard txs,
         // all must be aborted
-        if involved_shards.contains(&rolled_back_shard)
-            && aborted_count != expected_abort_count {
-                return Err(InvariantViolation::CrossShardCorruption);
-            }
+        if involved_shards.contains(&rolled_back_shard) && aborted_count != expected_abort_count {
+            return Err(InvariantViolation::CrossShardCorruption);
+        }
 
         Ok(())
     }

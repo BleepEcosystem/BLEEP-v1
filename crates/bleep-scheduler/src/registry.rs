@@ -233,7 +233,9 @@ impl TaskRegistry {
                     return false;
                 }
                 match t.trigger {
-                    Trigger::EveryNBlocks { every_n_blocks } => height.is_multiple_of(every_n_blocks),
+                    Trigger::EveryNBlocks { every_n_blocks } => {
+                        height.is_multiple_of(every_n_blocks)
+                    }
                     Trigger::EpochBoundary { epoch_len } => height.is_multiple_of(epoch_len),
                     _ => false,
                 }

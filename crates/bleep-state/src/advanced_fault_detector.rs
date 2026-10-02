@@ -400,10 +400,7 @@ impl AdvancedFaultDetector {
         }
 
         let key = (shard_id, block_height);
-        let signatures = self
-            .block_signatures
-            .entry(key)
-            .or_default();
+        let signatures = self.block_signatures.entry(key).or_default();
 
         // Equivocation requires two different blocks signed by same validator
         if !signatures.contains(&validator_pubkey) {

@@ -414,7 +414,9 @@ impl DeterministicInferenceEngine {
         }
 
         // Set default rounding if not provided
-        self.rounding_configs.entry(model_key).or_insert_with(|| OutputRoundingConfig::precise(6));
+        self.rounding_configs
+            .entry(model_key)
+            .or_insert_with(|| OutputRoundingConfig::precise(6));
 
         Ok(())
     }

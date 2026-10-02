@@ -249,8 +249,7 @@ pub struct ZkExecutionProof {
 // OPTIMISATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OptimisationLevel {
     /// No transformations; useful for debugging.
     None,
@@ -262,7 +261,6 @@ pub enum OptimisationLevel {
     /// Aggressive — includes cross-function inlining and profile-guided hints.
     Aggressive,
 }
-
 
 /// Summary of all transformations applied.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -217,12 +217,16 @@ impl PerformanceBenchmark {
         let avg_block_time_ms = if self.total_blocks == 0 {
             0
         } else {
-            self.total_block_ms.checked_div(self.total_blocks).unwrap_or(0)
+            self.total_block_ms
+                .checked_div(self.total_blocks)
+                .unwrap_or(0)
         };
         let avg_proof_time_ms = if self.total_blocks == 0 {
             0
         } else {
-            self.total_proof_ms.checked_div(self.total_blocks).unwrap_or(0)
+            self.total_proof_ms
+                .checked_div(self.total_blocks)
+                .unwrap_or(0)
         };
         let full_pct = if self.total_blocks == 0 {
             0.0

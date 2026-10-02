@@ -88,9 +88,10 @@ impl Engine for ZkEngineAdapter {
         const PROOF_LEN: usize = 32 + 32 + 8 + 32 + 32 + 32; // 168 bytes
 
         if packet.len() < PROOF_LEN {
-            return Err(VmError::ValidationError(
-                format!("ZK proof packet too small (minimum {} bytes)", PROOF_LEN),
-            ));
+            return Err(VmError::ValidationError(format!(
+                "ZK proof packet too small (minimum {} bytes)",
+                PROOF_LEN
+            )));
         }
 
         let base_gas = 50_000u64;

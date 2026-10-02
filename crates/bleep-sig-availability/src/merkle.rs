@@ -150,7 +150,11 @@ impl SigCommitmentTree {
         // Walk from the leaf up to the root, collecting sibling hashes.
         let mut pos = self.padded_n + leaf_idx; // 1-based position
         while pos > 1 {
-            let sibling = if pos.is_multiple_of(2) { pos + 1 } else { pos - 1 };
+            let sibling = if pos.is_multiple_of(2) {
+                pos + 1
+            } else {
+                pos - 1
+            };
             path.push(self.nodes[sibling]);
             pos /= 2;
         }

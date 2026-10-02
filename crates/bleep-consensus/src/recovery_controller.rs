@@ -490,11 +490,12 @@ impl RecoveryController {
         _current_epoch: u64,
     ) -> Result<(), RecoveryError> {
         if incident_type == &IncidentType::ValidatorEquivocation
-            && (self.current_validators.len() as u64) <= self.preconditions.min_validators {
-                return Err(RecoveryError::PreconditionFailed(
-                    "Insufficient validators for recovery".to_string(),
-                ));
-            }
+            && (self.current_validators.len() as u64) <= self.preconditions.min_validators
+        {
+            return Err(RecoveryError::PreconditionFailed(
+                "Insufficient validators for recovery".to_string(),
+            ));
+        }
 
         Ok(())
     }

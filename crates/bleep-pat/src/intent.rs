@@ -213,13 +213,7 @@ impl PATIntent {
             freezable,
         });
         let gas_limit = crate::gas_model::PATGasModel::default().cost(&kind);
-        Self::new(
-            caller,
-            kind,
-            gas_limit,
-            0,
-            0,
-        )
+        Self::new(caller, kind, gas_limit, 0, 0)
     }
 
     pub fn mint(caller: Address, symbol: impl Into<String>, to: Address, amount: u128) -> Self {

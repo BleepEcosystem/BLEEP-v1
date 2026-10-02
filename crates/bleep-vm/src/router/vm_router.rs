@@ -155,8 +155,7 @@ impl CircuitBreaker {
     const OPEN_FOR: Duration = Duration::from_secs(30);
 
     fn is_open(&self) -> bool {
-        self.open_until
-            .is_some_and(|until| Instant::now() < until)
+        self.open_until.is_some_and(|until| Instant::now() < until)
     }
 
     fn record_success(&mut self) {
@@ -225,12 +224,12 @@ impl VmRouter {
         let start = Instant::now();
 
         // ── Step 1: Signature verification ───────────────────────────────────
-        if self.config.verify_signatures && intent.signer != [0u8; 32]
-            && !intent.verify_signature() {
-                return Err(VmError::ValidationError(
-                    "Invalid Ed25519 signature on intent".into(),
-                ));
-            }
+        if self.config.verify_signatures && intent.signer != [0u8; 32] && !intent.verify_signature()
+        {
+            return Err(VmError::ValidationError(
+                "Invalid Ed25519 signature on intent".into(),
+            ));
+        }
 
         // ── Step 2: Gas limit cap ─────────────────────────────────────────────
         let gas_limit = intent.gas_limit();

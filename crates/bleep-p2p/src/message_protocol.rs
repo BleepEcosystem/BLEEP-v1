@@ -471,15 +471,14 @@ impl MessageProtocol {
             None,
         )
         .map_err(|e| {
-            P2PError::Io(std::io::Error::other(
-                format!("socket2::Socket::new failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!(
+                "socket2::Socket::new failed: {}",
+                e
+            )))
         })?;
 
         socket.set_reuse_address(true).map_err(|e| {
-            P2PError::Io(std::io::Error::other(
-                format!("SO_REUSEADDR failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!("SO_REUSEADDR failed: {}", e)))
         })?;
 
         socket.bind(&bind_addr.into()).map_err(|e| {
@@ -490,14 +489,16 @@ impl MessageProtocol {
         })?;
 
         socket.listen(128).map_err(|e| {
-            P2PError::Io(std::io::Error::other(
-                format!("socket listen failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!(
+                "socket listen failed: {}",
+                e
+            )))
         })?;
         socket.set_nonblocking(true).map_err(|e| {
-            P2PError::Io(std::io::Error::other(
-                format!("set_nonblocking failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!(
+                "set_nonblocking failed: {}",
+                e
+            )))
         })?;
 
         let listener =
@@ -592,9 +593,12 @@ impl MessageProtocol {
         }
 
         // Verify and decrypt
-        let _plaintext = self.open_message(&msg, &sender_pk).await.inspect_err(|_e| {
-            self.peer_manager.record_failure(&sender_id);
-        })?;
+        let _plaintext = self
+            .open_message(&msg, &sender_pk)
+            .await
+            .inspect_err(|_e| {
+                self.peer_manager.record_failure(&sender_id);
+            })?;
 
         self.peer_manager.record_success(&sender_id);
         self.peer_manager.record_message(&sender_id);
