@@ -480,20 +480,29 @@ mod tests {
         .await
         .expect("all three nodes should establish authenticated sessions");
 
-        let payload = b"three-node authenticated gossip";
-        node1.broadcast(MessageType::Transaction, payload.to_vec());
+        let messages = [
+            (MessageType::Transaction, b"transaction payload".as_slice()),
+            (MessageType::Block, b"block payload".as_slice()),
+            (
+                MessageType::SigAvailability,
+                b"signature availability payload".as_slice(),
+            ),
+        ];
+        for (message_type, payload) in messages {
+            node1.broadcast(message_type.clone(), payload.to_vec());
 
-        for node in [&node2, &node3] {
-            let (sender_id, message, plaintext) =
-                timeout(Duration::from_secs(10), node.recv_with_payload())
-                    .await
-                    .expect("node should receive gossip")
-                    .expect("inbound channel should remain open");
+            for node in [&node2, &node3] {
+                let (sender_id, message, plaintext) =
+                    timeout(Duration::from_secs(10), node.recv_with_payload())
+                        .await
+                        .expect("node should receive gossip")
+                        .expect("inbound channel should remain open");
 
-            assert_eq!(sender_id, node1.node_id);
-            assert_eq!(message.sender_id, node1.node_id);
-            assert_eq!(message.message_type, MessageType::Gossip);
-            assert_eq!(plaintext, payload);
+                assert_eq!(sender_id, node1.node_id);
+                assert_eq!(message.sender_id, node1.node_id);
+                assert_eq!(message.message_type, message_type);
+                assert_eq!(plaintext, payload);
+            }
         }
 
         handle1.shutdown().await;

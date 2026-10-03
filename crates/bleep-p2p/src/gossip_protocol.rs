@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::message_protocol::MessageProtocol;
 use crate::peer_manager::PeerManager;
-use crate::types::{MessageType, NodeId, SecureMessage};
+use crate::types::{NodeId, SecureMessage};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -157,18 +157,18 @@ impl GossipProtocol {
                 Some(a) => a,
                 None => continue,
             };
-            // Re-wrap as a Gossip envelope — the payload stays encrypted.
-            let gossip_msg =
-                match self
-                    .message_protocol
-                    .seal_message(peer_id, MessageType::Gossip, &msg.payload)
-                {
-                    Ok(m) => m,
-                    Err(e) => {
-                        warn!(peer = %peer_id, error = %e, "Gossip: seal failed, skipping");
-                        continue;
-                    }
-                };
+            // Preserve the application message type so receivers can dispatch it.
+            let gossip_msg = match self.message_protocol.seal_message(
+                peer_id,
+                msg.message_type.clone(),
+                &msg.payload,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(peer = %peer_id, error = %e, "Gossip: seal failed, skipping");
+                    continue;
+                }
+            };
             if let Err(e) = self.message_protocol.send_message(addr, &gossip_msg).await {
                 warn!(peer = %peer_id, error = %e, "Gossip: send failed");
                 self.peer_manager.record_failure(peer_id);
