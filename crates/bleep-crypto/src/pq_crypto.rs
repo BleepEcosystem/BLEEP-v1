@@ -292,14 +292,15 @@ impl KyberKem {
 
 // ==================== DIGITAL SIGNATURES (SPHINCS+-SHAKE-256f-simple) ====================
 
-/// SPHINCS+-SHAKE-256f-simple detached signature (49,088 bytes).
+/// SPHINCS+-SHAKE-256f-simple detached signature (49,856 bytes).
 ///
 /// This is the production post-quantum signature scheme used for all
 /// BLEEP signing operations: transactions, block headers, and P2P messages.
-/// NIST PQC Level 5 (≥256-bit post-quantum security).
+/// The value matches `PQCLEAN_SPHINCSSHAKE256FSIMPLE_CLEAN_CRYPTO_BYTES`
+/// from the upstream PQClean FFI for the active `sphincsshake256fsimple` parameter set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DigitalSignature {
-    /// Raw SPHINCS+-SHAKE-256f-simple detached signature bytes (49,088 bytes).
+    /// Raw SPHINCS+-SHAKE-256f-simple detached signature bytes (49,856 bytes).
     sig_bytes: Vec<u8>,
     /// SHA3-256 of the signed message (for quick pre-check).
     message_hash: [u8; 32],

@@ -294,23 +294,27 @@ impl PeerManager {
         let now = unix_now();
         let mut to_ban: Vec<NodeId> = Vec::new();
         let mut to_remove: Vec<NodeId> = Vec::new();
+        let mut to_update: Vec<(NodeId, f64, PeerStatus)> = Vec::new();
 
+        // DashMap iterators hold shard read locks for the entire loop body. Do not
+        // call `get_mut()` while a `self.peers.iter()` entry is still alive; that
+        // would attempt to upgrade a read lock to a write lock on the same shard and
+        // deadlock. Snapshot the data first, then drop the iterator and mutate later.
         for entry in self.peers.iter() {
             let id = entry.key().clone();
             let peer = entry.value();
 
-            // Evict very stale peers
             if now.saturating_sub(peer.last_seen) > self.config.peer_eviction_age_secs {
                 to_remove.push(id.clone());
                 continue;
             }
 
-            // Re-score and update status
             let score = self.scoring.calculate_score(&id);
-            drop(entry); // Release read lock before mutating
+            to_update.push((id.clone(), score, peer.status.clone()));
+        }
 
+        for (id, score, old_status) in to_update {
             if let Some(mut p) = self.peers.get_mut(&id) {
-                let old_status = p.status.clone();
                 p.trust_score = score;
                 p.status = if score >= TRUST_HEALTHY_THRESHOLD {
                     PeerStatus::Healthy
@@ -325,7 +329,7 @@ impl PeerManager {
                         .send(PeerEvent::StatusChanged(id.clone(), p.status.clone()));
                 }
                 if score < self.config.min_trust_score {
-                    to_ban.push(id);
+                    to_ban.push(id.clone());
                 }
             }
         }
@@ -508,6 +512,22 @@ mod tests {
         }
         pm.maintenance_sweep().await;
         assert_eq!(pm.peer_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_sweep_does_not_deadlock_with_live_peer() {
+        let (pm, _rx) = make_test_pm();
+        let id = add_test_peer(&pm, 21).await;
+
+        if let Some(mut peer) = pm.peers.get_mut(&id) {
+            peer.last_seen = unix_now();
+            peer.status = PeerStatus::Candidate;
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), pm.maintenance_sweep()).await
+            .expect("maintenance_sweep should not deadlock while a live peer is present");
+
+        assert!(pm.get_peer(&id).is_some());
     }
 
     #[tokio::test]

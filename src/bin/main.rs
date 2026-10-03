@@ -142,12 +142,19 @@ impl MempoolSigCache for TxPoolSigCache {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
+    // Bridge the `log` facade used by BLEEP diagnostics to the environment logger
+    // before installing the tracing subscriber. This ensures block validation and
+    // chain-state failures are not silently dropped when no logger backend exists.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .try_init();
+
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
 
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║  BLEEP Blockchain Node — Protocol Version 5 · Sprint 9       ║");

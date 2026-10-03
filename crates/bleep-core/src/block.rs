@@ -15,8 +15,8 @@
 //! ```
 //!
 //! `PK_LEN`  = 64 bytes  (SPHINCS+-SHAKE-256-simple)
-//! `SIG_LEN` = 49,088 bytes (SPHINCS+-SHAKE-256-simple detached sig)
-//! Total `validator_signature` = 7,888 bytes
+//! `SIG_LEN` = 49,856 bytes (SPHINCS+-SHAKE-256-simple detached sig)
+//! Total `validator_signature` = 49,920 bytes
 //!
 //! `verify_signature(public_key)` reconstructs the block hash, then calls
 //! `sphincsshake256fsimple::verify_detached_signature`.
@@ -43,8 +43,9 @@ use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as
 /// Byte length of a SPHINCS+-SHAKE-256-simple public key.
 /// pqcrypto_sphincsplus::sphincsshake256fsimple generates 64-byte public keys.
 pub const SPHINCS_PK_LEN: usize = 64;
-/// Byte length of a SPHINCS+-SHAKE-256-simple detached signature.
-pub const SPHINCS_SIG_LEN: usize = 49088;
+/// Byte length of a SPHINCS+-SHAKE-256-simple detached signature, matching
+/// `PQCLEAN_SPHINCSSHAKE256FSIMPLE_CLEAN_CRYPTO_BYTES` in the upstream FFI.
+pub const SPHINCS_SIG_LEN: usize = 49_856;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 
@@ -181,7 +182,7 @@ pub struct Block {
     pub previous_hash: String,
     pub merkle_root: String,
 
-    /// Sprint 6: `pk_bytes(32) || SPHINCS+_sig(SPHINCS_SIG_LEN)` = 7,888 bytes.
+    /// Sprint 6: `pk_bytes(64) || SPHINCS+_sig(SPHINCS_SIG_LEN)` = 49,920 bytes.
     /// Empty for genesis (unsigned trust anchor).
     /// 96 bytes for legacy Sprint 5 blocks (SHA3 scheme, still accepted).
     pub validator_signature: Vec<u8>,
@@ -345,7 +346,7 @@ impl Block {
     /// (as returned by `generate_tx_keypair()` or `sphincsshake256fsimple::keypair()`).
     /// `sphincs_pk_bytes` must be raw SPHINCS+-SHAKE-256-simple public key bytes (64 bytes).
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49088)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
     /// The block proof is generated separately by the consensus producer.
     pub fn sign_block(&mut self, seed_bytes: &[u8]) -> Result<(), String> {
         // For backward compatibility: derive keypair from seed
@@ -360,7 +361,7 @@ impl Block {
     /// `sphincs_sk_bytes` must be raw SPHINCS+-SHAKE-256-simple secret key bytes.
     /// `sphincs_pk_bytes` must be the corresponding 64-byte public key.
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49088)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
     pub fn sign_block_with_pk(
         &mut self,
         sphincs_sk_bytes: &[u8],
@@ -387,7 +388,7 @@ impl Block {
         let sig = sphincsshake256fsimple::detached_sign(&block_hash_bytes, &sk);
         let sig_bytes = sig.as_bytes();
 
-        // Build signature: pk(64) || sig(49088)
+        // Build signature: pk(64) || sig(49856)
         let mut vsig = Vec::with_capacity(VALIDATOR_SIG_LEN);
         vsig.extend_from_slice(sphincs_pk_bytes); // [0..64]   validator public key
         vsig.extend_from_slice(sig_bytes); // [64..]    SPHINCS+ detached sig
@@ -401,10 +402,9 @@ impl Block {
     /// Accepts two formats:
     ///
     /// 1. **Empty** — genesis / unsigned block: always `Ok(true)`.
-    /// 2. **7,888 bytes (SPHINCS+ scheme)** — verified with `pqcrypto`.
+    /// 2. **49,920 bytes (SPHINCS+ scheme)** — verified with `pqcrypto`.
     ///
-    /// `public_key` must be the 32-byte SHA3 fingerprint of the SPHINCS+ sk seed
-    /// (as derived by `derive_block_keypair`).
+    /// `public_key` must be the raw 64-byte SPHINCS+-SHAKE-256-simple public key.
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, String> {
         if self.validator_signature.is_empty() {
             return Ok(self.index == 0); // only the unsigned genesis block is exempt
@@ -723,7 +723,7 @@ mod tests {
         b.sign_block_with_pk(sk_bytes.as_bytes(), pk_bytes.as_bytes())
             .expect("sign_block failed");
 
-        // validator_signature should be pk_hash(32) + sphincs_sig
+        // validator_signature should be pk(64) + SPHINCS+ signature
         assert!(
             b.validator_signature.len() > 32,
             "sig len={}",

@@ -64,7 +64,9 @@ use bleep_crypto::zkp_verification::BLEEPError;
 // ── SPHINCS+-SHAKE-256-simple constants ───────────────────────────────────────
 
 /// Raw byte length of a SPHINCS+-SHAKE-256-simple detached signature.
-const SPHINCS_SIG_LEN: usize = 49088;
+/// This matches `PQCLEAN_SPHINCSSHAKE256FSIMPLE_CLEAN_CRYPTO_BYTES` in the
+/// upstream PQClean FFI for the actual `sphincsshake256fsimple` parameter set.
+const SPHINCS_SIG_LEN: usize = 49_856;
 
 /// Raw byte length of a SPHINCS+-SHAKE-256-simple public key.
 #[allow(dead_code)]
