@@ -106,10 +106,12 @@ impl TransactionPool {
 
         // ── Step 4: S-07 — SPHINCS+ cryptographic verification ───────────────
         //
-        // Wire format: signature = pk_bytes(64) || sphincs_detached_sig(49088)
+        // Wire format: signature = pk_bytes(64) || sphincs_detached_sig(49_856)
         // Canonical payload: SHA3-256(sender || receiver || amount_le8 || timestamp_le8)
         //
-        // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes.
+        // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes and the
+        // detached signature length matches the upstream
+        // `PQCLEAN_SPHINCSSHAKE256FSIMPLE_CLEAN_CRYPTO_BYTES` value.
         // We split the signature blob into (pk, sig) and verify using the same
         // tx_payload() function used at signing time.
 
