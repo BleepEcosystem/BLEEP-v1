@@ -28,10 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hex;
-use reqwest;
 use serde::Deserialize;
-use tempfile;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 

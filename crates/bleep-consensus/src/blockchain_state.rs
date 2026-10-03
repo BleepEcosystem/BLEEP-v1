@@ -5,6 +5,12 @@ pub struct BlockchainState {
     inner: CoreBlockchainState,
 }
 
+impl Default for BlockchainState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockchainState {
     pub fn new() -> Self {
         Self {

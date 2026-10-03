@@ -228,10 +228,11 @@ pub struct SphincsPublicKey {
 
 impl SphincsPublicKey {
     pub fn from_bytes(bytes: Vec<u8>) -> CryptoResult<Self> {
-        // SPHINCS-SHA2-256s public key is 64 bytes
-        if bytes.len() != 64 {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+
+        if bytes.len() != sphincs::public_key_bytes() {
             return Err(CryptoError::InvalidKeyFormat(
-                format!("SPHINCS public key must be 64 bytes, got {}", bytes.len())
+                format!("SPHINCS public key must be {} bytes, got {}", sphincs::public_key_bytes(), bytes.len())
             ));
         }
         Ok(Self { bytes })
@@ -250,10 +251,11 @@ pub struct SphincsSecretKey {
 
 impl SphincsSecretKey {
     pub fn from_bytes(bytes: Vec<u8>) -> CryptoResult<Self> {
-        // SPHINCS-SHA2-256s secret key is 128 bytes
-        if bytes.len() != 128 {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+
+        if bytes.len() != sphincs::secret_key_bytes() {
             return Err(CryptoError::InvalidKeyFormat(
-                format!("SPHINCS secret key must be 128 bytes, got {}", bytes.len())
+                format!("SPHINCS secret key must be {} bytes, got {}", sphincs::secret_key_bytes(), bytes.len())
             ));
         }
         Ok(Self { bytes })
@@ -272,10 +274,11 @@ pub struct SphincsSignature {
 
 impl SphincsSignature {
     pub fn from_bytes(bytes: Vec<u8>) -> CryptoResult<Self> {
-        // SPHINCS-SHA2-256s signature is 17088 bytes
-        if bytes.len() != 17088 {
+        use pqcrypto_sphincsplus::sphincsshake256fsimple as sphincs;
+
+        if bytes.len() != sphincs::signature_bytes() {
             return Err(CryptoError::InvalidSignatureFormat(
-                format!("SPHINCS signature must be 17088 bytes, got {}", bytes.len())
+                format!("SPHINCS signature must be {} bytes, got {}", sphincs::signature_bytes(), bytes.len())
             ));
         }
         Ok(Self { bytes })
@@ -291,11 +294,11 @@ pub struct SphincsSignatureScheme;
 
 impl SphincsSignatureScheme {
     /// Generate SPHINCS+ keypair
-    /// Uses sphincssha2256f (fast variant)
+    /// Uses sphincsshake256fsimple (fast variant)
     pub fn keygen() -> CryptoResult<(SphincsPublicKey, SphincsSecretKey)> {
-        use pqcrypto_sphincsplus::sphincssha2256f;
+        use pqcrypto_sphincsplus::sphincsshake256fsimple;
         
-        let (pk, sk) = sphincssha2256f::keypair();
+        let (pk, sk) = sphincsshake256fsimple::keypair();
         
         let public_key = SphincsPublicKey::from_bytes(pk.0.to_vec())?;
         let secret_key = SphincsSecretKey::from_bytes(sk.0.to_vec())?;
@@ -309,10 +312,10 @@ impl SphincsSignatureScheme {
         message: &[u8],
         secret_key: &SphincsSecretKey,
     ) -> CryptoResult<SphincsSignature> {
-        use pqcrypto_sphincsplus::sphincssha2256f;
+        use pqcrypto_sphincsplus::sphincsshake256fsimple;
         
-        let sk = sphincssha2256f::SecretKey(secret_key.bytes);
-        let signature = sphincssha2256f::sign(message, &sk);
+        let sk = sphincsshake256fsimple::SecretKey(secret_key.bytes);
+        let signature = sphincsshake256fsimple::sign(message, &sk);
         
         SphincsSignature::from_bytes(signature.0.to_vec())
     }
@@ -324,16 +327,16 @@ impl SphincsSignatureScheme {
         signature: &SphincsSignature,
         public_key: &SphincsPublicKey,
     ) -> CryptoResult<()> {
-        use pqcrypto_sphincsplus::sphincssha2256f;
+        use pqcrypto_sphincsplus::sphincsshake256fsimple;
         
         // Reconstruct the types from bytes
         let mut sig_bytes = [0u8; 49088];
         sig_bytes.copy_from_slice(&signature.bytes);
         
-        let pk = sphincssha2256f::PublicKey(public_key.bytes);
-        let sig = sphincssha2256f::Signature(sig_bytes);
+        let pk = sphincsshake256fsimple::PublicKey(public_key.bytes);
+        let sig = sphincsshake256fsimple::Signature(sig_bytes);
         
-        sphincssha2256f::open(message, &sig, &pk)
+        sphincsshake256fsimple::open(message, &sig, &pk)
             .map_err(|_| CryptoError::SignatureVerificationFailed(
                 "SPHINCS+ signature verification failed".to_string()
             ))

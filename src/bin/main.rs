@@ -101,8 +101,6 @@ use bleep_telemetry::{
 // ── RPC ───────────────────────────────────────────────────────────────────────
 use base64::{engine::general_purpose, Engine as _};
 use bleep_rpc::{rpc_routes_with_state, RpcState};
-use hex;
-use warp;
 
 const DEFAULT_BLEEP_JWT_SECRET_B64: &str = "UtQcXNbNejElXUMcGocAuRh+YLiIgR9onZ1+PUJtJiU="; // Local dev fallback; set BLEEP_JWT_SECRET in production.
 
@@ -169,7 +167,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Generate real SPHINCS+-SHAKE-256f-simple keypair for block signing.
     // generate_tx_keypair() returns (pk_bytes: 64B, sk_bytes: 128B).
-    let key_dir = std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
+    let key_dir =
+        std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
     let key_paths = (
         format!("{}/sphincs.public", key_dir),
         format!("{}/sphincs.secret", key_dir),
@@ -181,18 +180,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
     {
         let public = hex::decode(std::fs::read_to_string(&key_paths.0)?.trim())?;
         let secret = hex::decode(std::fs::read_to_string(&key_paths.1)?.trim())?;
-        let kyber = KyberPublicKey::from_bytes(hex::decode(std::fs::read_to_string(&key_paths.2)?.trim())?)?;
+        let kyber = KyberPublicKey::from_bytes(hex::decode(
+            std::fs::read_to_string(&key_paths.2)?.trim(),
+        )?)?;
         (public, secret, kyber)
     } else {
         let (public, secret) = generate_tx_keypair();
-        let (kyber, _) = KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
+        let (kyber, _) =
+            KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
         (public, secret, kyber)
     };
 
     // Generate real Kyber-1024 keypair for validator KEM binding.
     // KyberKem::keygen() returns (KyberPublicKey: 1568B, KyberSecretKey: 3168B).
-    let kyber_pk = kyber_pk;
-
     info!(
         "  ✅ SPHINCS+-SHAKE-256f-simple keypair generated (PK={} bytes, SK={} bytes).",
         sphincs_pk.len(),
@@ -407,7 +407,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             enable_layer3: true,
             enable_layer2: true,
             enable_layer1: true,
-            data_directory: PathBuf::from("/tmp/bleep-connect"),
+            data_directory: PathBuf::from(&state_dir).join("bleep-connect"),
             commitment_chain_block_interval_secs: 6,
             layer2_threshold: 100_000_000_000_000,
         };
@@ -435,8 +435,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("  🪙 Initialising PAT Registry…");
     let pat_registry = {
         use bleep_pat::PATRegistry;
-        let reg = Arc::new(Mutex::new(PATRegistry::new()));
-        reg
+        Arc::new(Mutex::new(PATRegistry::new()))
     };
     info!("  ✅ PAT Registry ready (create tokens via /rpc/pat/create).");
 
@@ -504,7 +503,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Arc::clone(&tx_pool),
         Arc::clone(&blockchain),
         Arc::clone(&state),
-        sphincs_sk.clone(),          // full SPHINCS+ SK bytes (64 bytes)
+        sphincs_sk.clone(),          // full SPHINCS+ SK bytes (128 bytes)
         sphincs_pk.clone(),          // full SPHINCS+ PK bytes (64 bytes, FIPS 205 SL5)
         Some(Arc::clone(&p2p_node)), // direct gossip broadcast
         Some(sal_bridge.clone()),
@@ -677,8 +676,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let inbound_handle = tokio::spawn(async move {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
         loop {
-            match inbound_p2p_node.recv().await {
-                Some((_peer_id, msg)) => {
+            match inbound_p2p_node.recv_with_payload().await {
+                Some((_peer_id, mut msg, plaintext)) => {
+                    msg.payload = plaintext;
                     if msg.message_type == MessageType::SigAvailability {
                         sal_bridge.handle_inbound_message(msg);
                         continue;
@@ -759,7 +759,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "0.0.0.0:8545".to_string())
         .parse::<std::net::SocketAddr>()
         .map_err(|e| format!("Invalid BLEEP_RPC_LISTEN_ADDR: {}", e))?;
-    info!("🔌 [16/16] Starting JSON-RPC server on {}…", rpc_listen_addr);
+    info!(
+        "🔌 [16/16] Starting JSON-RPC server on {}…",
+        rpc_listen_addr
+    );
 
     // Share atomic counters with the relay task (blocks/txs/height)
     let rpc_blocks = Arc::clone(&rpc_state.blocks_produced);
@@ -771,8 +774,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // real block production and chain height rather than a NOT_READY stub.
     let rpc_state = rpc_state.with_block_producer(Arc::clone(&block_producer));
 
-    // Seed peer counter from current P2P state
-    rpc_peers.store(p2p_node.peer_count(), std::sync::atomic::Ordering::Relaxed);
+    let peer_count_node = Arc::clone(&p2p_node);
+    let peer_count_refresh = Arc::clone(&rpc_peers);
+    let peer_count_handle = tokio::spawn(async move {
+        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            refresh.tick().await;
+            peer_count_refresh.store(
+                peer_count_node.peer_count(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    });
 
     let routes = rpc_routes_with_state(rpc_state);
     let rpc_handle = tokio::spawn(async move {
@@ -879,6 +892,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     interval_handle.abort();
     block_sched_handle.abort();
     rpc_handle.abort();
+    peer_count_handle.abort();
     inbound_handle.abort();
     p2p_handle.shutdown().await;
 

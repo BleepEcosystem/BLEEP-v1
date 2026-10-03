@@ -355,6 +355,12 @@ pub struct GlobalInvariantMonitor {
     genesis_thresholds: Vec<InvariantThreshold>,
 }
 
+impl Default for GlobalInvariantMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalInvariantMonitor {
     pub fn new() -> Self {
         GlobalInvariantMonitor {

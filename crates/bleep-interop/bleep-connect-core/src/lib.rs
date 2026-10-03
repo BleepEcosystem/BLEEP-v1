@@ -565,9 +565,11 @@ mod tests {
     async fn make_orchestrator() -> Arc<BleepConnectOrchestrator> {
         let dir = tempdir().unwrap();
         let kp = ClassicalKeyPair::generate();
-        let mut config = BleepConnectConfig::default();
-        config.data_directory = dir.path().to_path_buf();
-        config.commitment_chain_block_interval_secs = 999; // Don't auto-produce in tests
+        let config = BleepConnectConfig {
+            data_directory: dir.path().to_path_buf(),
+            commitment_chain_block_interval_secs: 999, // Don't auto-produce in tests
+            ..BleepConnectConfig::default()
+        };
 
         Arc::new(BleepConnectOrchestrator::new(config, kp).await.unwrap())
     }

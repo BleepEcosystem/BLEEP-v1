@@ -46,6 +46,17 @@ pub struct ChainStats {
 }
 
 /// The read-only query engine. Arc-clone freely — all ops are O(1).
+pub struct QueryIndexes {
+    pub blocks: Arc<BlockIndex>,
+    pub txs: Arc<TxIndex>,
+    pub accounts: Arc<AccountIndex>,
+    pub governance: Arc<GovernanceIndex>,
+    pub validators: Arc<ValidatorIndex>,
+    pub shards: Arc<ShardIndex>,
+    pub cross_shard: Arc<CrossShardIndex>,
+    pub ai_events: Arc<AiEventIndex>,
+}
+
 pub struct QueryEngine {
     pub blocks: Arc<BlockIndex>,
     pub txs: Arc<TxIndex>,
@@ -58,25 +69,16 @@ pub struct QueryEngine {
 }
 
 impl QueryEngine {
-    pub fn new(
-        blocks: Arc<BlockIndex>,
-        txs: Arc<TxIndex>,
-        accounts: Arc<AccountIndex>,
-        governance: Arc<GovernanceIndex>,
-        validators: Arc<ValidatorIndex>,
-        shards: Arc<ShardIndex>,
-        cross_shard: Arc<CrossShardIndex>,
-        ai_events: Arc<AiEventIndex>,
-    ) -> Self {
+    pub fn new(indexes: QueryIndexes) -> Self {
         Self {
-            blocks,
-            txs,
-            accounts,
-            governance,
-            validators,
-            shards,
-            cross_shard,
-            ai_events,
+            blocks: indexes.blocks,
+            txs: indexes.txs,
+            accounts: indexes.accounts,
+            governance: indexes.governance,
+            validators: indexes.validators,
+            shards: indexes.shards,
+            cross_shard: indexes.cross_shard,
+            ai_events: indexes.ai_events,
         }
     }
 

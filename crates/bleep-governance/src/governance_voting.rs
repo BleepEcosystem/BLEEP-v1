@@ -258,7 +258,7 @@ impl ProposalVotingState {
 
         let total_votes = self.stake_for + self.stake_against;
         let approval_percentage = if total_votes > 0 {
-            (self.stake_for * 100) / total_votes
+            (self.stake_for * 100).checked_div(total_votes).unwrap_or(0)
         } else {
             0
         };
@@ -272,7 +272,9 @@ impl ProposalVotingState {
             approval_percentage,
             voter_count: self.voters.len() as u64,
             participation_percentage: if self.total_active_stake > 0 {
-                (total_votes * 100) / self.total_active_stake
+                (total_votes * 100)
+                    .checked_div(self.total_active_stake)
+                    .unwrap_or(0)
             } else {
                 0
             },
@@ -326,6 +328,12 @@ pub struct GovernanceVotingEngine {
     /// Validator set (from consensus layer)
     /// Map of validator_pubkey -> stake
     validators: HashMap<Vec<u8>, u64>,
+}
+
+impl Default for GovernanceVotingEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GovernanceVotingEngine {

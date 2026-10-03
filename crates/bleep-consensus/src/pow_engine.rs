@@ -294,7 +294,7 @@ impl ConsensusEngine for EmergencyPoWEngine {
         // Normalized to [0.0, 1.0]
         let max_difficulty = 30u32;
         let health = 1.0 - (self.difficulty as f64 / max_difficulty as f64);
-        health.max(0.0).min(1.0)
+        health.clamp(0.0, 1.0)
     }
 }
 

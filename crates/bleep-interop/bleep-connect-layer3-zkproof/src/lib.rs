@@ -68,6 +68,10 @@ impl ProofCache {
     pub fn len(&self) -> usize {
         self.proofs.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.proofs.is_empty()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,11 +141,12 @@ impl ProofGenerator {
             return Ok(cached);
         }
 
-        let mut public_inputs: Vec<Vec<u8>> = Vec::new();
-        public_inputs.push(input.intent_id.to_vec());
-        public_inputs.push(input.source_state_root.to_vec());
-        public_inputs.push(input.dest_tx_hash.to_vec());
-        public_inputs.push(input.dest_amount_delivered.to_le_bytes().to_vec());
+        let public_inputs = vec![
+            input.intent_id.to_vec(),
+            input.source_state_root.to_vec(),
+            input.dest_tx_hash.to_vec(),
+            input.dest_amount_delivered.to_le_bytes().to_vec(),
+        ];
 
         let mut transcript = Vec::new();
         transcript.extend_from_slice(&input.intent_id);

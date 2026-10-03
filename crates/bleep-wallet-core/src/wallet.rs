@@ -132,7 +132,7 @@ impl EncryptedWallet {
     /// `BLEEP1<hex40>` — SHA256²(pk) truncated to 20 bytes.
     pub fn derive_address(public_key: &[u8]) -> String {
         let first = Sha256::digest(public_key);
-        let second = Sha256::digest(&first);
+        let second = Sha256::digest(first);
         format!("BLEEP1{}", hex::encode(&second[..20]))
     }
 

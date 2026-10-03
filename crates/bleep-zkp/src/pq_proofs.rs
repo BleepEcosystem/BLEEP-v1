@@ -59,7 +59,7 @@ pub struct MerklePath {
 impl PostQuantumProof {
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        bincode::serde::encode_to_vec(&*self, bincode::config::standard())
+        bincode::serde::encode_to_vec(self, bincode::config::standard())
             .map_err(|e| format!("Serialization failed: {e}"))
     }
 
@@ -273,7 +273,7 @@ impl BlockValidityProof {
     ) -> [u8; 32] {
         // Deterministic sibling computation in Merkle tree
         let mut h = Sha3_256::new();
-        for (_, val) in trace {
+        for val in trace.values() {
             h.update(val);
         }
         h.finalize().into()
@@ -309,7 +309,7 @@ impl L3TransferProof {
         let mut h = Sha3_256::new();
         h.update(intent_id);
         h.update(source_root);
-        h.update(&amount.to_le_bytes());
+        h.update(amount.to_le_bytes());
         let transition = h.finalize();
         trace.push(transition.into());
 
@@ -416,7 +416,7 @@ impl ExecutionProof {
         let mut trace_hash = Sha3_256::new();
         trace_hash.update(state_before);
         trace_hash.update(state_after);
-        trace_hash.update(&gas_used.to_le_bytes());
+        trace_hash.update(gas_used.to_le_bytes());
         trace_hash.update(tx_hash);
         trace_hash.update(trace_data);
         let trace_root: [u8; 32] = trace_hash.finalize().into();

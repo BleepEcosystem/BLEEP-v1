@@ -13,6 +13,7 @@
 // ✓ Real-world adversarial scenarios
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod phase5_comprehensive_tests {
     use crate::{
         ai_reputation::{AIReputationTracker, ProposalOutcome},

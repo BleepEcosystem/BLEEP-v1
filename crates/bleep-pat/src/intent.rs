@@ -203,20 +203,17 @@ impl PATIntent {
         burn_bps: u16,
         freezable: bool,
     ) -> Self {
-        Self::new(
-            caller,
-            PATIntentKind::CreateToken(CreateTokenIntent {
-                symbol: symbol.into(),
-                name: name.into(),
-                decimals,
-                total_supply_cap: cap,
-                burn_rate_bps: burn_bps,
-                freezable,
-            }),
-            50_000,
-            0,
-            0,
-        )
+        let symbol = symbol.into();
+        let kind = PATIntentKind::CreateToken(CreateTokenIntent {
+            symbol,
+            name: name.into(),
+            decimals,
+            total_supply_cap: cap,
+            burn_rate_bps: burn_bps,
+            freezable,
+        });
+        let gas_limit = crate::gas_model::PATGasModel::default().cost(&kind);
+        Self::new(caller, kind, gas_limit, 0, 0)
     }
 
     pub fn mint(caller: Address, symbol: impl Into<String>, to: Address, amount: u128) -> Self {

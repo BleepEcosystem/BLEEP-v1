@@ -25,7 +25,7 @@ Muhammad Attahir · May 2026
 Every existing distributed execution protocol accepts block validity on the basis of validator consensus — not mathematical proof. When a block is finalised, it is finalised because a supermajority of validators signed it, not because any party has independently verified that its state transition is correct. Simultaneously, the cryptographic foundations of these systems — ECDSA, secp256k1, x25519 — are vulnerable to polynomial-time attack by Shor's algorithm on a sufficiently capable fault-tolerant quantum processor, exposing their historical transaction records to retroactive decryption by adversaries archiving signed data today.
 This paper describes BLEEP, a distributed execution environment investigating both problems in a single implementation. Every block produced by BLEEP carries a Winterfell STARK validity proof — a hash-based, transparent, post-quantum secure construction requiring no trusted setup ceremony — generated before broadcast and independently verified by each validator before any vote is cast. Block correctness is not assumed from consensus; it is proven. Transaction signing, peer authentication, key encapsulation, and proof verification are secured exclusively by NIST-finalized post-quantum primitives: SPHINCS+-SHAKE-256f-simple (FIPS 205, Security Level 5) and Kyber-1024/ML-KEM-1024 (FIPS 203, Security Level 5). No classical public-key primitive is present on any sensitive path. No migration is required — because no classical primitive was introduced.
 
-Protocol Version 5 presents the following empirical measurements from a live implementation: Winterfell STARK block validity proofs averaging ~850 ms generation and ~12 ms verification on reference hardware (8-core, 32 GB RAM) within a 3,000 ms slot budget; SPHINCS+ signatures of 49,856 bytes per transaction, producing approximately 204 MB of aggregate signature data per 4,096-transaction block; an internal security audit resolving all Critical and High findings across 16,127 lines of Rust; and a 72-hour adversarial test suite across 10 scenarios with all passing.
+Protocol Version 5 presents the following empirical measurements from a live implementation: Winterfell STARK block validity proofs averaging ~850 ms generation and ~12 ms verification on reference hardware (8-core, 32 GB RAM) within a 3,000 ms slot budget; SPHINCS+ signatures of 49,088 bytes per transaction, producing approximately 204 MB of aggregate signature data per 4,096-transaction block; an internal security audit resolving all Critical and High findings across 16,127 lines of Rust; and a 72-hour adversarial test suite across 10 scenarios with all passing.
 These measurements are empirical data on the practical overhead of combining STARK-based execution proofs with NIST-finalized post-quantum primitives in a live distributed system — constraints directly relevant to Ethereum's long-term trajectory toward provable execution and post-quantum migration.
 
 ## 1. Introduction
@@ -200,7 +200,7 @@ SHA3-256 Merkle chain · sync=true"]
 | Security Assumption | One-wayness of SHAKE-256 (hash-based)                          |
 | Public Key          | 64 bytes                                                       |
 | Secret Key          | 128 bytes (Zeroizing\<Vec\<u8\>\> — zeroed on drop)            |
-| Signature           | 49,856 bytes                                                   |
+| Signature           | 49,088 bytes                                                   |
 | Crate               | pqcrypto-sphincsplus v0.7.2                                    |
 | Usage               | Transaction signing, block signing, P2P message authentication |
 
@@ -356,7 +356,7 @@ Select ≤4,096 txs · Compute SMT root"]
         STARK["STARK Prover
 ~850ms · 48-col trace · 5 public inputs"]
         SIGN["SPHINCS+ Block Sign
-49,856-byte signature"]
+49,088-byte signature"]
         BCAST["P2P Broadcast
 Gossip fanout=8"]
     end
@@ -652,11 +652,11 @@ SelfHealingOrchestrator tracks protocol health: Healthy → Degraded → Critica
 
 ### 11.1 Post-Quantum Primitives Introduce Measurable Overhead
 
-SPHINCS+-SHAKE-256f-simple produces 49,856-byte signatures. The Signature Availability Layer (Protocol Version 5) reduces per-block gossip bandwidth from ~24.3 MB (512 tx × 49,856 bytes raw) to ~320 KB (~98.7% reduction). The `sig_commitment_root` — a Blake3 Merkle root over SHA3-256(sig_i) for all block transactions — is stamped on the block before SPHINCS+ signing and committed into the extended STARK proof, so receivers verify authenticity without individual signatures. Kyber-1024 public keys are 1,568 bytes compared to 32-byte Curve25519 keys. Winterfell proof generation averages ~850–950 ms per block, within the 3,000 ms slot budget. These overheads are the direct, quantified cost of transparent post-quantum security with no trusted setup — accepted as an explicit design trade-off.
+SPHINCS+-SHAKE-256f-simple produces 49,088-byte signatures. The Signature Availability Layer (Protocol Version 5) reduces per-block gossip bandwidth from ~24.3 MB (512 tx × 49,088 bytes raw) to ~320 KB (~98.7% reduction). The `sig_commitment_root` — a Blake3 Merkle root over SHA3-256(sig_i) for all block transactions — is stamped on the block before SPHINCS+ signing and committed into the extended STARK proof, so receivers verify authenticity without individual signatures. Kyber-1024 public keys are 1,568 bytes compared to 32-byte Curve25519 keys. Winterfell proof generation averages ~850–950 ms per block, within the 3,000 ms slot budget. These overheads are the direct, quantified cost of transparent post-quantum security with no trusted setup — accepted as an explicit design trade-off.
 
 ### 11.2 Signature Aggregation Not Yet Available
 
-SPHINCS+ does not support aggregation: n validators produce n independent 49,856-byte signatures. Hash-based signature aggregation is a medium-term research direction.
+SPHINCS+ does not support aggregation: n validators produce n independent 49,088-byte signatures. Hash-based signature aggregation is a medium-term research direction.
 
 ### 11.3 Throughput Figures Are Simulated
 
@@ -760,7 +760,7 @@ All values are drawn from the production Rust source at Protocol Version 5. Para
 
 | **Parameter**           | **Value**               | **Source**                  |
 |-------------------------|-------------------------|-----------------------------|
-| SPHINCS+ signature size | 49,856 bytes            | pqcrypto-sphincsplus v0.7.2 |
+| SPHINCS+ signature size | 49,088 bytes            | pqcrypto-sphincsplus v0.7.2 |
 | SPHINCS+ public key     | 64 bytes                | pqcrypto-sphincsplus v0.7.2 |
 | SPHINCS+ secret key     | 128 bytes               | pqcrypto-sphincsplus v0.7.2 |
 | Kyber-1024 public key   | 1,568 bytes             | pqcrypto-kyber              |

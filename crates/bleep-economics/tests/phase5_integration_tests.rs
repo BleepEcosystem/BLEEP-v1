@@ -7,7 +7,6 @@
 /// - Fee manipulation attacks
 /// - Oracle corruption attempts
 /// - Validator cartel behavior
-
 #[cfg(test)]
 mod phase5_integration_tests {
     use bleep_economics::integration::*;
@@ -328,7 +327,7 @@ mod phase5_integration_tests {
         let analyses = SafetyVerifier::audit_all(
             3200,                 // 32% slashing for double signing
             32 * 10u128.pow(6),   // 0.32 BLEEP reward
-            1 * 10u128.pow(6),    // 0.01 BLEEP participation
+            10u128.pow(6),        // 0.01 BLEEP participation
             100_000,              // Small cost
             1000 * 10u128.pow(8), // 1000 BLEEP stake
             1_000_000,            // Spam fee

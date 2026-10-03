@@ -53,7 +53,7 @@ pub struct P2PNodeConfig {
 #[derive(Debug, Clone)]
 pub struct BootstrapPeer {
     pub addr: SocketAddr,
-    pub ed25519_pubkey: Vec<u8>,
+    pub identity_public_key: Vec<u8>,
     pub sphincs_pubkey: Vec<u8>,
 }
 
@@ -85,7 +85,7 @@ impl P2PNodeConfig {
                     addr: seed
                         .parse()
                         .map_err(|e| format!("invalid BLEEP_P2P_SEEDS entry '{seed}': {e}"))?,
-                    ed25519_pubkey: vec![],
+                    identity_public_key: vec![],
                     sphincs_pubkey: vec![],
                 });
             }
@@ -106,7 +106,7 @@ pub struct P2PNode {
     pub gossip: Arc<GossipProtocol>,
     pub onion_router: Arc<OnionRouter>,
     /// Inbound messages decoded and verified by MessageProtocol.
-    inbound_rx: tokio::sync::Mutex<mpsc::Receiver<(NodeId, SecureMessage)>>,
+    inbound_rx: tokio::sync::Mutex<mpsc::Receiver<(NodeId, SecureMessage, Vec<u8>)>>,
 }
 
 impl P2PNode {
@@ -124,7 +124,7 @@ impl P2PNode {
             PeerManager::new(node_id.clone(), config.peer_manager_config.clone());
 
         let (message_protocol, inbound_rx) = MessageProtocol::new(
-            identity.ed_keypair.clone(),
+            identity.identity_keypair.clone(),
             identity.sphincs_keypair.clone(),
             identity.kyber_keypair.clone(),
             peer_manager.clone(),
@@ -204,6 +204,13 @@ impl P2PNode {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 loop {
                     for seed in &seeds {
+                        let connected = peer_manager
+                            .all_peers()
+                            .iter()
+                            .any(|peer| peer.addr == seed.addr && protocol.has_session(&peer.id));
+                        if connected {
+                            continue;
+                        }
                         match protocol.establish_outbound(seed.addr).await {
                             Ok(peer) => {
                                 if let Some(peer_info) = peer_manager.get_peer(&peer) {
@@ -252,6 +259,16 @@ impl P2PNode {
 
     /// Receive the next verified inbound message (blocks until one arrives).
     pub async fn recv(&self) -> Option<(NodeId, SecureMessage)> {
+        self.inbound_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .map(|(sender_id, message, _)| (sender_id, message))
+    }
+
+    /// Receive the next authenticated inbound message with its decrypted payload.
+    pub async fn recv_with_payload(&self) -> Option<(NodeId, SecureMessage, Vec<u8>)> {
         self.inbound_rx.lock().await.recv().await
     }
 
@@ -259,17 +276,17 @@ impl P2PNode {
     pub async fn connect_peer(
         &self,
         addr: SocketAddr,
-        ed25519_pubkey: Vec<u8>,
+        identity_public_key: Vec<u8>,
         sphincs_pubkey: Vec<u8>,
         challenge: &[u8],
         sphincs_signature: &[u8],
     ) -> P2PResult<NodeId> {
-        let peer_id = NodeId::from_bytes(&ed25519_pubkey);
+        let peer_id = NodeId::from_bytes(&identity_public_key);
         self.peer_manager
             .add_peer(
                 peer_id.clone(),
                 addr,
-                ed25519_pubkey,
+                identity_public_key,
                 sphincs_pubkey,
                 challenge,
                 sphincs_signature,
@@ -330,6 +347,19 @@ mod tests {
         P2PNode::start(config).await.unwrap()
     }
 
+    async fn start_bootstrap_test_node(port: u16, seed_port: u16) -> (Arc<P2PNode>, NodeHandle) {
+        let config = P2PNodeConfig {
+            listen_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            bootstrap_peers: vec![BootstrapPeer {
+                addr: format!("127.0.0.1:{seed_port}").parse().unwrap(),
+                identity_public_key: vec![],
+                sphincs_pubkey: vec![],
+            }],
+            peer_manager_config: PeerManagerConfig::default(),
+        };
+        P2PNode::start(config).await.unwrap()
+    }
+
     #[tokio::test]
     async fn test_node_starts_and_has_node_id() {
         let (node, handle) = start_test_node(17700).await;
@@ -356,15 +386,16 @@ mod tests {
         let (node_a, handle_a) = start_test_node(17702).await;
         let (node_b, handle_b) = start_test_node(17703).await;
 
-        let b_ed_pk = node_b.identity.ed_keypair.public_key_bytes();
+        let b_identity_pk = node_b.identity.identity_keypair.public_key_bytes();
         let b_sphincs_pk = node_b.identity.sphincs_keypair.public_key.0.clone();
         let challenge = b"handshake-test-challenge";
         let sig = node_b.make_identity_proof(challenge).unwrap();
+        let expected_peer_id = NodeId::from_bytes(&b_identity_pk);
 
         let peer_id = node_a
             .connect_peer(
                 "127.0.0.1:17703".parse().unwrap(),
-                b_ed_pk,
+                b_identity_pk,
                 b_sphincs_pk,
                 challenge,
                 &sig,
@@ -372,6 +403,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(peer_id, expected_peer_id);
         assert_eq!(node_a.peer_count(), 1);
         handle_a.shutdown().await;
         handle_b.shutdown().await;
@@ -386,7 +418,7 @@ mod tests {
             listen_addr: "127.0.0.1:17707".parse().unwrap(),
             bootstrap_peers: vec![BootstrapPeer {
                 addr: "127.0.0.1:17706".parse().unwrap(),
-                ed25519_pubkey: vec![],
+                identity_public_key: vec![],
                 sphincs_pubkey: vec![],
             }],
             peer_manager_config: PeerManagerConfig::default(),
@@ -424,6 +456,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_three_nodes_exchange_authenticated_gossip() {
+        let node1_port = 17710;
+        let (node1, handle1) = start_test_node(node1_port).await;
+        let (node2, handle2) = start_bootstrap_test_node(17711, node1_port).await;
+        let (node3, handle3) = start_bootstrap_test_node(17712, node1_port).await;
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let connected = node1.peer_count() == 2
+                    && node2.peer_count() == 1
+                    && node3.peer_count() == 1
+                    && node1.message_protocol.has_session(&node2.node_id)
+                    && node1.message_protocol.has_session(&node3.node_id)
+                    && node2.message_protocol.has_session(&node1.node_id)
+                    && node3.message_protocol.has_session(&node1.node_id);
+                if connected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("all three nodes should establish authenticated sessions");
+
+        let messages = [
+            (MessageType::Transaction, b"transaction payload".as_slice()),
+            (MessageType::Block, b"block payload".as_slice()),
+            (
+                MessageType::SigAvailability,
+                b"signature availability payload".as_slice(),
+            ),
+        ];
+        for (message_type, payload) in messages {
+            node1.broadcast(message_type.clone(), payload.to_vec());
+
+            for node in [&node2, &node3] {
+                let (sender_id, message, plaintext) =
+                    timeout(Duration::from_secs(10), node.recv_with_payload())
+                        .await
+                        .expect("node should receive gossip")
+                        .expect("inbound channel should remain open");
+
+                assert_eq!(sender_id, node1.node_id);
+                assert_eq!(message.sender_id, node1.node_id);
+                assert_eq!(message.message_type, message_type);
+                assert_eq!(plaintext, payload);
+            }
+        }
+
+        handle1.shutdown().await;
+        handle2.shutdown().await;
+        handle3.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn test_broadcast_enqueues_in_gossip() {
         let (node, handle) = start_test_node(17704).await;
         node.broadcast(MessageType::Transaction, b"tx_data".to_vec());
@@ -434,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_accepts_tcp_connections() {
-        let (node, handle) = start_test_node(17705).await;
+        let (_node, handle) = start_test_node(17705).await;
         // Just verify the port is bound
         let result = timeout(
             Duration::from_millis(200),

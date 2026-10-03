@@ -144,6 +144,12 @@ impl BlockIndex {
     }
 }
 
+impl Default for BlockIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── TxIndex ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +315,12 @@ impl TxIndex {
     }
 }
 
+impl Default for TxIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── AccountIndex ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +399,12 @@ impl AccountIndex {
     }
     pub fn total(&self) -> usize {
         self.accounts.len()
+    }
+}
+
+impl Default for AccountIndex {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -502,6 +520,12 @@ impl GovernanceIndex {
     }
 }
 
+impl Default for GovernanceIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── ValidatorIndex ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,6 +625,12 @@ impl ValidatorIndex {
     }
 }
 
+impl Default for ValidatorIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── ShardIndex ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -697,6 +727,12 @@ impl ShardIndex {
     }
 }
 
+impl Default for ShardIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── CrossShardIndex ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -770,6 +806,12 @@ impl CrossShardIndex {
     }
 }
 
+impl Default for CrossShardIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── AiEventIndex ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -826,5 +868,11 @@ impl AiEventIndex {
     }
     pub fn total(&self) -> usize {
         self.events.len()
+    }
+}
+
+impl Default for AiEventIndex {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -278,11 +278,22 @@ impl Engine for EvmEngine {
     ) -> VmResult<EngineResult> {
         let start = Instant::now();
 
-        let contract_addr = Self::to_evm_address(&ctx.tx.caller);
+        let caller_addr = Self::to_evm_address(&ctx.tx.caller);
+        let contract_addr = Self::create_address(caller_addr, ctx.tx.nonce);
         let to = TransactTo::Call(contract_addr);
 
         let mut db = CacheDB::new(EmptyDB::default());
         self.populate_db(&mut db);
+
+        db.insert_account_info(
+            caller_addr,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u128),
+                nonce: ctx.tx.nonce,
+                code_hash: B256::ZERO,
+                code: None,
+            },
+        );
 
         if !bytecode.is_empty() {
             use sha3::{Digest, Keccak256};
@@ -290,7 +301,7 @@ impl Engine for EvmEngine {
             db.insert_account_info(
                 contract_addr,
                 AccountInfo {
-                    balance: U256::from(ctx.tx.value),
+                    balance: U256::ZERO,
                     nonce: 0,
                     code_hash,
                     code: Some(Bytecode::new_raw(Bytes::from(bytecode.to_vec()))),
@@ -447,8 +458,8 @@ mod tests {
         // PUSH1 0x00 SLOAD — expensive op with tiny gas budget
         let bytecode = hex::decode("600054").unwrap();
         let engine = EvmEngine::new();
-        let ctx = test_ctx(100);
-        let result = engine.execute(&ctx, &bytecode, &[], 100).await.unwrap();
+        let ctx = test_ctx(22_000);
+        let result = engine.execute(&ctx, &bytecode, &[], 22_000).await.unwrap();
         assert!(!result.success);
     }
 

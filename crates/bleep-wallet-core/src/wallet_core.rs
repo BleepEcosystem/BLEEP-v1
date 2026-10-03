@@ -11,7 +11,7 @@
 //!
 //! All signing goes through `bleep_crypto::tx_signer::sign_tx_payload`, which
 //! calls the production SPHINCS+-SHAKE-256f-simple detached-sign API and
-//! returns the 7,856-byte signature.  The old stub that returned the raw
+//! returns the 49,088-byte signature.  The old stub that returned the raw
 //! private key bytes has been removed.
 //!
 //! ## BIP-39 entropy
@@ -324,7 +324,7 @@ impl Wallet {
     ///
     /// The canonical payload is `tx_signer::tx_payload(from, to, amount_micro, timestamp)`
     /// — a SHA3-256 digest over the transaction fields.  The returned bytes are
-    /// the raw 7,856-byte SPHINCS+ detached signature.
+    /// the raw 49,088-byte SPHINCS+ detached signature.
     ///
     /// The private key is accessed through `Zeroizing<Vec<u8>>`; it is NOT
     /// copied or cloned — the slice reference is passed directly to
@@ -509,9 +509,9 @@ fn keypair_from_seed(seed: &[u8; 64]) -> Result<(Vec<u8>, Vec<u8>), WalletError>
     // 🔒 Quantum-Secure Authentication
     pub fn authenticate(&mut self, _credentials: &[u8]) -> Result<bool, WalletError> {
         // Use as_bytes for pqcrypto keys
-        let public_key = pqcrypto_kyber::kyber512::PublicKey::from_bytes(&self.public_key).map_err(|_| WalletError::QuantumSecurityError)?;
-        let secret_key = pqcrypto_kyber::kyber512::SecretKey::from_bytes(&self.private_key).map_err(|_| WalletError::QuantumSecurityError)?;
-        let (shared_secret, ciphertext): (pqcrypto_kyber::kyber512::SharedSecret, pqcrypto_kyber::kyber512::Ciphertext) = encapsulate(&public_key);
+        let public_key = pqcrypto_kyber::kyber1024::PublicKey::from_bytes(&self.public_key).map_err(|_| WalletError::QuantumSecurityError)?;
+        let secret_key = pqcrypto_kyber::kyber1024::SecretKey::from_bytes(&self.private_key).map_err(|_| WalletError::QuantumSecurityError)?;
+        let (shared_secret, ciphertext): (pqcrypto_kyber::kyber1024::SharedSecret, pqcrypto_kyber::kyber1024::Ciphertext) = encapsulate(&public_key);
         let decrypted_secret = decapsulate(&ciphertext, &secret_key);
         // Compare the shared secrets
         if decrypted_secret.as_bytes() == shared_secret.as_bytes() {

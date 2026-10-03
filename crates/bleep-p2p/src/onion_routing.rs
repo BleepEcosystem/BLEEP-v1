@@ -255,21 +255,20 @@ impl OnionRouter {
 mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, SphincsKeypair};
+    use crate::quantum_crypto::{KyberKeypair, SphincsKeypair};
 
     fn make_router() -> (OnionRouter, Arc<PeerManager>) {
         let local = NodeId::random();
         let (pm, _) = PeerManager::new(local.clone(), PeerManagerConfig::default());
-        let ed = Ed25519Keypair::generate();
+        let identity = SphincsKeypair::generate();
         let kyber = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(ed, SphincsKeypair::generate(), kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, SphincsKeypair::generate(), kyber, pm.clone());
         let scoring = Arc::new(PeerScoring::new());
         (OnionRouter::new(pm.clone(), mp, scoring), pm)
     }
 
     fn fake_secret(seed: u8) -> Vec<u8> {
-        let mut s = vec![seed; 32];
-        s
+        vec![seed; 32]
     }
 
     #[test]
@@ -293,7 +292,6 @@ mod tests {
     #[test]
     fn test_wrap_and_peel_roundtrip() {
         let (router, _) = make_router();
-        let local = NodeId::random();
 
         let relay1 = NodeId::random();
         let relay2 = NodeId::random();

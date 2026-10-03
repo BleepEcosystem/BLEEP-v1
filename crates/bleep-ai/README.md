@@ -55,6 +55,8 @@ The primary decision surface. Produces anomaly assessments and recovery recommen
 
 Key types: `AIDecisionModule`, `AnomalyAssessment`, `AnomalyClass`, `RecoveryRecommendation`, `AISignature`.
 
+`AIDecisionModule::new()` generates a SPHINCS+ identity; `from_keypair` imports a provisioned identity. Configure governance with that identity's public key via `GovernanceIntegration::set_trusted_ai_key` before registering proposals. Governance starts without a trusted signer and rejects proposals until one is configured; never trust the public key carried by a proposal by itself.
+
 ### `deterministic_inference`
 
 Hosts trained ONNX models and guarantees bit-for-bit reproducibility across validator nodes, enabling independent verification of AI-generated proposals.

@@ -51,7 +51,7 @@ struct ZKTransaction {
     amount:      u128,          // microBLEEP
     nonce:       u64,           // anti-replay counter
     gas_limit:   u64,
-    signature:   Vec<u8>,       // SPHINCS+-SHAKE-256f-simple — 7,856 bytes
+    signature:   Vec<u8>,       // SPHINCS+-SHAKE-256f-simple — 49,088 bytes
     zk_aux:      Option<Vec<u8>>, // optional ZK auxiliary data (recovery, privacy)
 }
 ```

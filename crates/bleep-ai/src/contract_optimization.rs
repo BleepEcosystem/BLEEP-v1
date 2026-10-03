@@ -3,7 +3,7 @@ use serde_json::Value;
 use ethers::types::Address;
 use web3::types::U256;
 use log::{info, error};
-use pqcrypto_kyber::kyber512::{keypair, encapsulate, decapsulate};
+use pqcrypto_kyber::kyber1024::{keypair, encapsulate, decapsulate};
 use crate::{
     ai_decision::BLEEPAIDecisionModule,
     governance::SelfAmendingGovernance,

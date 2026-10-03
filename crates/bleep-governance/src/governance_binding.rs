@@ -100,6 +100,7 @@ pub struct ActivationRecord {
 
 impl ActivationRecord {
     /// Create new activation record
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         proposal_id: String,
         outcome: ProposalOutcome,
@@ -125,7 +126,7 @@ impl ActivationRecord {
     /// Compute hash of record
     fn compute_hash(&self) -> Result<Vec<u8>, BindingError> {
         let serialized = bincode::serde::encode_to_vec(
-            &(
+            (
                 &self.proposal_id,
                 &self.outcome,
                 self.activation_epoch,
@@ -177,6 +178,7 @@ pub struct FinalizedGovernanceAction {
 
 impl FinalizedGovernanceAction {
     /// Create finalized action
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         action_id: String,
         description: String,

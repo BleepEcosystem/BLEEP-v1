@@ -250,6 +250,12 @@ impl EmissionSchedule {
     }
 }
 
+impl Default for EmissionSchedule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Burn configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BurnConfig {
@@ -257,6 +263,12 @@ pub struct BurnConfig {
     pub fee_burn_percentage_bps: u16, // basis points
     /// Slashing multiplier (1x = 100%)
     pub slashing_burn_multiplier: u8,
+}
+
+impl Default for BurnConfig {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BurnConfig {

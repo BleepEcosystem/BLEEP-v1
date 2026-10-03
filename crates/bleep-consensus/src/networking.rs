@@ -5,6 +5,12 @@ pub struct NetworkingModule {
     inner: CoreNetworkingModule,
 }
 
+impl Default for NetworkingModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkingModule {
     pub fn new() -> Self {
         Self {

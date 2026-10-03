@@ -9,7 +9,7 @@
 //! - **Route selection** — `OnionRouter::select_route` (Kademlia peer set,
 //!   AI trust-score filter ≥ 55.0, random shuffle for unlinkability).
 //! - **Per-hop KEM** — `kyber_encapsulate` from `quantum_crypto.rs`
-//!   (Kyber-768, NIST PQC finalist).
+//!   (Kyber-1024, NIST PQC finalist).
 //! - **Onion wrapping** — `OnionRouter::wrap` (nested AES-256-GCM layers,
 //!   inner-to-outer construction).
 //! - **Dispatch** — `OnionRouter::send_anonymous` →
@@ -74,7 +74,7 @@ impl DarkRouting {
     /// ## Steps
     /// 1. **Route selection** — picks up to `MAX_HOPS` peers above the
     ///    trust threshold and shuffles them.
-    /// 2. **KEM** — for each relay, generates an ephemeral Kyber-768 keypair
+    /// 2. **KEM** — for each relay, generates an ephemeral Kyber-1024 keypair
     ///    and calls `kyber_encapsulate` to produce a per-hop shared secret.
     ///    The resulting `(ciphertext, shared_secret)` pair provides forward
     ///    secrecy: even if a relay's long-term key is compromised later, past
@@ -183,16 +183,17 @@ impl DarkRouting {
 mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair};
+    use crate::quantum_crypto::{KyberKeypair, SphincsKeypair};
     use crate::message_protocol::MessageProtocol;
 
     /// Helper: build a `DarkRouting` with an empty peer table.
     fn make_dark_routing() -> DarkRouting {
         let local   = NodeId::random();
         let (pm, _) = PeerManager::new(local.clone(), PeerManagerConfig::default());
-        let ed      = Ed25519Keypair::generate();
+        let identity = SphincsKeypair::generate();
+        let sphincs = SphincsKeypair::generate();
         let kyber   = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(ed, kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, sphincs, kyber, pm.clone());
         let scoring = Arc::new(PeerScoring::new());
         DarkRouting::new(pm, mp, scoring)
     }

@@ -118,6 +118,12 @@ pub struct ShardHealingManager {
     healing_progress: HashMap<ShardId, HealingProgress>,
 }
 
+impl Default for ShardHealingManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShardHealingManager {
     /// Create a new healing manager
     pub fn new() -> Self {
@@ -184,7 +190,7 @@ impl ShardHealingManager {
             .ok_or("Shard not in healing")?;
 
         if progress.stage != HealingStage::Rebuilding {
-            return Err(format!("Shard not in rebuilding stage"));
+            return Err("Shard not in rebuilding stage".to_string());
         }
 
         progress.stage = HealingStage::SyncingBlocks;
@@ -207,7 +213,7 @@ impl ShardHealingManager {
             .ok_or("Shard not in healing")?;
 
         if progress.stage != HealingStage::SyncingBlocks {
-            return Err(format!("Shard not in sync stage"));
+            return Err("Shard not in sync stage".to_string());
         }
 
         if current_height <= progress.synced_height {
@@ -272,7 +278,7 @@ impl ShardHealingManager {
             .ok_or("Shard not in healing")?;
 
         if progress.stage != HealingStage::SyncingBlocks {
-            return Err(format!("Shard not in sync stage"));
+            return Err("Shard not in sync stage".to_string());
         }
 
         if progress.synced_height < progress.target_height {

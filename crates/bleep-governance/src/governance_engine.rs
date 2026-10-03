@@ -136,7 +136,7 @@ impl SelfAmendingGovernance {
     /// Categorize proposals using simple heuristics
     async fn categorize_proposal(&self, description: &str) -> Result<String, SelfAmendingError> {
         // Simple heuristic categorization based on keywords
-        let _categories = vec!["Governance", "Development", "Update", "Miscellaneous"];
+        let _categories = ["Governance", "Development", "Update", "Miscellaneous"];
 
         let description_lower = description.to_lowercase();
         if description_lower.contains("governance") || description_lower.contains("vote") {

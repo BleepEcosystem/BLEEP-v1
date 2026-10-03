@@ -217,7 +217,7 @@ impl AiAdvisoryAggregator {
         scores.sort_unstable();
 
         let median_idx = scores.len() / 2;
-        let median = if scores.len() % 2 == 0 && scores.len() > 1 {
+        let median = if scores.len().is_multiple_of(2) && scores.len() > 1 {
             (scores[median_idx - 1] as u16 + scores[median_idx] as u16) / 2
         } else {
             scores[median_idx] as u16
@@ -246,7 +246,7 @@ impl AiAdvisoryAggregator {
         scores.sort_unstable();
 
         let median_idx = scores.len() / 2;
-        let median = if scores.len() % 2 == 0 && scores.len() > 1 {
+        let median = if scores.len().is_multiple_of(2) && scores.len() > 1 {
             (scores[median_idx - 1] as u16 + scores[median_idx] as u16) / 2
         } else {
             scores[median_idx] as u16
@@ -350,7 +350,7 @@ impl AiExtensionManager {
     }
 
     /// Create a manager with no-op extension
-    pub fn default() -> Self {
+    fn default_manager() -> Self {
         AiExtensionManager {
             extension: Box::new(NoOpAiExtension),
         }
@@ -454,6 +454,12 @@ impl AiExtensionManager {
                 vec![]
             }
         }
+    }
+}
+
+impl Default for AiExtensionManager {
+    fn default() -> Self {
+        Self::default_manager()
     }
 }
 

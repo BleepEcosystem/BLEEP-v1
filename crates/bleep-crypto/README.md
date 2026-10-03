@@ -72,7 +72,7 @@ use bleep_crypto::{sphincs_sign, sphincs_verify, kyber_encapsulate, kyber_decaps
 
 // SPHINCS+-SHAKE-256f-simple — FIPS 205, Security Level 5
 let (pk, sk) = sphincs_keypair();
-let sig = sphincs_sign(&sk, &message);         // 7,856-byte signature
+let sig = sphincs_sign(&sk, &message);         // 49,088-byte signature
 sphincs_verify(&pk, &message, &sig)?;
 
 // Kyber-1024 / ML-KEM-1024 — FIPS 203, Security Level 5
@@ -112,7 +112,7 @@ use bleep_crypto::{generate_tx_keypair, sign_tx_payload, verify_tx_signature, tx
 
 let (sk, pk) = generate_tx_keypair();       // SPHINCS+ keypair on quantum builds
 let payload = tx_payload(&tx);
-let sig = sign_tx_payload(&sk, &payload);   // 7,856-byte SPHINCS+ signature
+let sig = sign_tx_payload(&sk, &payload);   // 49,088-byte SPHINCS+ signature
 verify_tx_signature(&pk, &payload, &sig)?;
 ```
 
@@ -147,9 +147,9 @@ module.verify(&proof, &public_inputs)?;
 
 | Parameter | Value |
 |---|---|
-| Public key | 32 bytes |
-| Secret key | 64 bytes (`Zeroizing<Vec<u8>>`) |
-| Signature | 7,856 bytes |
+| Public key | 64 bytes |
+| Secret key | 128 bytes (`Zeroizing<Vec<u8>>`) |
+| Signature | 49,088 bytes |
 | Security assumption | One-wayness of SHAKE-256 (hash-based) |
 | Post-quantum secure | Yes — no algebraic assumptions |
 

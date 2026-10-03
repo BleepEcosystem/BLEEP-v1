@@ -98,6 +98,12 @@ pub struct CapitalManager {
     total_liquidity: Arc<RwLock<u128>>,
 }
 
+impl Default for CapitalManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CapitalManager {
     pub fn new() -> Self {
         Self {

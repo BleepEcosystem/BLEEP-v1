@@ -249,7 +249,7 @@ pub struct FaultDetectionConfig {
 
 impl FaultDetectionConfig {
     /// Create default configuration
-    pub fn default() -> Self {
+    pub fn new() -> Self {
         FaultDetectionConfig {
             min_witness_validators: 3,
             liveness_timeout_epochs: 10,
@@ -257,6 +257,12 @@ impl FaultDetectionConfig {
             max_state_root_drift: 3,
             custom_rules: Vec::new(),
         }
+    }
+}
+
+impl Default for FaultDetectionConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -394,10 +400,7 @@ impl AdvancedFaultDetector {
         }
 
         let key = (shard_id, block_height);
-        let signatures = self
-            .block_signatures
-            .entry(key)
-            .or_insert_with(HashSet::new);
+        let signatures = self.block_signatures.entry(key).or_default();
 
         // Equivocation requires two different blocks signed by same validator
         if !signatures.contains(&validator_pubkey) {

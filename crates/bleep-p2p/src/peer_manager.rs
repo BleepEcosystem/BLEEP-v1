@@ -117,7 +117,7 @@ impl PeerManager {
         &self,
         id: NodeId,
         addr: SocketAddr,
-        ed25519_pubkey: Vec<u8>,
+        identity_public_key: Vec<u8>,
         sphincs_pubkey: Vec<u8>,
         identity_proof_challenge: &[u8],
         identity_proof_signature: &[u8],
@@ -153,7 +153,7 @@ impl PeerManager {
         })?;
 
         // 5. Build PeerInfo and score
-        let mut peer = PeerInfo::new(id.clone(), addr, ed25519_pubkey, sphincs_pubkey);
+        let mut peer = PeerInfo::new(id.clone(), addr, identity_public_key, sphincs_pubkey);
         let score = self.scoring.calculate_score(&id);
         peer.trust_score = score;
         peer.status = if score >= TRUST_HEALTHY_THRESHOLD {
@@ -256,6 +256,16 @@ impl PeerManager {
         self.peers
             .iter()
             .filter(|e| e.value().status == PeerStatus::Healthy)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    /// Peers that are authenticated and can participate in network traffic,
+    /// even before they have reached the Healthy threshold.
+    pub fn eligible_peers(&self) -> Vec<PeerInfo> {
+        self.peers
+            .iter()
+            .filter(|e| !matches!(e.value().status, PeerStatus::Malicious | PeerStatus::Banned))
             .map(|e| e.value().clone())
             .collect()
     }
@@ -364,7 +374,7 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quantum_crypto::{sphincs_sign, Ed25519Keypair, SphincsKeypair};
+    use crate::quantum_crypto::{sphincs_sign, SphincsKeypair};
 
     fn make_test_pm() -> (Arc<PeerManager>, broadcast::Receiver<PeerEvent>) {
         let local_id = NodeId::random();
@@ -372,16 +382,16 @@ mod tests {
     }
 
     async fn add_test_peer(pm: &PeerManager, seed: u8) -> NodeId {
-        let ed_kp = Ed25519Keypair::generate();
+        let identity_kp = SphincsKeypair::generate();
         let sphincs_kp = SphincsKeypair::generate();
-        let id = NodeId::from_bytes(&ed_kp.public_key_bytes());
+        let id = NodeId::from_bytes(&identity_kp.public_key_bytes());
         let addr: SocketAddr = format!("10.0.0.{}:9000", seed).parse().unwrap();
         let challenge = b"test-handshake-context";
         let sig = sphincs_sign(challenge, &sphincs_kp.secret_key.0).unwrap();
         pm.add_peer(
             id.clone(),
             addr,
-            ed_kp.public_key_bytes(),
+            identity_kp.public_key_bytes(),
             sphincs_kp.public_key.0.clone(),
             challenge,
             &sig,
@@ -415,7 +425,7 @@ mod tests {
         pm.ban_peer(&id).await;
         assert!(pm.is_banned(&id));
 
-        let ed_kp = Ed25519Keypair::generate();
+        let identity_kp = SphincsKeypair::generate();
         let sphincs_kp = SphincsKeypair::generate();
         let addr: SocketAddr = "10.0.0.3:9001".parse().unwrap();
         let challenge = b"re-admit-context";
@@ -424,7 +434,7 @@ mod tests {
             .add_peer(
                 id.clone(),
                 addr,
-                ed_kp.public_key_bytes(),
+                identity_kp.public_key_bytes(),
                 sphincs_kp.public_key.0.clone(),
                 challenge,
                 &sig,
@@ -436,9 +446,9 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_identity_proof_rejected() {
         let (pm, _rx) = make_test_pm();
-        let ed_kp = Ed25519Keypair::generate();
+        let identity_kp = SphincsKeypair::generate();
         let sphincs_kp = SphincsKeypair::generate();
-        let id = NodeId::from_bytes(&ed_kp.public_key_bytes());
+        let id = NodeId::from_bytes(&identity_kp.public_key_bytes());
         let addr: SocketAddr = "10.0.0.99:9000".parse().unwrap();
         let challenge = b"some-context";
         let bad_sig = vec![0u8; 64]; // invalid signature
@@ -446,7 +456,7 @@ mod tests {
             .add_peer(
                 id,
                 addr,
-                ed_kp.public_key_bytes(),
+                identity_kp.public_key_bytes(),
                 sphincs_kp.public_key.0,
                 challenge,
                 &bad_sig,
@@ -505,6 +515,6 @@ mod tests {
         let (pm, mut rx) = make_test_pm();
         let id = add_test_peer(&pm, 30).await;
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event, PeerEvent::Added(_)));
+        assert!(matches!(event, PeerEvent::Added(event_id) if event_id == id));
     }
 }

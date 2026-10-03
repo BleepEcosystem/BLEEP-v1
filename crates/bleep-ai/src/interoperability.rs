@@ -18,11 +18,17 @@ impl BLEEPInteroperabilityModule {
         Ok("0xSOLANAADDRESS".to_string())
     }
 }
+
+impl Default for BLEEPInteroperabilityModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 #[allow(dead_code)]
 pub struct InteroperabilityModule;
 #[allow(dead_code)]
 impl InteroperabilityModule {
-    pub async fn get_status_ref(_this: &Self) -> Result<(), ()> {
+    pub async fn get_status_ref(_this: &Self) -> Result<(), String> {
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
 //! Production message protocol for bleep-p2p.
 //!
 //! Transport: async TCP with a 4-byte length-prefix framing.
-//! Encryption: Kyber-768 KEM session key → AES-256-GCM per message.
-//! Authentication: Ed25519 signature on every message.
+//! Encryption: Kyber-1024 KEM session key → AES-256-GCM per message.
+//! Authentication: SPHINCS+ signature on every message.
 //! Anti-replay: 16-byte nonce + timestamp within ±30s window.
 
 use std::collections::HashMap;
@@ -22,8 +22,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::{P2PError, P2PResult};
 use crate::peer_manager::PeerManager;
 use crate::quantum_crypto::{
-    ed25519_verify, kyber_decapsulate, kyber_encapsulate, Ed25519Keypair, KyberKeypair, SessionKey,
-    SphincsKeypair,
+    kyber_decapsulate, kyber_encapsulate, sphincs_verify, KyberKeypair, SessionKey, SphincsKeypair,
 };
 use crate::types::{unix_now, MessageType, NodeId, SecureMessage};
 
@@ -56,7 +55,7 @@ struct Session {
 struct HandshakeHello {
     version: u8,
     node_id: NodeId,
-    ed25519_pubkey: Vec<u8>,
+    identity_pubkey: Vec<u8>,
     sphincs_pubkey: Vec<u8>,
     kyber_pubkey: Vec<u8>,
     listen_addr: SocketAddr,
@@ -114,7 +113,7 @@ impl NonceCache {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct MessageProtocol {
-    local_identity: Arc<Ed25519Keypair>,
+    local_identity: Arc<SphincsKeypair>,
     local_sphincs: Arc<SphincsKeypair>,
     local_kyber: Arc<KyberKeypair>,
     local_id: NodeId,
@@ -124,17 +123,17 @@ pub struct MessageProtocol {
     /// Anti-replay cache.
     nonce_cache: Arc<Mutex<NonceCache>>,
     /// Inbound message channel — consumers subscribe to this.
-    inbound_tx: mpsc::Sender<(NodeId, SecureMessage)>,
+    inbound_tx: mpsc::Sender<(NodeId, SecureMessage, Vec<u8>)>,
     peer_manager: Arc<PeerManager>,
 }
 
 impl MessageProtocol {
     pub fn new(
-        local_identity: Ed25519Keypair,
+        local_identity: SphincsKeypair,
         local_sphincs: SphincsKeypair,
         local_kyber: KyberKeypair,
         peer_manager: Arc<PeerManager>,
-    ) -> (Arc<Self>, mpsc::Receiver<(NodeId, SecureMessage)>) {
+    ) -> (Arc<Self>, mpsc::Receiver<(NodeId, SecureMessage, Vec<u8>)>) {
         let local_id = NodeId::from_bytes(&local_identity.public_key_bytes());
         let (tx, rx) = mpsc::channel(4096);
         let proto = Arc::new(MessageProtocol {
@@ -168,7 +167,8 @@ impl MessageProtocol {
         peer_kyber_pk_bytes: &[u8],
     ) -> P2PResult<Vec<u8>> {
         let (ciphertext, shared_secret) = kyber_encapsulate(peer_kyber_pk_bytes)?;
-        let session_key = SessionKey::from_shared_secret(&shared_secret, peer_id.as_bytes());
+        let context = self.session_context(peer_id);
+        let session_key = SessionKey::from_shared_secret(&shared_secret, &context);
         self.sessions.insert(
             peer_id.clone(),
             Session {
@@ -183,7 +183,8 @@ impl MessageProtocol {
     /// Respond to a Kyber KEM session initiation.
     pub fn accept_session(&self, peer_id: &NodeId, kem_ciphertext: &[u8]) -> P2PResult<()> {
         let shared_secret = kyber_decapsulate(kem_ciphertext, &self.local_kyber.secret_key.0)?;
-        let session_key = SessionKey::from_shared_secret(&shared_secret, peer_id.as_bytes());
+        let context = self.session_context(peer_id);
+        let session_key = SessionKey::from_shared_secret(&shared_secret, &context);
         self.sessions.insert(
             peer_id.clone(),
             Session {
@@ -199,8 +200,16 @@ impl MessageProtocol {
         self.sessions.contains_key(peer_id)
     }
 
-    pub(crate) fn peer_info(&self, peer_id: &NodeId) -> Option<crate::types::PeerInfo> {
-        self.peer_manager.get_peer(peer_id)
+    fn session_context(&self, peer_id: &NodeId) -> [u8; 64] {
+        let (first, second) = if self.local_id.as_bytes() < peer_id.as_bytes() {
+            (self.local_id.as_bytes(), peer_id.as_bytes())
+        } else {
+            (peer_id.as_bytes(), self.local_id.as_bytes())
+        };
+        let mut context = [0u8; 64];
+        context[..32].copy_from_slice(first);
+        context[32..].copy_from_slice(second);
+        context
     }
 
     fn local_handshake(&self) -> HandshakeHello {
@@ -209,7 +218,7 @@ impl MessageProtocol {
         HandshakeHello {
             version: 1,
             node_id: self.local_id.clone(),
-            ed25519_pubkey: self.local_identity.public_key_bytes(),
+            identity_pubkey: self.local_identity.public_key_bytes(),
             sphincs_pubkey: self.local_sphincs.public_key_bytes(),
             kyber_pubkey: self.local_kyber.public_key.0.clone(),
             listen_addr: *self
@@ -270,7 +279,7 @@ impl MessageProtocol {
     }
 
     fn verify_hello(hello: &HandshakeHello) -> P2PResult<()> {
-        if hello.version != 1 || NodeId::from_bytes(&hello.ed25519_pubkey) != hello.node_id {
+        if hello.version != 1 || NodeId::from_bytes(&hello.identity_pubkey) != hello.node_id {
             return Err(P2PError::AuthenticationFailed);
         }
         crate::quantum_crypto::sphincs_verify(
@@ -298,7 +307,7 @@ impl MessageProtocol {
                 .add_peer(
                     remote.node_id.clone(),
                     addr,
-                    remote.ed25519_pubkey,
+                    remote.identity_pubkey,
                     remote.sphincs_pubkey,
                     &remote.challenge,
                     &remote.signature,
@@ -378,7 +387,7 @@ impl MessageProtocol {
         }
 
         // 3. Signature verification
-        ed25519_verify(&msg.signing_bytes(), &msg.signature, sender_pubkey_bytes)?;
+        sphincs_verify(&msg.signing_bytes(), &msg.signature, sender_pubkey_bytes)?;
 
         // 4. Decryption
         let session = self
@@ -475,17 +484,14 @@ impl MessageProtocol {
             None,
         )
         .map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("socket2::Socket::new failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!(
+                "socket2::Socket::new failed: {}",
+                e
+            )))
         })?;
 
         socket.set_reuse_address(true).map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SO_REUSEADDR failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!("SO_REUSEADDR failed: {}", e)))
         })?;
 
         socket.bind(&bind_addr.into()).map_err(|e| {
@@ -496,16 +502,16 @@ impl MessageProtocol {
         })?;
 
         socket.listen(128).map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("socket listen failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!(
+                "socket listen failed: {}",
+                e
+            )))
         })?;
         socket.set_nonblocking(true).map_err(|e| {
-            P2PError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("set_nonblocking failed: {}", e),
-            ))
+            P2PError::Io(std::io::Error::other(format!(
+                "set_nonblocking failed: {}",
+                e
+            )))
         })?;
 
         let listener =
@@ -550,7 +556,7 @@ impl MessageProtocol {
                         .add_peer(
                             hello.node_id.clone(),
                             listen_addr,
-                            hello.ed25519_pubkey,
+                            hello.identity_pubkey,
                             hello.sphincs_pubkey,
                             &hello.challenge,
                             &hello.signature,
@@ -600,16 +606,18 @@ impl MessageProtocol {
         }
 
         // Verify and decrypt
-        let _plaintext = self.open_message(&msg, &sender_pk).await.map_err(|e| {
-            self.peer_manager.record_failure(&sender_id);
-            e
-        })?;
+        let plaintext = self
+            .open_message(&msg, &sender_pk)
+            .await
+            .inspect_err(|_e| {
+                self.peer_manager.record_failure(&sender_id);
+            })?;
 
         self.peer_manager.record_success(&sender_id);
         self.peer_manager.record_message(&sender_id);
         self.peer_manager.touch(&sender_id);
 
-        let _ = self.inbound_tx.send((sender_id, msg)).await;
+        let _ = self.inbound_tx.send((sender_id, msg, plaintext)).await;
         Ok(())
     }
 }
@@ -617,21 +625,20 @@ impl MessageProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kademlia_dht::KademliaDht;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{sphincs_sign, Ed25519Keypair, KyberKeypair, SphincsKeypair};
+    use crate::quantum_crypto::{KyberKeypair, SphincsKeypair};
 
     fn make_proto() -> (
         Arc<MessageProtocol>,
-        mpsc::Receiver<(NodeId, SecureMessage)>,
+        mpsc::Receiver<(NodeId, SecureMessage, Vec<u8>)>,
         Arc<PeerManager>,
     ) {
-        let ed = Ed25519Keypair::generate();
+        let identity = SphincsKeypair::generate();
         let kyber = KyberKeypair::generate();
-        let local_id = NodeId::from_bytes(&ed.public_key_bytes());
+        let local_id = NodeId::from_bytes(&identity.public_key_bytes());
         let (pm, _) = PeerManager::new(local_id.clone(), PeerManagerConfig::default());
         let sphincs = SphincsKeypair::generate();
-        let (proto, rx) = MessageProtocol::new(ed, sphincs, kyber, pm.clone());
+        let (proto, rx) = MessageProtocol::new(identity, sphincs, kyber, pm.clone());
         (proto, rx, pm)
     }
 
@@ -658,6 +665,34 @@ mod tests {
         // Verify the signing bytes are non-empty
         assert!(!msg.signature.is_empty());
         assert!(!msg.payload.is_empty());
+    }
+
+    #[test]
+    fn test_session_keys_match_on_both_sides() {
+        let (proto_a, _, _) = make_proto();
+        let (proto_b, _, _) = make_proto();
+
+        let ciphertext = proto_a
+            .initiate_session(&proto_b.local_id, &proto_b.local_kyber.public_key.0)
+            .unwrap();
+        proto_b
+            .accept_session(&proto_a.local_id, &ciphertext)
+            .unwrap();
+
+        assert_eq!(
+            proto_a
+                .sessions
+                .get(&proto_b.local_id)
+                .unwrap()
+                .key
+                .key_material,
+            proto_b
+                .sessions
+                .get(&proto_a.local_id)
+                .unwrap()
+                .key
+                .key_material
+        );
     }
 
     #[test]

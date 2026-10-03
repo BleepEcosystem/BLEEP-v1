@@ -443,7 +443,9 @@ impl IncidentDetector {
         // Detect downtime
         for (validator_id, actual_proposals) in &validator_proposals {
             let downtime_percentage = if expected_proposals > 0 {
-                (expected_proposals.saturating_sub(*actual_proposals) * 100) / expected_proposals
+                (expected_proposals.saturating_sub(*actual_proposals) * 100)
+                    .checked_div(expected_proposals)
+                    .unwrap_or(0)
             } else {
                 0
             };

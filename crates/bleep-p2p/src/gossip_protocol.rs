@@ -5,7 +5,7 @@
 //! - Lazy-push (IHave) to the rest for bandwidth efficiency.
 //! - Deduplication via a bounded LRU seen-message cache.
 //! - Anti-flood: per-peer message-rate tracking via PeerScoring.
-//! - All outbound messages are sealed via MessageProtocol (AES-GCM + Ed25519).
+//! - All outbound messages are sealed via MessageProtocol (AES-GCM + SPHINCS+).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::message_protocol::MessageProtocol;
 use crate::peer_manager::PeerManager;
-use crate::types::{MessageType, NodeId, SecureMessage};
+use crate::types::{NodeId, SecureMessage};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -39,8 +39,8 @@ fn message_id(msg: &SecureMessage) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(msg.sender_id.as_bytes());
-    h.update(&msg.nonce);
-    h.update(&msg.timestamp.to_le_bytes());
+    h.update(msg.nonce);
+    h.update(msg.timestamp.to_le_bytes());
     let d = h.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&d);
@@ -51,13 +51,15 @@ fn message_id(msg: &SecureMessage) -> [u8; 32] {
 // GOSSIP ENGINE
 // ─────────────────────────────────────────────────────────────────────────────
 
+type PendingMessage = (SecureMessage, Option<NodeId>);
+
 pub struct GossipProtocol {
     peer_manager: Arc<PeerManager>,
     message_protocol: Arc<MessageProtocol>,
     /// LRU cache of already-seen message IDs (prevents re-broadcast).
     seen: Arc<Mutex<LruCache<[u8; 32], ()>>>,
     /// Pending messages to be spread on the next tick.
-    pub(crate) pending: Arc<Mutex<Vec<(SecureMessage, Option<NodeId>)>>>,
+    pub(crate) pending: Arc<Mutex<Vec<PendingMessage>>>,
 }
 
 impl GossipProtocol {
@@ -96,8 +98,16 @@ impl GossipProtocol {
     /// established.  If a session is missing, the peer is skipped and a warning
     /// is logged.  Messages are **never** sent unencrypted.
     pub async fn spread(&self, msg: SecureMessage, exclude: Option<&NodeId>) {
+        self.spread_inner(msg, exclude, false).await;
+    }
+
+    async fn spread_queued(&self, msg: SecureMessage, exclude: Option<&NodeId>) {
+        self.spread_inner(msg, exclude, true).await;
+    }
+
+    async fn spread_inner(&self, msg: SecureMessage, exclude: Option<&NodeId>, already_seen: bool) {
         let id = message_id(&msg);
-        {
+        if !already_seen {
             let mut seen = self.seen.lock();
             if seen.contains(&id) {
                 return;
@@ -105,12 +115,14 @@ impl GossipProtocol {
             seen.put(id, ());
         }
 
-        let healthy = self.peer_manager.healthy_peers();
+        let eligible = self.peer_manager.eligible_peers();
 
         // Select EAGER_FANOUT highest-scoring peers (excluding sender).
-        let candidates: Vec<NodeId> = healthy
+        // Newly authenticated peers begin in Candidate status and are still
+        // allowed to receive gossip until they are promoted or demoted.
+        let candidates: Vec<NodeId> = eligible
             .iter()
-            .filter(|p| exclude.map_or(true, |ex| &p.id != ex))
+            .filter(|p| exclude != Some(&p.id))
             .map(|p| p.id.clone())
             .collect();
 
@@ -129,13 +141,11 @@ impl GossipProtocol {
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
         let eager: Vec<NodeId> = scored
             .into_iter()
             .take(EAGER_FANOUT)
             .map(|(id, _)| id)
             .collect();
-
         let attempted = eager.len();
         let mut delivered = 0;
         for peer_id in &eager {
@@ -147,18 +157,18 @@ impl GossipProtocol {
                 Some(a) => a,
                 None => continue,
             };
-            // Re-wrap as a Gossip envelope — the payload stays encrypted.
-            let gossip_msg =
-                match self
-                    .message_protocol
-                    .seal_message(peer_id, MessageType::Gossip, &msg.payload)
-                {
-                    Ok(m) => m,
-                    Err(e) => {
-                        warn!(peer = %peer_id, error = %e, "Gossip: seal failed, skipping");
-                        continue;
-                    }
-                };
+            // Preserve the application message type so receivers can dispatch it.
+            let gossip_msg = match self.message_protocol.seal_message(
+                peer_id,
+                msg.message_type.clone(),
+                &msg.payload,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(peer = %peer_id, error = %e, "Gossip: seal failed, skipping");
+                    continue;
+                }
+            };
             if let Err(e) = self.message_protocol.send_message(addr, &gossip_msg).await {
                 warn!(peer = %peer_id, error = %e, "Gossip: send failed");
                 self.peer_manager.record_failure(peer_id);
@@ -181,7 +191,7 @@ impl GossipProtocol {
                 std::mem::take(&mut *pending)
             };
             for (msg, exclude) in batch {
-                self.spread(msg, exclude.as_ref()).await;
+                self.spread_queued(msg, exclude.as_ref()).await;
             }
         }
     }
@@ -191,15 +201,15 @@ impl GossipProtocol {
 mod tests {
     use super::*;
     use crate::peer_manager::{PeerManager, PeerManagerConfig};
-    use crate::quantum_crypto::{Ed25519Keypair, KyberKeypair, SphincsKeypair};
+    use crate::quantum_crypto::{KyberKeypair, SphincsKeypair};
     use crate::types::{unix_now, MessageType};
 
     fn make_gossip() -> Arc<GossipProtocol> {
         let local_id = NodeId::random();
         let (pm, _) = PeerManager::new(local_id.clone(), PeerManagerConfig::default());
-        let ed = Ed25519Keypair::generate();
+        let identity = SphincsKeypair::generate();
         let kyber = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(ed, SphincsKeypair::generate(), kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, SphincsKeypair::generate(), kyber, pm.clone());
         GossipProtocol::new(pm, mp)
     }
 

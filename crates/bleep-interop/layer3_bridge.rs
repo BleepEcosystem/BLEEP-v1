@@ -135,7 +135,7 @@ impl L3BatchProver {
             return None;
         }
 
-        let batch_ids: Vec<[u8; 32]> = self.pending_batch.drain(..).collect();
+        let batch_ids = std::mem::take(&mut self.pending_batch);
         let wall_start = Instant::now();
 
         let primary_intent = batch_ids[0];
@@ -183,7 +183,9 @@ impl L3BatchProver {
         if self.proofs_generated == 0 {
             0
         } else {
-            self.total_prove_ms / self.proofs_generated
+            self.total_prove_ms
+                .checked_div(self.proofs_generated)
+                .unwrap_or(0)
         }
     }
     pub fn verifier(&self) -> &ProofVerifier {
@@ -209,6 +211,7 @@ impl Layer3Bridge {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn initiate(
         &mut self,
         source_chain: Chain,

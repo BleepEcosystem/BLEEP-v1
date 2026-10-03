@@ -115,9 +115,9 @@ pub struct SignedTransaction {
     pub gas_price: u64,
     /// Contract bytecode *or* calldata for an already-deployed contract.
     pub payload: Vec<u8>,
-    /// Ed25519 signature over canonical signing bytes.
+    /// Signature over canonical signing bytes.
     pub signature: Vec<u8>,
-    /// Ed25519 public key (32 bytes).
+    /// Signer public key.
     pub signer: Vec<u8>,
     /// Call arguments serialised by the caller (ABI / Borsh / BCS depending on format).
     pub calldata: Vec<u8>,
@@ -166,10 +166,10 @@ impl StateSnapshot {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         for w in writes {
-            h.update(&w.write_index.to_le_bytes());
-            h.update(&(w.key.len() as u64).to_le_bytes());
+            h.update(w.write_index.to_le_bytes());
+            h.update((w.key.len() as u64).to_le_bytes());
             h.update(&w.key);
-            h.update(&(w.value.len() as u64).to_le_bytes());
+            h.update((w.value.len() as u64).to_le_bytes());
             h.update(&w.value);
         }
         h.finalize().into()
@@ -249,22 +249,17 @@ pub struct ZkExecutionProof {
 // OPTIMISATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OptimisationLevel {
     /// No transformations; useful for debugging.
     None,
     /// Dead-code elimination and constant folding only.
     Basic,
     /// Full Cranelift mid-tier + inlining.
+    #[default]
     Standard,
     /// Aggressive — includes cross-function inlining and profile-guided hints.
     Aggressive,
-}
-
-impl Default for OptimisationLevel {
-    fn default() -> Self {
-        OptimisationLevel::Standard
-    }
 }
 
 /// Summary of all transformations applied.

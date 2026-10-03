@@ -107,6 +107,7 @@ pub struct BlockHeader {
 }
 
 impl BlockHeader {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         height: u64,
         timestamp: u64,
@@ -257,13 +258,19 @@ pub struct ProtocolVersionTracker {
     history: Vec<ProtocolVersion>,
 }
 
+impl Default for ProtocolVersionTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProtocolVersionTracker {
     pub fn new() -> Self {
         // Genesis version: 1, epoch 0, height 0
         let genesis = ProtocolVersion::new(1, 0, 0);
 
         ProtocolVersionTracker {
-            current_version: genesis.clone(),
+            current_version: genesis,
             history: vec![genesis],
         }
     }
@@ -282,7 +289,7 @@ impl ProtocolVersionTracker {
         }
 
         let new = ProtocolVersion::new(new_version, epoch, block_height);
-        self.current_version = new.clone();
+        self.current_version = new;
         self.history.push(new);
 
         info!(
@@ -295,7 +302,7 @@ impl ProtocolVersionTracker {
 
     /// Get current protocol version
     pub fn current(&self) -> ProtocolVersion {
-        self.current_version.clone()
+        self.current_version
     }
 
     /// Get protocol version active at specific epoch
@@ -403,9 +410,9 @@ mod tests {
         header.compute_hash().unwrap();
 
         // Should validate successfully
-        assert!(header.validate(1, &vec![7, 8, 9]).is_ok());
+        assert!(header.validate(1, &[7, 8, 9]).is_ok());
 
         // Should fail with wrong protocol version
-        assert!(header.validate(2, &vec![7, 8, 9]).is_err());
+        assert!(header.validate(2, &[7, 8, 9]).is_err());
     }
 }

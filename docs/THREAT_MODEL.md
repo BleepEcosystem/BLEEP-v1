@@ -169,7 +169,7 @@ The audit target consists of the following crates:
 |---|---|
 | sig_commitment_root not in Block struct | ✅ Added to Block + BlockHeader with `#[serde(default)]`; bound into SPHINCS+ sig and STARK proof |
 | Block validation did not check SAL root | ✅ `BlockValidator::verify_sig_commitment_root()` added; recomputes and compares for full-sig blocks |
-| Block gossip propagated full 49,856-byte SPHINCS+ signatures | ✅ `to_gossip()` strips signatures; ~24 MB → ~320 KB per block at 512 tx/block |
+| Block gossip propagated full 49,088-byte SPHINCS+ signatures | ✅ `to_gossip()` strips signatures; ~24 MB → ~320 KB per block at 512 tx/block |
 | ExtendedBlockValidityAir not used in production | ✅ `generate_extended_proof()` in `BlockProducer`; `EXTSTARK1` format; `verify_extended_stark_zkp()` in `Block` |
 | No trusted setup in STARK system | ✅ Winterfell FRI-based; no SRS, no MPC ceremony required (C-03 was a stale Groth16 reference — no Groth16 in codebase) |
 

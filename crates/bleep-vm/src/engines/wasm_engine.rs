@@ -35,7 +35,7 @@ use crate::types::GasSchedule;
 /// Compiled WASM module, keyed by SHA-256 of the source bytecode.
 #[derive(Clone)]
 struct CachedModule {
-    module: Module,
+    serialized: Vec<u8>,
     hit_count: u64,
     #[allow(dead_code)]
     first_seen: Instant,
@@ -65,18 +65,24 @@ impl ModuleCache {
             if let Some(entry) = cache.get_mut(&key) {
                 entry.hit_count += 1;
                 debug!(hits = entry.hit_count, "Module cache hit");
-                return Ok(entry.module.clone());
+                // Modules are tied to the Store that created them. Deserialize
+                // the trusted cached artifact into this execution's Store.
+                return unsafe { Module::deserialize(store, entry.serialized.clone()) }
+                    .map_err(|e| VmError::WasmCompile(e.to_string()));
             }
         }
         // Compile outside the lock — compilation can be slow
         let module =
             Module::new(store, bytecode).map_err(|e| VmError::WasmCompile(e.to_string()))?;
         {
+            let serialized = module
+                .serialize()
+                .map_err(|e| VmError::WasmCompile(e.to_string()))?;
             let mut cache = self.inner.lock();
             cache.put(
                 key,
                 CachedModule {
-                    module: module.clone(),
+                    serialized: serialized.to_vec(),
                     hit_count: 0,
                     first_seen: Instant::now(),
                 },
@@ -95,10 +101,12 @@ impl ModuleCache {
 // HOST ENVIRONMENT
 // ─────────────────────────────────────────────────────────────────────────────
 
+type StateWrites = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// State shared between the host and the WASM instance during one execution.
 pub struct HostEnv {
     pub gas_meter: Arc<Mutex<GasMeter>>,
-    pub state_writes: Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>,
+    pub state_writes: Arc<Mutex<StateWrites>>,
     pub logs: Arc<Mutex<Vec<String>>>,
     pub gas_exhausted: Arc<Mutex<bool>>,
 }
@@ -333,7 +341,7 @@ impl WasmRuntime {
                 gas_meter.lock().charge_cross_call()?;
                 match func.call(&mut store, &[]) {
                     Ok(results) => {
-                        let data = Self::extract_return_data(results);
+                        let data = Self::extract_return_data(&results);
                         (true, data, None)
                     }
                     Err(e) => {
@@ -372,7 +380,7 @@ impl WasmRuntime {
         })
     }
 
-    fn extract_return_data(results: Box<[Value]>) -> Vec<u8> {
+    fn extract_return_data(results: &[Value]) -> Vec<u8> {
         if results.is_empty() {
             return vec![];
         }

@@ -303,7 +303,7 @@ impl ShardRegistry {
     pub fn recompute_registry_root(&mut self) {
         let mut hasher = Sha256::new();
 
-        for (_, shard) in &self.shards {
+        for shard in self.shards.values() {
             hasher.update(shard.id.0.to_le_bytes());
             hasher.update(shard.state_root.root_hash.as_bytes());
         }
@@ -372,8 +372,8 @@ mod tests {
             vec![127],
         );
 
-        assert!(shard.contains_key(&vec![50]));
-        assert!(!shard.contains_key(&vec![128]));
+        assert!(shard.contains_key(&[50]));
+        assert!(!shard.contains_key(&[128]));
     }
 
     #[test]
@@ -437,7 +437,7 @@ mod tests {
 
         registry.add_shard(shard).unwrap();
 
-        let found = registry.find_shard_for_key(&vec![50]);
+        let found = registry.find_shard_for_key(&[50]);
         assert_eq!(found, Some(ShardId(0)));
     }
 

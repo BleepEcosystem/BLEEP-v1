@@ -2,8 +2,8 @@
 //!
 //! ## Key change from v1
 //!
-//! `SigAvailabilityAttestation` (one 49,856-byte SPHINCS+ sig **per transaction**)
-//! is replaced by `BatchBlockAttestation` (one 49,856-byte SPHINCS+ sig **per
+//! `SigAvailabilityAttestation` (one 49,088-byte SPHINCS+ sig **per transaction**)
+//! is replaced by `BatchBlockAttestation` (one 49,088-byte SPHINCS+ sig **per
 //! validator per block**), paired with a compact `TxBitmap` recording exactly
 //! which transactions that validator has verified.
 //!
@@ -69,7 +69,7 @@ pub struct TxBitmap {
 impl TxBitmap {
     /// Create a zeroed bitmap for `tx_count` transactions.
     pub fn new(tx_count: u32) -> Self {
-        let byte_count = ((tx_count as usize) + 7) / 8;
+        let byte_count = (tx_count as usize).div_ceil(8);
         Self {
             bits: vec![0u8; byte_count],
             capacity: tx_count,
@@ -118,7 +118,7 @@ impl TxBitmap {
     /// Expands `self` if `other` has higher capacity.
     pub fn merge(&mut self, other: &TxBitmap) {
         if other.capacity > self.capacity {
-            let new_byte_count = ((other.capacity as usize) + 7) / 8;
+            let new_byte_count = (other.capacity as usize).div_ceil(8);
             self.bits.resize(new_byte_count, 0);
             self.capacity = other.capacity;
         }
@@ -181,7 +181,7 @@ impl SigCommitmentAnnouncement {
 /// One attestation per validator per **block** — not per transaction.
 ///
 /// A validator that has verified all 512 transactions produces a 64-byte
-/// bitmap plus ONE 49,856-byte SPHINCS+ signature for the entire block.
+/// bitmap plus ONE 49,088-byte SPHINCS+ signature for the entire block.
 ///
 /// ## Bandwidth
 ///
@@ -206,7 +206,7 @@ pub struct BatchBlockAttestation {
     pub attested_count: u32,
     /// SHA3-256 of this validator's SPHINCS+ public key.
     pub validator_pk_hash: [u8; 32],
-    /// ONE 49,856-byte SPHINCS+ sig over `signing_payload(...)`.
+    /// ONE 49,088-byte SPHINCS+ sig over `signing_payload(...)`.
     pub attestation_sig: Vec<u8>,
     /// SPHINCS+ public key (64 bytes) for verification.
     pub validator_pk: Vec<u8>,

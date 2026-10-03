@@ -30,7 +30,7 @@ async fn test_p2p_node_connects_peer_and_reports_peer_count() {
     let peer_id = node1
         .connect_peer(
             SocketAddr::from(([127, 0, 0, 1], 17002)),
-            node2.identity.ed_keypair.public_key_bytes(),
+            node2.identity.identity_keypair.public_key_bytes(),
             node2.identity.sphincs_keypair.public_key.0.clone(),
             challenge,
             &proof,

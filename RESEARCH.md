@@ -150,7 +150,7 @@ empirical question to be measured during Phase 6 public testnet operation.
 | Parameter | SPHINCS+-SHAKE-256f-simple (FIPS 205, SL5) | secp256k1 / ECDSA |
 |---|---|---|
 | Public key | 64 bytes | 33 bytes (compressed) |
-| Signature | 49,856 bytes | ~64 bytes |
+| Signature | 49,088 bytes | ~64 bytes |
 | Overhead factor | ~780× | baseline |
 | Per-block aggregate (4,096 tx) | ~204 MB | ~262 KB |
 | Min. validator bandwidth (sigs only) | ~544 KB/s | ~0.7 KB/s |
@@ -263,7 +263,7 @@ feasible for the Tier 3 bridge security model at realistic mainnet gas prices?
 Classical BFT liveness analysis assumes message delivery within bounded latency. SPHINCS+-
 signed messages are ~780× larger than ECDSA-signed messages. Does this overhead materially
 affect BFT liveness under realistic network conditions — particularly at the block proposal
-broadcast step where a 49,856-byte block signature must propagate before validators can begin
+broadcast step where a 49,088-byte block signature must propagate before validators can begin
 verification? At what validator count or network condition does PQ signature overhead begin to
 threaten slot utilization?
 
@@ -382,7 +382,7 @@ or key is required to call it.
 
 | Primitive | Standard | Security Level | Sizes | Usage |
 |---|---|---|---|---|
-| SPHINCS+-SHAKE-256f-simple | FIPS 205 (SLH-DSA) | SL5 (≥256-bit PQ) | PK: 64B · SK: 128B · Sig: 49,856B | Transaction/block signing, P2P auth |
+| SPHINCS+-SHAKE-256f-simple | FIPS 205 (SLH-DSA) | SL5 (≥256-bit PQ) | PK: 64B · SK: 128B · Sig: 49,088B | Transaction/block signing, P2P auth |
 | Kyber-1024 / ML-KEM-1024 | FIPS 203 (ML-KEM) | SL5 (≥256-bit PQ) | PK: 1,568B · SK: 3,168B · CT: 1,568B | Key encapsulation, onion routing |
 | Winterfell STARK (FRI) | Hash-based | PQ (BLAKE3/SHA3-256 collision resistance) | 48-col trace · No SRS | Block validity proofs, bridge verification |
 | SHA3-256 | FIPS 202 | Classical 256-bit | 32B output | State commitments, Merkle chain, audit log |

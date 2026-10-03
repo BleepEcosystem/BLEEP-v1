@@ -64,6 +64,7 @@ impl EngineResult {
 }
 
 /// Every execution engine implements this trait.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
     fn name(&self) -> &'static str;
@@ -102,7 +103,7 @@ pub struct RouterConfig {
     pub max_gas_per_intent: u64,
     /// Maximum call-stack depth across nested calls.
     pub max_call_depth: usize,
-    /// Whether to verify Ed25519 signatures on intents.
+    /// Whether to verify SPHINCS+ signatures on intents.
     pub verify_signatures: bool,
     /// Whether to validate bytecode in sandbox before execution.
     pub sandbox_validation: bool,
@@ -155,8 +156,7 @@ impl CircuitBreaker {
     const OPEN_FOR: Duration = Duration::from_secs(30);
 
     fn is_open(&self) -> bool {
-        self.open_until
-            .map_or(false, |until| Instant::now() < until)
+        self.open_until.is_some_and(|until| Instant::now() < until)
     }
 
     fn record_success(&mut self) {
@@ -225,12 +225,11 @@ impl VmRouter {
         let start = Instant::now();
 
         // ── Step 1: Signature verification ───────────────────────────────────
-        if self.config.verify_signatures && intent.signer != [0u8; 32] {
-            if !intent.verify_signature() {
-                return Err(VmError::ValidationError(
-                    "Invalid Ed25519 signature on intent".into(),
-                ));
-            }
+        if self.config.verify_signatures && intent.signer != [0u8; 32] && !intent.verify_signature()
+        {
+            return Err(VmError::ValidationError(
+                "Invalid SPHINCS+ signature on intent".into(),
+            ));
         }
 
         // ── Step 2: Gas limit cap ─────────────────────────────────────────────
@@ -332,7 +331,12 @@ impl VmRouter {
         }?;
 
         // ── Step 7: Normalise gas to BLEEP units ──────────────────────────────
-        let bleep_gas = self.gas_model.normalise(raw_result.gas_used, &vm);
+        let gas_vm = if matches!(intent.kind, IntentKind::Transfer(_)) {
+            TargetVm::Evm
+        } else {
+            vm.clone()
+        };
+        let bleep_gas = self.gas_model.normalise(raw_result.gas_used, &gas_vm);
 
         // ── Step 8: Update metrics ────────────────────────────────────────────
         {
@@ -406,7 +410,7 @@ impl VmRouter {
             if !engine.is_healthy() {
                 continue;
             }
-            let cb_open = breakers.get(engine.name()).map_or(false, |cb| cb.is_open());
+            let cb_open = breakers.get(engine.name()).is_some_and(|cb| cb.is_open());
             if cb_open {
                 warn!(engine = engine.name(), "Circuit breaker open, skipping");
                 continue;
@@ -503,9 +507,11 @@ mod tests {
     }
 
     fn make_router() -> VmRouter {
-        let mut cfg = RouterConfig::default();
-        cfg.verify_signatures = false; // skip sig checks in unit tests
-        cfg.sandbox_validation = false; // skip bytecode validation in unit tests
+        let cfg = RouterConfig {
+            verify_signatures: false,
+            sandbox_validation: false,
+            ..RouterConfig::default()
+        };
         let counter = Arc::new(AtomicU64::new(0));
         let engine: Arc<dyn Engine> = Arc::new(MockEngine {
             supported_vm: TargetVm::Wasm,

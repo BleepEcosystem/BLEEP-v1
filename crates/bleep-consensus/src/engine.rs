@@ -231,6 +231,12 @@ pub struct ConsensusMetrics {
     pub network_utilization: f64,
 }
 
+impl Default for ConsensusMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConsensusMetrics {
     /// Create metrics with all values at zero/default.
     pub fn new() -> Self {

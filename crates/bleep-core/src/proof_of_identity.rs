@@ -25,9 +25,9 @@ impl MerklePath {
             let mut hasher = Sha3_256::new();
             if *is_right {
                 hasher.update(sibling);
-                hasher.update(&current);
+                hasher.update(current);
             } else {
-                hasher.update(&current);
+                hasher.update(current);
                 hasher.update(sibling);
             }
             current = hasher.finalize().into();

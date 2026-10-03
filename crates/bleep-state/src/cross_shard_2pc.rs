@@ -264,6 +264,12 @@ pub struct CoordinatorManager {
     pub current_height: u64,
 }
 
+impl Default for CoordinatorManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoordinatorManager {
     /// Create a new coordinator manager
     pub fn new() -> Self {

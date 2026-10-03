@@ -211,10 +211,7 @@ impl AuctionEngine {
     }
 
     pub fn place_bid(&self, bid: ExecutorBid) -> BleepConnectResult<()> {
-        self.bids
-            .entry(bid.intent_id)
-            .or_insert_with(Vec::new)
-            .push(bid);
+        self.bids.entry(bid.intent_id).or_default().push(bid);
         Ok(())
     }
 

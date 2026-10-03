@@ -18,11 +18,17 @@ impl SelfAmendingGovernance {
         Ok(true)
     }
 }
+
+impl Default for SelfAmendingGovernance {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 #[allow(dead_code)]
 pub struct BLEEPGovernance;
 #[allow(dead_code)]
 impl BLEEPGovernance {
-    pub async fn get_active_proposals_ref(_this: &Self) -> Result<(), ()> {
+    pub async fn get_active_proposals_ref(_this: &Self) -> Result<(), String> {
         Ok(())
     }
 }
