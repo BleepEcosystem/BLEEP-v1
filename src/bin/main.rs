@@ -407,7 +407,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             enable_layer3: true,
             enable_layer2: true,
             enable_layer1: true,
-            data_directory: PathBuf::from("/tmp/bleep-connect"),
+            data_directory: PathBuf::from(&state_dir).join("bleep-connect"),
             commitment_chain_block_interval_secs: 6,
             layer2_threshold: 100_000_000_000_000,
         };
@@ -676,8 +676,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let inbound_handle = tokio::spawn(async move {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
         loop {
-            match inbound_p2p_node.recv().await {
-                Some((_peer_id, msg)) => {
+            match inbound_p2p_node.recv_with_payload().await {
+                Some((_peer_id, mut msg, plaintext)) => {
+                    msg.payload = plaintext;
                     if msg.message_type == MessageType::SigAvailability {
                         sal_bridge.handle_inbound_message(msg);
                         continue;
@@ -773,8 +774,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // real block production and chain height rather than a NOT_READY stub.
     let rpc_state = rpc_state.with_block_producer(Arc::clone(&block_producer));
 
-    // Seed peer counter from current P2P state
-    rpc_peers.store(p2p_node.peer_count(), std::sync::atomic::Ordering::Relaxed);
+    let peer_count_node = Arc::clone(&p2p_node);
+    let peer_count_refresh = Arc::clone(&rpc_peers);
+    let peer_count_handle = tokio::spawn(async move {
+        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            refresh.tick().await;
+            peer_count_refresh.store(
+                peer_count_node.peer_count(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    });
 
     let routes = rpc_routes_with_state(rpc_state);
     let rpc_handle = tokio::spawn(async move {
@@ -881,6 +892,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     interval_handle.abort();
     block_sched_handle.abort();
     rpc_handle.abort();
+    peer_count_handle.abort();
     inbound_handle.abort();
     p2p_handle.shutdown().await;
 
