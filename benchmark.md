@@ -1,5 +1,57 @@
 # BLEEP Benchmark Report
 
+## Three-Node Mesh and 1,000-Transaction Run
+
+### Connectivity
+
+On 2026-10-04, three release-built BLEEP nodes were run on loopback with separate state directories. Node 2 bootstrapped to node 1; node 3 bootstrapped to nodes 1 and 2, forming a full mesh. Each `/rpc/health` response reported `peers: 2` before and after the workload.
+
+The focused P2P test `cargo test -p bleep-p2p test_three_nodes_exchange_authenticated_gossip -- --nocapture` passed. It established authenticated sessions among all pairs and delivered transaction, block, and signature-availability messages in both directions.
+
+The full-node run exposed an application-level block propagation failure despite successful peer connectivity and gossip delivery (`attempted=2 delivered=2`). Receivers rejected JSON blocks because validation used the receiver's local validator key; the separate `GossipBridge` also sent a compact binary payload to an inbound handler that only decodes JSON. RPC transaction submissions were not broadcast to the other nodes: nodes 2 and 3 remained at height 0 and processed 0 transactions. This is therefore a local-node TPS measurement, not network-wide execution or consensus throughput.
+
+The run also exposed a Tokio runtime panic in the synchronous signature-availability cache adapter, which called `Handle::block_on` from a runtime worker. The adapter now uses `block_in_place`; `cargo test --release -p bleep-root --bin bleep cache_can_be_called_from_runtime_worker` passed. A post-fix two-node smoke run accepted 100/100 transactions in 10.278 seconds, produced blocks on node 1, and left node 2 healthy with one peer. Node 2 still rejected those blocks at validator-signature verification, so this fix does not change the network-wide limitation above.
+
+### TPS Measurement
+
+The sequential CLI workload ran from 2026-10-04 03:57:24 UTC for 103.084 seconds. It submitted 1,000 unique, SPHINCS+-signed transfers of amount `1` to node 1 over authenticated RPC.
+
+| Result | Measurement |
+|---|---:|
+| Accepted submissions | 1,000 / 1,000 |
+| Failed submissions | 0 |
+| Submission duration | 103.084 s |
+| Accepted submission throughput | 9.701 TPS |
+| Settled node-1 transactions processed | 1,000 |
+| Node-1 blocks produced / final height | 36 / 36 |
+| Node-1 peers | 2 |
+| Node-2 height / processed transactions | 0 / 0 |
+| Node-3 height / processed transactions | 0 / 0 |
+
+At the immediate end-of-loop scrape, node 1 had processed 968 transactions; a later scrape showed all 1,000 processed. The benchmark harness reports the immediate counter, so use `/rpc/telemetry` after pending work drains for the settled total.
+
+### Reproduction
+
+Build the binaries and start each node in a separate terminal, using the same local JWT secret and distinct state directories:
+
+```bash
+cargo build --release -p bleep-root --bin bleep -p bleep-cli --bin bleep-cli
+export BLEEP_JWT_SECRET='<base64 secret of at least 32 bytes>'
+
+BLEEP_STATE_DIR=/tmp/bleep-mesh/node1 BLEEP_P2P_LISTEN_ADDR=127.0.0.1:17700 BLEEP_RPC_LISTEN_ADDR=127.0.0.1:18540 ./target/release/bleep
+BLEEP_STATE_DIR=/tmp/bleep-mesh/node2 BLEEP_P2P_LISTEN_ADDR=127.0.0.1:17701 BLEEP_P2P_SEEDS=127.0.0.1:17700 BLEEP_RPC_LISTEN_ADDR=127.0.0.1:18541 ./target/release/bleep
+BLEEP_STATE_DIR=/tmp/bleep-mesh/node3 BLEEP_P2P_LISTEN_ADDR=127.0.0.1:17702 BLEEP_P2P_SEEDS=127.0.0.1:17700,127.0.0.1:17701 BLEEP_RPC_LISTEN_ADDR=127.0.0.1:18542 ./target/release/bleep
+```
+
+Create a wallet against node 1, then run the configurable harness:
+
+```bash
+BLEEP_RPC=http://127.0.0.1:18540 ./target/release/bleep-cli wallet create
+BLEEP_CLI=./target/release/bleep-cli BLEEP_RPC=http://127.0.0.1:18540 BLEEP_TPS_COUNT=1000 ./test_tps.sh
+```
+
+`test_tps.sh` defaults to 1,000 transactions and counts a submission only when its RPC response has `status: accepted`. Set `BLEEP_TPS_COUNT` to change the run size. Keep the shared JWT secret out of shell history and repository files.
+
 ## Executive Summary
 
 This document records a measured 10,000-transaction benchmark against a single local BLEEP node. The workload used the release-built `bleep-cli`, a funded quantum-secure wallet, authenticated HTTP submission, and unique receiver addresses.

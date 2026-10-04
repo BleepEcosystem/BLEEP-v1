@@ -241,13 +241,19 @@ struct JsonReply {
     result: String,
 }
 
-#[derive(Deserialize)]
-struct TxReq {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TxReq {
     sender: String,
     receiver: String,
     amount: u64,
     timestamp: u64,
     signature: Vec<u8>,
+}
+
+impl TxReq {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
 }
 
 #[derive(Serialize)]
@@ -256,10 +262,16 @@ struct TxResp {
     status: &'static str,
 }
 
-#[derive(Deserialize)]
-struct MintReq {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MintReq {
     address: String,
     amount: u64,
+}
+
+impl MintReq {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
 }
 
 #[derive(Serialize)]
@@ -378,8 +390,8 @@ struct EvidenceResp {
 
 // ─── Staking request bodies (Sprint 6) ───────────────────────────────────────
 
-#[derive(Deserialize, Clone)]
-struct StakeRequest {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct StakeRequest {
     #[allow(dead_code)]
     tx_type: String,
     amount: u64,
@@ -393,9 +405,37 @@ struct StakeRequest {
     kyber_public_key: Option<String>,
 }
 
-#[derive(Deserialize, Clone)]
-struct UnstakeRequest {
+impl StakeRequest {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UnstakeRequest {
     validator_id: String,
+}
+
+impl UnstakeRequest {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+}
+
+pub fn parse_tx_request(data: &[u8]) -> Result<TxReq, serde_json::Error> {
+    TxReq::parse(data)
+}
+
+pub fn parse_mint_request(data: &[u8]) -> Result<MintReq, serde_json::Error> {
+    MintReq::parse(data)
+}
+
+pub fn parse_stake_request(data: &[u8]) -> Result<StakeRequest, serde_json::Error> {
+    StakeRequest::parse(data)
+}
+
+pub fn parse_unstake_request(data: &[u8]) -> Result<UnstakeRequest, serde_json::Error> {
+    UnstakeRequest::parse(data)
 }
 
 // ─── Route factory ────────────────────────────────────────────────────────────
