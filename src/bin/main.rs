@@ -118,18 +118,24 @@ struct TxPoolSigCache {
     tx_pool: Arc<TransactionPool>,
 }
 
+impl TxPoolSigCache {
+    fn transactions(&self) -> Vec<bleep_core::transaction::ZKTransaction> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.tx_pool.get_transactions())
+        })
+    }
+}
+
 impl MempoolSigCache for TxPoolSigCache {
     fn get_sig(&self, sig_hash: &[u8; 32]) -> Option<Vec<u8>> {
-        let txs = tokio::runtime::Handle::current().block_on(self.tx_pool.get_transactions());
-        txs.into_iter().find_map(|tx| {
+        self.transactions().into_iter().find_map(|tx| {
             let candidate = bleep_sig_availability::hash_sig(&tx.signature);
             (candidate == *sig_hash).then_some(tx.signature)
         })
     }
 
     fn get_signer_pk(&self, sig_hash: &[u8; 32]) -> Option<Vec<u8>> {
-        let txs = tokio::runtime::Handle::current().block_on(self.tx_pool.get_transactions());
-        txs.into_iter().find_map(|tx| {
+        self.transactions().into_iter().find_map(|tx| {
             let candidate = bleep_sig_availability::hash_sig(&tx.signature);
             if candidate == *sig_hash {
                 Some(tx.signature[..64].to_vec())
@@ -137,6 +143,23 @@ impl MempoolSigCache for TxPoolSigCache {
                 None
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tx_pool_sig_cache_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_can_be_called_from_runtime_worker() {
+        let cache = Arc::new(TxPoolSigCache {
+            tx_pool: TransactionPool::new(1),
+        });
+        let result = tokio::spawn(async move { cache.get_sig(&[0; 32]) })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
     }
 }
 

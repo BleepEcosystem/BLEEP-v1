@@ -28,7 +28,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run audit
-        run: cargo audit --file audit.toml --deny warnings --json > audit-report.json
+        run: cargo audit --deny warnings --json > audit-report.json
 
       - name: Upload audit report
         if: always()
@@ -60,8 +60,6 @@ jobs:
     name: Fuzz critical inputs
     runs-on: ubuntu-22.04
     needs: [cargo-audit, cargo-deny]
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-fuzz-target
     steps:
       - uses: actions/checkout@v4
 
@@ -72,14 +70,20 @@ jobs:
 
       - name: Fuzz P2P message parsing
         working-directory: crates/bleep-p2p
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-fuzz-target
         run: cargo +nightly fuzz run fuzz_secure_message_deserialize -- -max_total_time=30
 
       - name: Fuzz block deserialization
         working-directory: crates/bleep-core
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-fuzz-target
         run: cargo +nightly fuzz run fuzz_block_deserialize -- -max_total_time=30
 
       - name: Fuzz RPC request parsing
         working-directory: crates/bleep-rpc
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-fuzz-target
         run: cargo +nightly fuzz run fuzz_rpc_parsers -- -max_total_time=30
 
   # ------------------------------------------------------------------ #
