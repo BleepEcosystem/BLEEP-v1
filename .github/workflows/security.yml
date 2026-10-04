@@ -4,6 +4,8 @@ on:
   schedule:
     # Run every Monday at 08:00 UTC
     - cron: "0 8 * * 1"
+  pull_request:
+    branches: ["main", "dev"]
   push:
     branches: ["main"]
   workflow_dispatch:
@@ -26,7 +28,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run audit
-        run: cargo audit --deny warnings
+        run: cargo audit --file audit.toml --deny warnings --json > audit-report.json
 
       - name: Upload audit report
         if: always()
@@ -45,10 +47,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: EmbarkStudios/cargo-deny-action@v1
-        with:
-          command: check all
-        continue-on-error: true   # Report but don't block until deny.toml is tuned
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Run deny checks
+        run: cargo deny --config .github-deny.toml check all
+
+  # ------------------------------------------------------------------ #
+  #  cargo-fuzz — adversarial input coverage for critical parsing paths    #
+  # ------------------------------------------------------------------ #
+  fuzz:
+    name: Fuzz critical inputs
+    runs-on: ubuntu-22.04
+    needs: [cargo-audit, cargo-deny]
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-fuzz-target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --component rustfmt --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+
+      - name: Fuzz P2P message parsing
+        working-directory: crates/bleep-p2p
+        run: cargo +nightly fuzz run fuzz_secure_message_deserialize -- -max_total_time=30
+
+      - name: Fuzz block deserialization
+        working-directory: crates/bleep-core
+        run: cargo +nightly fuzz run fuzz_block_deserialize -- -max_total_time=30
+
+      - name: Fuzz RPC request parsing
+        working-directory: crates/bleep-rpc
+        run: cargo +nightly fuzz run fuzz_rpc_parsers -- -max_total_time=30
 
   # ------------------------------------------------------------------ #
   #  CodeQL — static analysis for Rust                                   #
