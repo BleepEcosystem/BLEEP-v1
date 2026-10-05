@@ -352,6 +352,26 @@ mod tests {
     }
 
     #[test]
+    fn test_signed_intent_nonce_cannot_be_reused_for_changed_payload() {
+        let mut reg = registry_with_usdb();
+        let mut first = PATIntent::mint(ALICE, "USDB", BOB, 1_000);
+        first.nonce = 1;
+        reg.execute_signed(&first).unwrap();
+
+        let mut replay = PATIntent::mint(ALICE, "USDB", BOB, 2_000);
+        replay.nonce = 1;
+        assert!(matches!(
+            reg.execute_signed(&replay),
+            Err(PATError::DuplicateIntent)
+        ));
+
+        let mut next = PATIntent::mint(ALICE, "USDB", BOB, 2_000);
+        next.nonce = 2;
+        reg.execute_signed(&next).unwrap();
+        assert_eq!(reg.balance_of("USDB", &BOB), 3_000);
+    }
+
+    #[test]
     fn test_event_log_populated() {
         let mut reg = registry_with_usdb();
         reg.execute(&PATIntent::mint(ALICE, "USDB", BOB, 1_000))

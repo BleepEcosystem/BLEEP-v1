@@ -39,11 +39,23 @@ impl BlockValidator {
             return false;
         }
 
+        // Compact gossip is never execution-authenticated unless the full
+        // transaction bodies and signatures are obtained and verified. Reject
+        // stripped txs before applying any state transition.
+        if !block.transactions.is_empty()
+            && block.transactions.iter().all(|tx| tx.signature.is_empty())
+        {
+            log::error!(
+                "Block {} contains stripped transaction bodies without SAL authentication",
+                block.index
+            );
+            return false;
+        }
+
         // ── Verify SAL commitment root ────────────────────────────────────
         // If sig_commitment_root is set (non-zero), verify it matches the
-        // actual transaction signatures. For gossip-stripped blocks (tx.signature
-        // is empty), the root is already bound into the SPHINCS+ block signature
-        // and the extended STARK proof, so we trust the ZKP path above.
+        // actual transaction signatures. Stripped compact-gossip blocks are
+        // rejected above and must not be trusted.
         if !Self::verify_sig_commitment_root(block) {
             log::error!(
                 "Block {} sig_commitment_root verification failed",
@@ -53,10 +65,7 @@ impl BlockValidator {
         }
 
         // Verify individual transaction signatures in parallel.
-        // Skipped for gossip-stripped blocks (empty signatures) — the SAL root
-        // and STARK proof guarantee signature availability and correctness.
-        let all_sigs_stripped = block.transactions.iter().all(|tx| tx.signature.is_empty());
-        if !all_sigs_stripped && !Self::verify_transaction_signatures(&block.transactions) {
+        if !Self::verify_transaction_signatures(&block.transactions) {
             log::error!(
                 "Block {} contains invalid transaction signatures",
                 block.index
@@ -79,6 +88,13 @@ impl BlockValidator {
     ///   extended STARK proof (already verified above); return true.
     pub fn verify_sig_commitment_root(block: &Block) -> bool {
         let zero_root = [0u8; 32];
+        if !block.transactions.is_empty() && block.sig_commitment_root == zero_root {
+            log::error!(
+                "Block {} has non-empty txs but no authenticated SAL commitment root",
+                block.index
+            );
+            return false;
+        }
         if block.sig_commitment_root == zero_root {
             // Genesis block or block without SAL — no commitment to verify.
             return true;
@@ -92,10 +108,14 @@ impl BlockValidator {
             .count();
 
         if sig_count == 0 {
-            // All signatures stripped — block was received via compact gossip.
-            // The sig_commitment_root is authenticated by the SPHINCS+ block
-            // signature and the extended STARK proof verified above.
-            return true;
+            if block.transactions.is_empty() {
+                return true;
+            }
+            log::error!(
+                "Block {} received compact-gossip txs without authenticated SAL data",
+                block.index
+            );
+            return false;
         }
 
         // Proposer path: we have the raw signatures; recompute and compare.
@@ -271,5 +291,52 @@ impl BlockValidator {
         // All validations passed
         log::debug!("Block {} passed full validation pipeline", block.index);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::{Block, ConsensusMode, Transaction};
+
+    #[test]
+    fn reject_gossip_stripped_transactions_without_sal_authentication() {
+        let block = Block {
+            index: 1,
+            timestamp: 1,
+            transactions: vec![Transaction {
+                chain_id: "test-chain".to_string(),
+                sender: "alice".to_string(),
+                receiver: "bob".to_string(),
+                amount: 5,
+                timestamp: 1,
+                nonce: 0,
+                signature: vec![],
+            }],
+            previous_hash: "prev".to_string(),
+            merkle_root: "merkle".to_string(),
+            validator_signature: vec![],
+            zk_proof: vec![],
+            epoch_id: 0,
+            consensus_mode: ConsensusMode::PosNormal,
+            protocol_version: 2,
+            shard_registry_root: "0".repeat(64),
+            shard_id: 0,
+            shard_state_root: "0".repeat(64),
+            sig_commitment_root: [0u8; 32],
+        };
+
+        assert!(!BlockValidator::verify_sig_commitment_root(&block));
+    }
+
+    #[test]
+    fn block_hash_changes_when_state_root_changes() {
+        let mut block_a = Block::new(1, vec![], "prev".to_string());
+        let mut block_b = block_a.clone();
+
+        block_a.shard_state_root = "0".repeat(64);
+        block_b.shard_state_root = "1".repeat(64);
+
+        assert_ne!(block_a.compute_hash(), block_b.compute_hash());
     }
 }

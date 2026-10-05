@@ -23,7 +23,7 @@ use aes_gcm::{
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as Sha2Digest, Sha256};
+use sha2::Digest as Sha2Digest;
 use sha3::Sha3_256;
 
 // ─── EncryptedWallet ──────────────────────────────────────────────────────────
@@ -129,11 +129,9 @@ impl EncryptedWallet {
 
     // ── Address derivation ────────────────────────────────────────────────────
 
-    /// `BLEEP1<hex40>` — SHA256²(pk) truncated to 20 bytes.
+    /// Derive the canonical BLEEP account address from its SPHINCS+ key.
     pub fn derive_address(public_key: &[u8]) -> String {
-        let first = Sha256::digest(public_key);
-        let second = Sha256::digest(first);
-        format!("BLEEP1{}", hex::encode(&second[..20]))
+        bleep_crypto::derive_account_address(public_key)
     }
 
     pub fn address(&self) -> &str {

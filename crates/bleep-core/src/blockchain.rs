@@ -138,6 +138,37 @@ impl Blockchain {
         }
     }
 
+    /// Restore canonical history already validated and replayed from durable
+    /// storage. The supplied account state must represent the same tip.
+    pub fn restore_blocks(&mut self, blocks: Vec<Block>) -> Result<(), String> {
+        let mut previous = self
+            .chain
+            .back()
+            .cloned()
+            .ok_or_else(|| "Cannot restore blocks without a genesis block".to_string())?;
+        for block in blocks {
+            if block.index != previous.index.saturating_add(1) {
+                return Err(format!(
+                    "Persisted block height {} does not follow {}",
+                    block.index, previous.index
+                ));
+            }
+            let signer = block
+                .validator_signature
+                .get(..crate::block::SPHINCS_PK_LEN)
+                .ok_or_else(|| format!("Persisted block {} has no signer key", block.index))?;
+            if !BlockValidator::validate_full_block(&previous, &block, signer) {
+                return Err(format!(
+                    "Persisted canonical block {} failed validation",
+                    block.index
+                ));
+            }
+            previous = block.clone();
+            self.chain.push_back(block);
+        }
+        Ok(())
+    }
+
     // ── Block acceptance ──────────────────────────────────────────────────────
 
     /// Validate, apply state, drain pool, and append a block.

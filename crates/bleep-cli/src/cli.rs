@@ -242,6 +242,17 @@ async fn run(cmd: Commands) -> Result<()> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                let chain_id = std::env::var("BLEEP_CHAIN_ID")
+                    .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+                let nonce = http_client
+                    .get(format!("{}/rpc/state/{}", rpc, sender))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<serde_json::Value>()
+                    .await?["nonce"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("RPC state response is missing account nonce"))?;
 
                 // Sprint 5: unlock AES-GCM encrypted SK, sign with SPHINCS+
                 let sig = {
@@ -251,7 +262,7 @@ async fn run(cmd: Commands) -> Result<()> {
 
                     match wallet_opt {
                         Some(w) if w.can_sign() => {
-                            let payload = tx_payload(&sender, &to, amount, ts);
+                            let payload = tx_payload(&chain_id, &sender, &to, amount, ts, nonce);
                             // Decrypt SK (empty password = default; users who locked
                             // with a custom password set BLEEP_WALLET_PASSWORD env var)
                             let password =
@@ -292,10 +303,12 @@ async fn run(cmd: Commands) -> Result<()> {
                 };
 
                 let tx = ZKTransaction {
+                    chain_id,
                     sender: sender.clone(),
                     receiver: to.clone(),
                     amount,
                     timestamp: ts,
+                    nonce,
                     signature: sig.clone(), // Wire format: pk(64) || SPHINCS+ detached sig
                 };
 

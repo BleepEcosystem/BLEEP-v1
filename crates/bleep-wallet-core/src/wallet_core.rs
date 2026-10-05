@@ -179,10 +179,13 @@ pub enum WalletError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     pub id:        String,
+    pub chain_id:  String,
     pub from:      String,
     pub to:        String,
     pub amount:    f64,
     pub fee:       f64,
+    pub timestamp: u64,
+    pub nonce:     u64,
     pub signature: Vec<u8>,
 }
 
@@ -322,7 +325,7 @@ impl Wallet {
 
     /// Sign `tx` using SPHINCS+-SHAKE-256f-simple.
     ///
-    /// The canonical payload is `tx_signer::tx_payload(from, to, amount_micro, timestamp)`
+    /// The canonical payload binds chain ID, account, amount, timestamp, and nonce.
     /// — a SHA3-256 digest over the transaction fields.  The returned bytes are
     /// the raw 49,088-byte SPHINCS+ detached signature.
     ///
@@ -332,9 +335,14 @@ impl Wallet {
     pub fn sign_transaction(&self, tx: &Transaction) -> Result<Vec<u8>, WalletError> {
         // Convert float amount to u64 microBLEEP (8 decimals).
         let amount_micro = (tx.amount * 1e8) as u64;
-        let timestamp    = unix_ms();
-
-        let payload = tx_signer::tx_payload(&tx.from, &tx.to, amount_micro, timestamp);
+        let payload = tx_signer::tx_payload(
+            &tx.chain_id,
+            &tx.from,
+            &tx.to,
+            amount_micro,
+            tx.timestamp,
+            tx.nonce,
+        );
 
         let sig = tx_signer::sign_tx_payload(&payload, &self.private_key)
             .map_err(|e| WalletError::SigningError(e))?;
@@ -353,10 +361,14 @@ impl Wallet {
     /// canonical payload for this wallet's public key.
     pub fn verify_transaction_signature(&self, tx: &Transaction, sig: &[u8]) -> bool {
         let amount_micro = (tx.amount * 1e8) as u64;
-        // Verification uses the same zero timestamp for determinism.
-        // In production the timestamp must be included in the signed payload
-        // and transmitted alongside the signature.
-        let payload = tx_signer::tx_payload(&tx.from, &tx.to, amount_micro, 0);
+        let payload = tx_signer::tx_payload(
+            &tx.chain_id,
+            &tx.from,
+            &tx.to,
+            amount_micro,
+            tx.timestamp,
+            tx.nonce,
+        );
         tx_signer::verify_tx_signature(&payload, sig, &self.public_key)
     }
 
@@ -428,10 +440,7 @@ impl Wallet {
 ///
 /// `address = "BLEEP1" || hex( SHA256²(pk)[..20] )`
 fn derive_address(pk: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let first  = Sha256::digest(pk);
-    let second = Sha256::digest(&first);
-    format!("BLEEP1{}", hex::encode(&second[..20]))
+    bleep_crypto::derive_account_address(pk)
 }
 
 /// Current UNIX time in milliseconds.

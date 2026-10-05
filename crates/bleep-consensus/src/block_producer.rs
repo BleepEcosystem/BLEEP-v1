@@ -10,7 +10,7 @@
 //!   │  StateDiff (gas charged, state changes)
 //!   ▼
 //! StateManager.apply_transfer           ← native balance accounting
-//! StateManager.advance_block()          ← flush to RocksDB
+//! StateManager.persist_canonical_block  ← atomically persist state + history
 //!   │
 //!   ▼
 //! Block::with_consensus_and_sharding    ← build block with PoS fields
@@ -56,6 +56,8 @@ use bleep_vm::types::ChainId;
 use crate::performance_bench::{
     PerformanceBenchmark, BENCHMARK_DURATION_SECS, NUM_SHARDS, TARGET_TPS,
 };
+use crate::pos_engine::{PoSConsensusEngine, ValidatorStake};
+use crate::validator_identity::ValidatorRegistry;
 
 // ── FinalizedBlock ─────────────────────────────────────────────────────────────
 
@@ -86,6 +88,7 @@ const BLEEP_CHAIN_ID: ChainId = ChainId::Bleep;
 pub struct ProducerConfig {
     pub block_interval_secs: u64,
     pub max_txs_per_block: usize,
+    pub chain_id: String,
     pub validator_id: String,
     /// Full SPHINCS+-SHAKE-256f-simple secret key bytes (128 bytes).
     /// Stored as Vec<u8> because SPHINCS+ SK is 128 bytes, not 32.
@@ -102,6 +105,7 @@ impl Default for ProducerConfig {
         Self {
             block_interval_secs: 3,
             max_txs_per_block: MAX_TXS_PER_BLOCK,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             validator_id: "genesis-validator".to_string(),
             validator_sk: vec![0u8; 128],
             validator_pk: vec![0u8; 64],
@@ -121,6 +125,9 @@ pub struct BlockProducer {
     executor: Executor,
     p2p: Option<Arc<P2PNode>>,
     sal_broadcaster: Option<Arc<dyn GossipBroadcaster>>,
+    validator_registry: Option<Arc<PLMutex<ValidatorRegistry>>>,
+    my_stake: u64,
+    canonical_commit_lock: Arc<tokio::sync::Mutex<()>>,
     config: ProducerConfig,
     block_tx: tokio::sync::broadcast::Sender<FinalizedBlock>,
     /// Live TPS benchmark — records wall-clock throughput from real block production.
@@ -128,6 +135,22 @@ pub struct BlockProducer {
 }
 
 impl BlockProducer {
+    /// Pin transaction execution to the node's configured network chain ID.
+    pub fn set_chain_id(&mut self, chain_id: impl Into<String>) {
+        self.config.chain_id = chain_id.into();
+    }
+
+    /// Attach the active validator set used for deterministic proposer choice
+    /// and signer authorization.
+    pub fn set_validator_registry(&mut self, registry: Arc<PLMutex<ValidatorRegistry>>) {
+        self.validator_registry = Some(registry);
+    }
+
+    /// Share the canonical-state commit gate with inbound block processing.
+    pub fn set_canonical_commit_lock(&mut self, lock: Arc<tokio::sync::Mutex<()>>) {
+        self.canonical_commit_lock = lock;
+    }
+
     /// Build a new block producer with a real SPHINCS+-SHAKE-256f-simple keypair.
     ///
     /// `sphincs_sk_bytes` — full SPHINCS+ secret key bytes (128 bytes, from `generate_tx_keypair()`).
@@ -138,7 +161,7 @@ impl BlockProducer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         validator_id: String,
-        _my_stake: u64,
+        my_stake: u64,
         tx_pool: Arc<TransactionPool>,
         blockchain: Arc<RwLock<Blockchain>>,
         state: Arc<PLMutex<StateManager>>,
@@ -148,7 +171,7 @@ impl BlockProducer {
     ) -> (Self, tokio::sync::broadcast::Receiver<FinalizedBlock>) {
         Self::new_with_sig_availability(
             validator_id,
-            _my_stake,
+            my_stake,
             tx_pool,
             blockchain,
             state,
@@ -162,7 +185,7 @@ impl BlockProducer {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_sig_availability(
         validator_id: String,
-        _my_stake: u64,
+        my_stake: u64,
         tx_pool: Arc<TransactionPool>,
         blockchain: Arc<RwLock<Blockchain>>,
         state: Arc<PLMutex<StateManager>>,
@@ -194,6 +217,9 @@ impl BlockProducer {
                 executor,
                 p2p,
                 sal_broadcaster,
+                validator_registry: None,
+                my_stake,
+                canonical_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
                 config,
                 block_tx,
                 bench,
@@ -274,6 +300,16 @@ impl BlockProducer {
     }
 
     async fn produce_one(&self) -> Result<Option<FinalizedBlock>, String> {
+        let _canonical_guard = self.canonical_commit_lock.lock().await;
+        let checkpoint = self.state.lock().checkpoint();
+        let result = self.produce_one_inner().await;
+        if result.is_err() {
+            self.state.lock().restore_checkpoint(checkpoint);
+        }
+        result
+    }
+
+    async fn produce_one_inner(&self) -> Result<Option<FinalizedBlock>, String> {
         // Wall-clock start — used for live benchmark instrumentation
         let block_start = Instant::now();
 
@@ -298,6 +334,49 @@ impl BlockProducer {
                 None => return Err("Blockchain empty — genesis missing".into()),
             }
         };
+
+        if let Some(registry) = &self.validator_registry {
+            let registry = registry.lock();
+            let active_validators: Vec<ValidatorStake> = registry
+                .get_active_validators()
+                .into_iter()
+                .map(|validator| ValidatorStake {
+                    id: validator.id.clone(),
+                    stake: u64::try_from(validator.effective_stake()).unwrap_or(u64::MAX),
+                    active: true,
+                    slashing_count: validator
+                        .double_sign_count
+                        .saturating_add(validator.equivocation_count)
+                        .saturating_add(validator.downtime_count),
+                })
+                .collect();
+            let selected =
+                PoSConsensusEngine::select_proposer(next_height, &active_validators, &prev_hash)
+                    .map_err(|e| {
+                        format!("Proposer selection failed at height {next_height}: {e}")
+                    })?;
+            if selected != self.config.validator_id {
+                debug!(
+                    height = next_height,
+                    selected,
+                    local = %self.config.validator_id,
+                    "Skipping block slot assigned to another validator"
+                );
+                return Ok(None);
+            }
+            if !registry.get(&selected).is_some_and(|validator| {
+                validator.can_participate()
+                    && validator.stake == u128::from(self.my_stake)
+                    && validator
+                        .signing_key_id
+                        .eq_ignore_ascii_case(&hex::encode(&self.config.validator_pk))
+            }) {
+                return Err(format!(
+                    "Selected proposer {} does not match the configured key and stake",
+                    selected
+                ));
+            }
+        }
 
         // ── 3: Epoch ──────────────────────────────────────────────────────────
         let epoch_id = next_height / BLOCKS_PER_EPOCH;
@@ -363,9 +442,13 @@ impl BlockProducer {
             let mut state = self.state.lock();
             for (idx, gas, vm_ok, diff) in &vm_results {
                 let zt = &pending[*idx];
-                if !vm_ok {
+                if !vm_ok
+                    || zt.chain_id != self.config.chain_id
+                    || !zt.verify_account_authorization()
+                    || state.get_nonce(&zt.sender) != zt.nonce
+                {
                     warn!(
-                        "[BlockProducer] VM reverted tx {}→{}",
+                        "[BlockProducer] invalid VM result, authorization, chain ID, or nonce for tx {}→{}",
                         zt.sender, zt.receiver
                     );
                     // Track this failed tx for removal from pool
@@ -423,14 +506,15 @@ impl BlockProducer {
 
                 total_gas += gas;
                 block_txs.push(Transaction {
+                    chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
                     timestamp: zt.timestamp,
+                    nonce: zt.nonce,
                     signature: zt.signature.clone(),
                 });
             }
-            state.advance_block();
         }
 
         // Remove all failed transactions from pool to prevent recurring failures
@@ -497,13 +581,35 @@ impl BlockProducer {
             return Err(format!("Block {} STARK verification failed", next_height));
         }
 
+        // Prepare the authenticated gossip payload before committing state so
+        // serialization failure cannot leave an unbroadcast committed block.
+        let gossip_payload = serde_json::to_vec(&block)
+            .map_err(|e| format!("Block {} serialization failed: {}", next_height, e))?;
+
         // ── 9: Commit to chain ────────────────────────────────────────────────
         let accepted = {
             let mut chain = self
                 .blockchain
                 .write()
                 .map_err(|e| format!("blockchain write lock: {}", e))?;
-            chain.add_block(block.clone(), &self.config.validator_pk)
+            let accepted = chain.add_block(block.clone(), &self.config.validator_pk);
+            if accepted {
+                if let Err(e) = self.state.lock().persist_canonical_block(
+                    &block,
+                    block.index,
+                    &block.compute_hash(),
+                    &block.previous_hash,
+                    &self.config.chain_id,
+                    &Block::genesis().compute_hash(),
+                ) {
+                    chain.rollback();
+                    return Err(format!(
+                        "Block {} durable commit failed: {}",
+                        next_height, e
+                    ));
+                }
+            }
+            accepted
         };
 
         if !accepted {
@@ -514,13 +620,10 @@ impl BlockProducer {
             return Err(format!("Block {} validation failed", next_height));
         }
 
-        // ── 10: Gossip stripped block to peers ────────────────────────────────
-        // Signatures are stripped — receivers verify authenticity via
-        // sig_commitment_root (bound in SPHINCS+ sig + extended STARK proof).
-        // Bandwidth: ~200-400 KB instead of ~204 MB for a full 512-tx block.
+        // Inbound validators require each transaction's full signature. Until
+        // SAL recovery supplies them before execution, gossip the full block.
         if let Some(ref node) = self.p2p {
-            let payload = serde_json::to_vec(&block.to_gossip()).unwrap_or_default();
-            node.broadcast(MessageType::Block, payload);
+            node.broadcast(MessageType::Block, gossip_payload);
         }
 
         // ── 10b: SAL announcement (sig_hashes computed in step 7a) ───────────
@@ -557,10 +660,12 @@ impl BlockProducer {
         // ── 11: Drain committed txs from pool ─────────────────────────────────
         for tx in &block_txs {
             let tx_id = Self::canonical_tx_id(&ZKTransaction {
+                chain_id: tx.chain_id.clone(),
                 sender: tx.sender.clone(),
                 receiver: tx.receiver.clone(),
                 amount: tx.amount,
                 timestamp: tx.timestamp,
+                nonce: tx.nonce,
                 signature: tx.signature.clone(),
             });
             self.tx_pool.remove_confirmed(&tx_id).await;
@@ -709,10 +814,12 @@ pub fn start_block_producer(
             let txs: Vec<Transaction> = pending
                 .iter()
                 .map(|zt| Transaction {
+                    chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
                     timestamp: zt.timestamp,
+                    nonce: zt.nonce,
                     signature: zt.signature.clone(),
                 })
                 .collect();
@@ -782,23 +889,33 @@ mod real_transaction_benchmark {
 
         let (sender_pk, sender_sk) = generate_tx_keypair();
         let (validator_pk, validator_sk) = generate_tx_keypair();
-        let sender = "bleep1realbenchmarksender";
+        let sender = bleep_crypto::derive_account_address(&sender_pk);
         let receiver = "bleep1realbenchmarkreceiver";
 
         let signing_start = Instant::now();
         let mut transactions = Vec::with_capacity(TRANSACTION_COUNT);
         for index in 0..TRANSACTION_COUNT {
             let timestamp = 1_700_000_000 + index as u64;
-            let payload = tx_payload(sender, receiver, 1, timestamp);
+            let nonce = index as u64;
+            let payload = tx_payload(
+                bleep_crypto::DEFAULT_CHAIN_ID,
+                &sender,
+                receiver,
+                1,
+                timestamp,
+                nonce,
+            );
             let detached = sign_tx_payload(&payload, &sender_sk).expect("transaction signing");
             let mut signature = Vec::with_capacity(sender_pk.len() + detached.len());
             signature.extend_from_slice(&sender_pk);
             signature.extend_from_slice(&detached);
             transactions.push(ZKTransaction {
-                sender: sender.to_string(),
+                chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+                sender: sender.clone(),
                 receiver: receiver.to_string(),
                 amount: 1,
                 timestamp,
+                nonce,
                 signature,
             });
         }
