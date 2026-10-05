@@ -883,7 +883,37 @@ pub fn rpc_routes_with_state(
         ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
-            |req: UnstakeRequest, _claims: SessionClaims, st: RpcState| async move {
+            |req: UnstakeRequest, claims: SessionClaims, st: RpcState| async move {
+                let Some(auth_service) = st.auth_service.as_ref() else {
+                    let resp = warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "AuthService unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                    return Ok::<_, warp::Rejection>(resp);
+                };
+
+                let is_system_admin = auth_service
+                    .rbac
+                    .check(&claims.sub, Permission::AdministerSystem)
+                    .is_granted();
+                let owns_validator = auth_service
+                    .validator_bindings
+                    .read()
+                    .await
+                    .get_binding_for_validator(&req.validator_id)
+                    .is_some_and(|binding| binding.operator_id == claims.sub);
+                if !owns_validator && !is_system_admin {
+                    let resp = warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Session is not bound to this validator".into(),
+                        }),
+                        warp::http::StatusCode::FORBIDDEN,
+                    );
+                    return Ok::<_, warp::Rejection>(resp);
+                }
+
                 match &st.validator_registry {
                     None => {
                         let resp = warp::reply::with_status(
@@ -1781,6 +1811,20 @@ fn connect_relay_tx(
 /// Parse a hex string (with or without 0x prefix) into a 32-byte address.
 /// Pads or truncates to exactly 32 bytes (left-aligned, right zero-padded).
 fn hex_to_address(s: &str) -> Result<bleep_pat::Address, String> {
+    if let Some(encoded) = s.strip_prefix("BLEEP1") {
+        let bytes = hex::decode(encoded)
+            .map_err(|e| format!("Invalid BLEEP account address '{}': {}", s, e))?;
+        if bytes.len() != 20 {
+            return Err(format!(
+                "BLEEP account address must encode 20 bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let mut addr = [0u8; 32];
+        addr[..20].copy_from_slice(&bytes);
+        return Ok(addr);
+    }
+
     let s = s.trim_start_matches("0x");
     let bytes = hex::decode(s).map_err(|e| format!("Invalid address hex '{}': {}", s, e))?;
     let mut addr = [0u8; 32];
@@ -1795,7 +1839,7 @@ fn address_to_hex(addr: &bleep_pat::Address) -> String {
 
 // ── Request / response types ──────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatCreateReq {
     symbol: String,
     name: String,
@@ -1809,6 +1853,10 @@ struct PatCreateReq {
     burn_rate_bps: u16,
     #[serde(default)]
     freezable: bool,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 fn default_decimals() -> u8 {
     8
@@ -1817,27 +1865,39 @@ fn default_burn_rate() -> u16 {
     50
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatMintReq {
     symbol: String,
     caller: String, // must be token owner
     to: String,
     amount: String, // u128 decimal string
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatBurnReq {
     symbol: String,
     from: String,
     amount: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatTransferReq {
     symbol: String,
     from: String,
     to: String,
     amount: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 #[derive(Serialize)]
@@ -1879,6 +1939,69 @@ fn pat_not_initialised() -> warp::reply::WithStatus<warp::reply::Json> {
     )
 }
 
+#[derive(Serialize)]
+struct PatSignedPayload {
+    domain: &'static str,
+    endpoint: String,
+    chain_id: String,
+    nonce: u64,
+    request: serde_json::Value,
+}
+
+fn verify_pat_request<T: Serialize>(
+    endpoint: &str,
+    request: &T,
+    public_key: &str,
+    signature: &str,
+    chain_id: &str,
+    nonce: u64,
+    principal: &bleep_pat::Address,
+) -> Result<(), String> {
+    if chain_id != bleep_crypto::DEFAULT_CHAIN_ID {
+        return Err("PAT intent chain_id does not match this network".into());
+    }
+    if nonce == 0 {
+        return Err("PAT intent nonce must be non-zero".into());
+    }
+
+    let public_key = hex::decode(public_key.trim_start_matches("0x"))
+        .map_err(|e| format!("Invalid wallet public key: {e}"))?;
+    let signature = hex::decode(signature.trim_start_matches("0x"))
+        .map_err(|e| format!("Invalid wallet signature: {e}"))?;
+    let mut request =
+        serde_json::to_value(request).map_err(|e| format!("Could not encode PAT intent: {e}"))?;
+    request
+        .as_object_mut()
+        .ok_or_else(|| "PAT intent must serialize as an object".to_string())?
+        .remove("signature");
+
+    let payload = serde_json::to_vec(&PatSignedPayload {
+        domain: "BLEEP:PAT:INTENT:V1",
+        endpoint: endpoint.to_string(),
+        chain_id: chain_id.to_string(),
+        nonce,
+        request,
+    })
+    .map_err(|e| format!("Could not encode signed PAT payload: {e}"))?;
+    if !verify_tx_signature(&payload, &signature, &public_key) {
+        return Err("PAT intent signature verification failed".into());
+    }
+
+    let derived_address = hex_to_address(&bleep_crypto::derive_account_address(&public_key))?;
+    if &derived_address != principal {
+        return Err("PAT principal does not match the signing wallet".into());
+    }
+
+    Ok(())
+}
+
+fn pat_auth_error(error: String) -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&ErrResp { error }),
+        warp::http::StatusCode::UNAUTHORIZED,
+    )
+}
+
 // ── POST /rpc/pat/create ──────────────────────────────────────────────────────
 fn pat_create(
     state: Arc<RpcState>,
@@ -1904,9 +2027,20 @@ fn pat_create(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/create",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let cap: u128 = req.supply_cap.parse().unwrap_or(0);
 
-                    let intent = bleep_pat::PATIntent::create_token(
+                    let mut intent = bleep_pat::PATIntent::create_token(
                         owner,
                         req.symbol.clone(),
                         req.name.clone(),
@@ -1915,9 +2049,10 @@ fn pat_create(
                         req.burn_rate_bps,
                         req.freezable,
                     );
+                    intent.nonce = req.nonce;
 
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -1968,6 +2103,17 @@ fn pat_mint(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/mint",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &caller,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let to = match hex_to_address(&req.to) {
                         Ok(a) => a,
                         Err(e) => {
@@ -1978,9 +2124,11 @@ fn pat_mint(
                         }
                     };
                     let amount: u128 = req.amount.parse().unwrap_or(0);
-                    let intent = bleep_pat::PATIntent::mint(caller, req.symbol.clone(), to, amount);
+                    let mut intent =
+                        bleep_pat::PATIntent::mint(caller, req.symbol.clone(), to, amount);
+                    intent.nonce = req.nonce;
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2032,10 +2180,22 @@ fn pat_burn(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/burn",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &from,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let amount: u128 = req.amount.parse().unwrap_or(0);
-                    let intent = bleep_pat::PATIntent::burn(from, req.symbol.clone(), amount);
+                    let mut intent = bleep_pat::PATIntent::burn(from, req.symbol.clone(), amount);
+                    intent.nonce = req.nonce;
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2088,6 +2248,17 @@ fn pat_transfer(
                                 )
                             }
                         };
+                        if let Err(e) = verify_pat_request(
+                            "/rpc/pat/transfer",
+                            &req,
+                            &req.public_key,
+                            &req.signature,
+                            &req.chain_id,
+                            req.nonce,
+                            &from,
+                        ) {
+                            return pat_auth_error(e);
+                        }
                         let to = match hex_to_address(&req.to) {
                             Ok(a) => a,
                             Err(e) => {
@@ -2104,10 +2275,11 @@ fn pat_transfer(
                             .get_token(&req.symbol)
                             .map(|t| t.transfer_burn_amount(amount))
                             .unwrap_or(0);
-                        let intent =
+                        let mut intent =
                             bleep_pat::PATIntent::transfer(from, req.symbol.clone(), to, amount);
+                        intent.nonce = req.nonce;
                         let mut r = reg.lock();
-                        match r.execute(&intent) {
+                        match r.execute_signed(&intent) {
                             Ok(outcome) => {
                                 let received = outcome.return_value.unwrap_or(0);
                                 warp::reply::with_status(
@@ -2243,12 +2415,16 @@ fn pat_list(
 
 // ── POST /rpc/pat/approve ─────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatApproveReq {
     symbol: String,
     owner: String,
     spender: String,
     amount: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_approve(
@@ -2275,6 +2451,17 @@ fn pat_approve(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/approve",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let spender = match hex_to_address(&req.spender) {
                         Ok(a) => a,
                         Err(e) => {
@@ -2294,10 +2481,10 @@ fn pat_approve(
                         }),
                         15_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2324,11 +2511,15 @@ fn pat_approve(
 
 // ── POST /rpc/pat/freeze ──────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatFreezeReq {
     symbol: String,
     owner: String,
     frozen: bool,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_freeze(
@@ -2355,6 +2546,17 @@ fn pat_freeze(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/freeze",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::Freeze(bleep_pat::FreezeIntent {
@@ -2363,10 +2565,10 @@ fn pat_freeze(
                         }),
                         10_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2391,11 +2593,15 @@ fn pat_freeze(
 
 // ── POST /rpc/pat/set-burn-rate ───────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatSetBurnRateReq {
     symbol: String,
     owner: String,
     new_rate_bps: u16,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_set_burn_rate(
@@ -2424,6 +2630,17 @@ fn pat_set_burn_rate(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/set-burn-rate",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::UpdateBurnRate(bleep_pat::UpdateBurnRateIntent {
@@ -2432,10 +2649,10 @@ fn pat_set_burn_rate(
                         }),
                         10_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2460,11 +2677,15 @@ fn pat_set_burn_rate(
 
 // ── POST /rpc/pat/set-owner ───────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatSetOwnerReq {
     symbol: String,
     owner: String,
     new_owner: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_set_owner(
@@ -2492,6 +2713,17 @@ fn pat_set_owner(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/set-owner",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let new_owner = match hex_to_address(&req.new_owner) {
                         Ok(a) => a,
                         Err(e) => {
@@ -2511,10 +2743,10 @@ fn pat_set_owner(
                         ),
                         20_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -3215,6 +3447,138 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use warp::test::request;
 
+    fn sign_pat_request<T: Serialize>(
+        endpoint: &str,
+        request: &T,
+        chain_id: &str,
+        nonce: u64,
+        secret_key: &[u8],
+    ) -> Vec<u8> {
+        let mut request = serde_json::to_value(request).unwrap();
+        request.as_object_mut().unwrap().remove("signature");
+        let payload = serde_json::to_vec(&PatSignedPayload {
+            domain: "BLEEP:PAT:INTENT:V1",
+            endpoint: endpoint.to_string(),
+            chain_id: chain_id.to_string(),
+            nonce,
+            request,
+        })
+        .unwrap();
+        sign_tx_payload(&payload, secret_key).unwrap()
+    }
+
+    #[test]
+    fn pat_request_requires_wallet_signature_and_principal_binding() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let owner = hex_to_address(&bleep_crypto::derive_account_address(&public_key)).unwrap();
+        let mut request = PatTransferReq {
+            symbol: "USDB".into(),
+            from: address_to_hex(&owner),
+            to: "01".into(),
+            amount: "10".into(),
+            public_key: hex::encode(&public_key),
+            signature: String::new(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.into(),
+            nonce: 1,
+        };
+        request.signature = hex::encode(sign_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.chain_id,
+            request.nonce,
+            &secret_key,
+        ));
+
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &owner,
+        )
+        .is_ok());
+        assert!(verify_pat_request(
+            "/rpc/pat/burn",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &owner,
+        )
+        .is_err());
+
+        let mut forged_owner = owner;
+        forged_owner[0] ^= 1;
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &forged_owner,
+        )
+        .is_err());
+
+        request.amount = "11".into();
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &owner,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pat_request_rejects_wrong_chain_and_zero_nonce() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let owner = hex_to_address(&bleep_crypto::derive_account_address(&public_key)).unwrap();
+        let mut request = PatTransferReq {
+            symbol: "USDB".into(),
+            from: address_to_hex(&owner),
+            to: "01".into(),
+            amount: "10".into(),
+            public_key: hex::encode(&public_key),
+            signature: String::new(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.into(),
+            nonce: 1,
+        };
+        request.signature = hex::encode(sign_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.chain_id,
+            request.nonce,
+            &secret_key,
+        ));
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            "another-chain",
+            request.nonce,
+            &owner,
+        )
+        .is_err());
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            0,
+            &owner,
+        )
+        .is_err());
+    }
+
     #[tokio::test]
     async fn rpc_tx_history_returns_pending_transactions() {
         let pool = TransactionPool::new(10);
@@ -3550,6 +3914,53 @@ mod base64 {
 #[cfg(test)]
 mod tests_sprint8 {
     use super::*;
+
+    #[tokio::test]
+    async fn unbound_operator_cannot_unstake_another_validators_identity() {
+        let secret: Vec<u8> = (0..32).collect();
+        let auth = Arc::new(AuthService::new(secret).unwrap());
+        auth.rbac
+            .assign_role("operator-session", bleep_auth::Role::NodeOperator);
+        let token = auth
+            .sessions
+            .issue(
+                "operator-session",
+                &[bleep_auth::Role::NodeOperator],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+
+        let mut validators = ValidatorRegistry::new();
+        validators
+            .register_validator(
+                ValidatorIdentity::new(
+                    "victim-validator".into(),
+                    vec![0; 1568],
+                    "signing-key".into(),
+                    1_000,
+                    0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        validators.activate_validator("victim-validator").unwrap();
+
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_auth_service(auth)
+                .with_validator_registry(Arc::new(Mutex::new(validators))),
+        );
+        let response = warp::test::request()
+            .method("POST")
+            .path("/rpc/validator/unstake")
+            .header("authorization", format!("Bearer {}", token.token))
+            .json(&serde_json::json!({"validator_id": "victim-validator"}))
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), warp::http::StatusCode::FORBIDDEN);
+    }
 
     #[tokio::test]
     async fn dapp_session_cannot_rotate_jwt() {

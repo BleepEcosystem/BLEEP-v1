@@ -77,6 +77,7 @@ The audit target consists of the following crates:
 | CON-03 | Sybil validator set takeover | bleep-consensus | Proof-of-stake; minimum stake per validator | Economically expensive, not cryptographically prevented |
 | CON-04 | Block withholding (selfish mining) | bleep-consensus | 3-second timeout; peer reputation | Subtle grinding attacks possible |
 | CON-05 | Nothing-at-stake during fork | bleep-consensus | Slashing penalises signing both chains | Edge: slashing evidence must arrive before unbonding |
+| CON-06 | Unauthorized validator exit request | bleep-rpc, bleep-auth | Require active proof-verified operator binding or explicit system-admin permission | Compromise of the bound operator or system-admin account |
 
 ### 3.3 State / Economic Threats
 
@@ -88,6 +89,7 @@ The audit target consists of the following crates:
 | ST-04 | Oracle price manipulation | bleep-economics | 3-of-5 quorum; signature verification; 5-min staleness | Majority of oracle operators colluding |
 | ST-05 | Inflation bypass | bleep-economics | Hard cap 200M BLEEP; epoch-gated emission | Governor parameter change could raise cap |
 | ST-06 | PAT token supply overflow | bleep-pat | supply_cap enforced on mint; u128 arithmetic | Overflow not possible with checked arithmetic |
+| ST-07 | PAT caller impersonation | bleep-rpc, bleep-pat | Verify wallet signature, principal binding, chain ID, endpoint, and single-use nonce before mutation | Nonce replay tracking is scoped to the running PAT registry |
 
 ### 3.4 Cross-Chain / Bridge Threats
 
@@ -142,6 +144,7 @@ The audit target consists of the following crates:
 - **I-CON2:** Double-signing the same slot with different block hashes is slashable and detectable.
 - **I-CON3:** The chain never forks past a finalised checkpoint.
 - **I-CON4:** Block proposer is selected proportional to stake in the current epoch.
+- **I-CON5:** Validator exit requires an active proof-verified operator binding unless an explicit system-admin permission is used.
 
 ### Economic invariants
 - **I-E1:** Base fee cannot increase by more than 12.5% in a single block.
@@ -153,6 +156,7 @@ The audit target consists of the following crates:
 - **I-PAT1:** A PAT token's current_supply ≤ supply_cap at all times.
 - **I-PAT2:** Burn rate may not exceed 1000 bps (10%) per transfer.
 - **I-PAT3:** Only the token owner may mint new supply.
+- **I-PAT4:** RPC mutations require a chain- and endpoint-bound wallet signature whose signer matches the intent principal; signed nonces cannot be reused within the running registry.
 
 ### Bridge invariants
 - **I-BR1:** An executor's bond is slashed 30% if a committed intent is not fulfilled within timeout.
