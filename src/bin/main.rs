@@ -235,6 +235,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 2: State + genesis ───────────────────────────────────────────────
     info!("⛓  [2/16] Initialising genesis block and persistent state…");
 
+    let chain_id = std::env::var("BLEEP_CHAIN_ID")
+        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
     let state_dir =
         std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
 
@@ -244,8 +246,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
             s
         }
         Err(e) => {
-            warn!("  ⚠️  StateManager open failed ({}), using temp dir", e);
-            StateManager::new()
+            return Err(format!(
+                "Persistent StateManager at {} could not be opened: {}",
+                state_dir, e
+            )
+            .into());
         }
     };
 
@@ -274,20 +279,35 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 
     // Rebuild the Sparse Merkle Trie from the persisted DB state
-    if let Err(e) = state.rebuild_trie_from_db() {
-        warn!("  ⚠️  Trie rebuild: {}", e);
+    state
+        .rebuild_trie_from_db()
+        .map_err(|e| format!("Persisted state trie rebuild failed: {e}"))?;
+
+    let genesis = Block::genesis();
+    let genesis_hash = genesis.compute_hash();
+    let canonical_blocks = state
+        .load_canonical_blocks(&chain_id, &genesis_hash, |block: &Block| {
+            block.compute_hash()
+        })
+        .map_err(|e| format!("Canonical chain recovery failed: {e}"))?;
+    if canonical_blocks
+        .last()
+        .map(|block| block.index)
+        .unwrap_or(0)
+        != state.block_height()
+    {
+        return Err(format!(
+            "Persisted account height {} does not match recovered canonical chain",
+            state.block_height()
+        )
+        .into());
     }
 
     let state = Arc::new(Mutex::new(state));
 
     // Transaction pools
-    let chain_id = std::env::var("BLEEP_CHAIN_ID")
-        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
     let tx_pool = TransactionPool::new_with_chain_id(10_000, chain_id.clone());
     let mempool = Mempool::new();
-
-    // Genesis block (unsigned — trust anchor)
-    let genesis = Block::new(0, vec![], "0".to_string());
 
     let blockchain = {
         let mut core_state = CoreBlockchainState::default();
@@ -302,7 +322,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 ),
             }
         }
-        Blockchain::new(genesis, core_state, tx_pool.clone())
+        let mut blockchain = Blockchain::new(genesis, core_state, tx_pool.clone());
+        blockchain
+            .restore_blocks(canonical_blocks)
+            .map_err(|e| format!("Canonical block validation failed: {e}"))?;
+        blockchain
     };
     let blockchain = Arc::new(RwLock::new(blockchain));
 
@@ -352,9 +376,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
             0,             // genesis epoch
         );
         match genesis_validator {
-            Ok(mut v) => {
-                let _ = v.activate();
-                let _ = reg.register_validator(v);
+            Ok(v) => {
+                reg.register_validator(v)
+                    .and_then(|_| reg.activate_validator(&validator_id))
+                    .map_err(|e| format!("Genesis validator activation failed: {e}"))?;
                 info!(
                     "  ✅ Genesis validator registered: id={} (Kyber-1024 + SPHINCS+ PKs wired)",
                     validator_id
@@ -538,7 +563,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(Arc::clone(&p2p_node)), // direct gossip broadcast
         Some(sal_bridge.clone()),
     );
-    block_producer.set_chain_id(chain_id);
+    block_producer.set_chain_id(chain_id.clone());
+    block_producer.set_validator_registry(Arc::clone(&validator_registry));
+    let canonical_commit_lock = Arc::new(tokio::sync::Mutex::new(()));
+    block_producer.set_canonical_commit_lock(Arc::clone(&canonical_commit_lock));
     let block_producer = Arc::new(block_producer);
 
     // Subscribe a second receiver for GossipBridge BEFORE the producer starts
@@ -691,7 +719,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let inbound_blockchain = Arc::clone(&blockchain);
     let inbound_p2p_node = Arc::clone(&p2p_node);
     let inbound_state = Arc::clone(&state);
-    let inbound_pk = sphincs_pk.clone(); // SPHINCS+ PK used as fallback block verifier key
+    let inbound_validators = Arc::clone(&validator_registry);
+    let inbound_chain_id = chain_id.clone();
+    let inbound_genesis_hash = genesis_hash.clone();
+    let inbound_commit_lock = Arc::clone(&canonical_commit_lock);
 
     let inbound_handle = tokio::spawn(async move {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
@@ -718,8 +749,35 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         }
                     };
 
-                    // Block-level validation: Fiat-Shamir ZKP + validator sig
-                    let valid = BlockValidator::validate_block(&block, &inbound_pk);
+                    let Some(signer_pk) = block
+                        .validator_signature
+                        .get(..bleep_core::block::SPHINCS_PK_LEN)
+                    else {
+                        warn!(
+                            "[InboundBlockHandler] Block {} has no validator signing key",
+                            block.index
+                        );
+                        continue;
+                    };
+                    let signer_pk = signer_pk.to_vec();
+                    let authorized_signer = inbound_validators
+                        .lock()
+                        .has_active_signing_key(&hex::encode(&signer_pk));
+                    if !authorized_signer {
+                        warn!(
+                            "[InboundBlockHandler] Block {} signer is not in the active validator set",
+                            block.index
+                        );
+                        continue;
+                    }
+
+                    // Verify the signature against the key embedded by the signer,
+                    // then authorize that key against the local active validator set.
+                    let valid = BlockValidator::validate_block(&block, &signer_pk)
+                        && block
+                            .transactions
+                            .iter()
+                            .all(|tx| tx.chain_id == inbound_chain_id);
                     if !valid {
                         warn!(
                             "[InboundBlockHandler] Block {} failed block-level validation — discarding",
@@ -744,14 +802,59 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
 
                     // Insert validated block
+                    let _canonical_guard = inbound_commit_lock.lock().await;
                     let accepted = {
                         let mut chain = inbound_blockchain.write().unwrap();
-                        chain.add_block(block.clone(), &inbound_pk)
+                        let Some(tip) = chain.latest_block() else {
+                            continue;
+                        };
+                        if block.index != tip.index.saturating_add(1)
+                            || !BlockValidator::validate_full_block(&tip, &block, &signer_pk)
+                        {
+                            false
+                        } else {
+                            let mut staged_core_state = chain.state.read().unwrap().clone();
+                            if staged_core_state.apply_block(&block).is_err() {
+                                warn!(
+                                    "[InboundBlockHandler] Block {} failed core-state preflight",
+                                    block.index
+                                );
+                                continue;
+                            }
+                            let mut state = inbound_state.lock();
+                            let transfers: Vec<bleep_state::state_manager::CanonicalTransfer> =
+                                block
+                                    .transactions
+                                    .iter()
+                                    .map(|tx| bleep_state::state_manager::CanonicalTransfer {
+                                        sender: tx.sender.clone(),
+                                        receiver: tx.receiver.clone(),
+                                        amount: tx.amount,
+                                        nonce: tx.nonce,
+                                    })
+                                    .collect();
+                            match state.apply_canonical_block(
+                                &block,
+                                block.index,
+                                &block.compute_hash(),
+                                &block.previous_hash,
+                                &inbound_chain_id,
+                                &inbound_genesis_hash,
+                                &transfers,
+                            ) {
+                                Ok(()) => chain.add_block(block.clone(), &signer_pk),
+                                Err(e) => {
+                                    warn!(
+                                        "[InboundBlockHandler] Block {} state transition rejected: {}",
+                                        block.index, e
+                                    );
+                                    false
+                                }
+                            }
+                        }
                     };
 
                     if accepted {
-                        // Advance state height to match inbound block
-                        inbound_state.lock().advance_block();
                         info!(
                             "[InboundBlockHandler] ✅ Accepted inbound block {} txs={}",
                             block.index,
@@ -767,7 +870,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    info!("  ✅ BlockProducer online (3s slots, PoS, VM execution, P2P gossip).");
+    info!("  ✅ BlockProducer online (active-set proposer selection, VM execution, P2P gossip).");
+    warn!("  ⚠️  Distributed quorum/finality voting is not wired; produced blocks are not BFT-finalized.");
     info!("  ✅ Scheduler: 20 maintenance tasks registered.");
 
     // ── Step 15: Consensus engine ─────────────────────────────────────────────

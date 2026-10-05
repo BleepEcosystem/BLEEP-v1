@@ -50,6 +50,9 @@ pub fn run_consensus_engine() -> Result<(), Box<dyn std::error::Error>> {
         "Consensus orchestrator initialized in mode: {}",
         mode.as_str()
     );
+    log::warn!(
+        "Consensus orchestrator configuration is initialized only; no distributed vote or quorum-finality loop is running"
+    );
     Ok(())
 }
 

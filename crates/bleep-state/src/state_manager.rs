@@ -6,6 +6,7 @@
 //!   - Snapshot / restore for crash recovery
 //!   - In-memory write-back cache for hot-path performance
 
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
@@ -26,7 +27,10 @@ pub type StateResult<T> = Result<T, StateError>;
 
 // On-disk key prefixes
 const PREFIX_ACCOUNT: &[u8] = b"acct:";
+const PREFIX_BLOCK: &[u8] = b"chain:block:";
 const KEY_HEIGHT: &[u8] = b"sys:block_height";
+const KEY_CHAIN_ID: &[u8] = b"chain:id";
+const KEY_TIP_HASH: &[u8] = b"chain:tip_hash";
 
 /// Persisted account record.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -34,6 +38,23 @@ pub struct AccountState {
     pub balance: u128,
     pub nonce: u64,
     pub code_hash: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CanonicalBlockRecord {
+    index: u64,
+    block_hash: String,
+    previous_hash: String,
+    chain_id: String,
+    body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalTransfer {
+    pub sender: String,
+    pub receiver: String,
+    pub amount: u64,
+    pub nonce: u64,
 }
 
 impl AccountState {
@@ -53,6 +74,13 @@ impl AccountState {
 struct CacheEntry {
     state: AccountState,
     dirty: bool,
+}
+
+#[derive(Clone)]
+pub struct StateCheckpoint {
+    cache: HashMap<String, CacheEntry>,
+    block_height: u64,
+    trie: SparseMerkleTrie,
 }
 
 // ── StateManager ─────────────────────────────────────────────────────────────
@@ -146,15 +174,273 @@ impl StateManager {
         self.block_height
     }
 
-    /// Advance block counter, sync dirty accounts into trie, flush to RocksDB.
-    ///
-    /// Write-batching is used here: all pending account updates are kept in
-    /// memory until block completion, then persisted in a single RocksDB batch.
-    pub fn advance_block(&mut self) {
-        self.block_height += 1;
-        if let Err(e) = self.commit_block() {
-            log::error!("[StateManager] flush failed on advance_block: {}", e);
+    /// Capture in-memory state so an uncommitted block proposal can be undone.
+    pub fn checkpoint(&self) -> StateCheckpoint {
+        StateCheckpoint {
+            cache: self.cache.clone(),
+            block_height: self.block_height,
+            trie: self.trie.clone(),
         }
+    }
+
+    /// Restore a checkpoint after a proposal fails before its durable commit.
+    pub fn restore_checkpoint(&mut self, checkpoint: StateCheckpoint) {
+        self.cache = checkpoint.cache;
+        self.block_height = checkpoint.block_height;
+        self.trie = checkpoint.trie;
+    }
+
+    /// Legacy state-only checkpoint.
+    ///
+    /// A height cannot advance without the corresponding canonical block. Live
+    /// consensus must use `persist_canonical_block` or `apply_canonical_block`.
+    #[deprecated(note = "advance canonical height by committing its block")]
+    pub fn advance_block(&mut self) {
+        if let Err(e) = self.commit_block() {
+            log::error!("[StateManager] legacy state checkpoint failed: {}", e);
+        }
+    }
+
+    /// Persist a locally produced canonical block with current account changes.
+    ///
+    /// The block, account cache, chain ID, tip hash, and height share one
+    /// RocksDB WriteBatch. The caller must have validated and applied the
+    /// block's execution effects to this StateManager before calling.
+    pub fn persist_canonical_block<T: serde::Serialize>(
+        &mut self,
+        block: &T,
+        index: u64,
+        block_hash: &str,
+        previous_hash: &str,
+        chain_id: &str,
+        genesis_hash: &str,
+    ) -> StateResult<()> {
+        self.check_next_canonical_block(index, previous_hash, chain_id, genesis_hash)?;
+        self.block_height = index;
+        self.sync_trie();
+        if let Err(e) =
+            self.flush_with_canonical_block(block, index, block_hash, previous_hash, chain_id)
+        {
+            self.block_height = index.saturating_sub(1);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Validate, execute, and atomically persist an inbound canonical block.
+    pub fn apply_canonical_block<T: serde::Serialize>(
+        &mut self,
+        block: &T,
+        index: u64,
+        block_hash: &str,
+        previous_hash: &str,
+        chain_id: &str,
+        genesis_hash: &str,
+        transfers: &[CanonicalTransfer],
+    ) -> StateResult<()> {
+        self.check_next_canonical_block(index, previous_hash, chain_id, genesis_hash)?;
+
+        let original_cache = self.cache.clone();
+        for transfer in transfers {
+            if self.get_nonce(&transfer.sender) != transfer.nonce
+                || !self.apply_transfer(
+                    &transfer.sender,
+                    &transfer.receiver,
+                    transfer.amount as u128,
+                )
+            {
+                self.cache = original_cache.clone();
+                return Err(StateError::Storage(format!(
+                    "block {} transaction state transition rejected for {}",
+                    index, transfer.sender
+                )));
+            }
+        }
+
+        self.block_height = index;
+        self.sync_trie();
+        if let Err(e) =
+            self.flush_with_canonical_block(block, index, block_hash, previous_hash, chain_id)
+        {
+            self.block_height = index.saturating_sub(1);
+            self.cache = original_cache;
+            self.trie = SparseMerkleTrie::new();
+            self.rebuild_trie_from_db()?;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Load persisted non-genesis blocks and verify the canonical chain index,
+    /// parent links, chain ID, and persisted tip metadata.
+    pub fn load_canonical_blocks<T, F>(
+        &self,
+        chain_id: &str,
+        genesis_hash: &str,
+        block_hash: F,
+    ) -> StateResult<Vec<T>>
+    where
+        T: DeserializeOwned,
+        F: Fn(&T) -> String,
+    {
+        let stored_chain_id = self
+            .db
+            .get(KEY_CHAIN_ID)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        let stored_tip = self
+            .db
+            .get(KEY_TIP_HASH)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        let mut records: Vec<CanonicalBlockRecord> = Vec::new();
+        let mut blocks = Vec::new();
+        for item in self.db.prefix_iterator(PREFIX_BLOCK) {
+            let (key, value) = item.map_err(|e| StateError::Storage(e.to_string()))?;
+            if !key.starts_with(PREFIX_BLOCK) {
+                break;
+            }
+            let record: CanonicalBlockRecord = serde_json::from_slice(&value)
+                .map_err(|e| StateError::Serialisation(e.to_string()))?;
+            let expected_index = records.len() as u64 + 1;
+            let expected_key =
+                [PREFIX_BLOCK, format!("{:020}", expected_index).as_bytes()].concat();
+            let expected_parent = records
+                .last()
+                .map(|record| record.block_hash.clone())
+                .unwrap_or_else(|| genesis_hash.to_string());
+            if key.as_ref() != expected_key
+                || record.index != expected_index
+                || record.previous_hash != expected_parent
+                || record.chain_id != chain_id
+            {
+                return Err(StateError::Storage(format!(
+                    "persisted canonical block sequence is invalid at height {}",
+                    record.index
+                )));
+            }
+            let block: T = serde_json::from_slice(&record.body)
+                .map_err(|e| StateError::Serialisation(e.to_string()))?;
+            if record.block_hash != block_hash(&block) {
+                return Err(StateError::Storage(format!(
+                    "persisted canonical block hash does not match body at height {}",
+                    record.index
+                )));
+            }
+            blocks.push(block);
+            records.push(record);
+        }
+
+        if self.block_height == 0 {
+            if !blocks.is_empty() || stored_chain_id.is_some() || stored_tip.is_some() {
+                return Err(StateError::Storage(
+                    "persisted canonical chain metadata is inconsistent at height zero".into(),
+                ));
+            }
+            return Ok(blocks);
+        }
+
+        if stored_chain_id.as_deref() != Some(chain_id.as_bytes()) {
+            return Err(StateError::Storage(
+                "persisted chain ID does not match configured chain ID".into(),
+            ));
+        }
+        let expected_tip = records.last().map(|record| record.block_hash.as_str());
+        if records.len() as u64 != self.block_height
+            || expected_tip
+                != stored_tip
+                    .as_deref()
+                    .and_then(|v| std::str::from_utf8(v).ok())
+        {
+            return Err(StateError::Storage(format!(
+                "persisted block history does not match state height {}",
+                self.block_height
+            )));
+        }
+        Ok(blocks)
+    }
+
+    fn check_next_canonical_block(
+        &self,
+        index: u64,
+        previous_hash: &str,
+        chain_id: &str,
+        genesis_hash: &str,
+    ) -> StateResult<()> {
+        let expected_height = self
+            .block_height
+            .checked_add(1)
+            .ok_or_else(|| StateError::Storage("canonical block height overflow".into()))?;
+        if index != expected_height {
+            return Err(StateError::Storage(format!(
+                "canonical block height mismatch: expected {}, got {}",
+                expected_height, index
+            )));
+        }
+
+        let stored_chain_id = self
+            .db
+            .get(KEY_CHAIN_ID)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        if stored_chain_id
+            .as_deref()
+            .is_some_and(|id| id != chain_id.as_bytes())
+        {
+            return Err(StateError::Storage(
+                "refusing to append block from a different chain ID".into(),
+            ));
+        }
+
+        let stored_tip = self
+            .db
+            .get(KEY_TIP_HASH)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        let expected_parent = stored_tip
+            .as_deref()
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .unwrap_or(genesis_hash);
+        if previous_hash != expected_parent {
+            return Err(StateError::Storage(format!(
+                "canonical block {} does not extend the persisted tip",
+                index
+            )));
+        }
+        Ok(())
+    }
+
+    fn flush_with_canonical_block<T: serde::Serialize>(
+        &self,
+        block: &T,
+        index: u64,
+        block_hash: &str,
+        previous_hash: &str,
+        chain_id: &str,
+    ) -> StateResult<()> {
+        let block_key = [PREFIX_BLOCK, format!("{:020}", index).as_bytes()].concat();
+        let record = CanonicalBlockRecord {
+            index,
+            block_hash: block_hash.to_string(),
+            previous_hash: previous_hash.to_string(),
+            chain_id: chain_id.to_string(),
+            body: serde_json::to_vec(block)
+                .map_err(|e| StateError::Serialisation(e.to_string()))?,
+        };
+        let block_value =
+            serde_json::to_vec(&record).map_err(|e| StateError::Serialisation(e.to_string()))?;
+        let mut batch = rocksdb::WriteBatch::default();
+        for (addr, entry) in &self.cache {
+            if entry.dirty {
+                let value = serde_json::to_vec(&entry.state)
+                    .map_err(|e| StateError::Serialisation(e.to_string()))?;
+                batch.put(account_key(addr), value);
+            }
+        }
+        batch.put(KEY_HEIGHT, index.to_le_bytes());
+        batch.put(KEY_CHAIN_ID, chain_id.as_bytes());
+        batch.put(KEY_TIP_HASH, block_hash.as_bytes());
+        batch.put(block_key, block_value);
+        self.db
+            .write(batch)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        Ok(())
     }
 
     /// Commit all pending in-memory state changes for the current block.
@@ -580,6 +866,105 @@ mod tests {
     }
 
     #[test]
+    fn canonical_blocks_and_tip_survive_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "bleep-state-chain-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let genesis_hash = "genesis-hash";
+        let chain_id = "test-chain";
+        let block = "block-one";
+        let block_hash = "block-one-hash";
+
+        let mut state = StateManager::open(&path).expect("open state");
+        state.set_balance("alice", 123);
+        state
+            .persist_canonical_block(&block, 1, block_hash, genesis_hash, chain_id, genesis_hash)
+            .expect("persist block");
+        drop(state);
+
+        let reopened = StateManager::open(&path).expect("reopen state");
+        assert_eq!(reopened.block_height(), 1);
+        assert_eq!(reopened.get_balance("alice"), 123);
+        let blocks: Vec<String> = reopened
+            .load_canonical_blocks(chain_id, &genesis_hash, |block| format!("{block}-hash"))
+            .expect("load canonical history");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], block);
+        drop(reopened);
+    }
+
+    #[test]
+    fn inbound_canonical_transfer_is_atomic_and_survives_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "bleep-state-inbound-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let genesis_hash = "genesis-hash";
+        let chain_id = "test-chain";
+        let block_hash = "block-one-hash";
+        let mut state = StateManager::open(&path).expect("open state");
+        state.set_balance("alice", 50);
+
+        let rejected_transfer = CanonicalTransfer {
+            sender: "alice".into(),
+            receiver: "bob".into(),
+            amount: 12,
+            nonce: 1,
+        };
+        assert!(state
+            .apply_canonical_block(
+                &"block-one",
+                1,
+                block_hash,
+                genesis_hash,
+                chain_id,
+                genesis_hash,
+                &[rejected_transfer],
+            )
+            .is_err());
+        assert_eq!(state.block_height(), 0);
+        assert_eq!(state.get_balance("alice"), 50);
+        assert_eq!(state.get_balance("bob"), 0);
+
+        let valid_transfer = CanonicalTransfer {
+            sender: "alice".into(),
+            receiver: "bob".into(),
+            amount: 12,
+            nonce: 0,
+        };
+        state
+            .apply_canonical_block(
+                &"block-one",
+                1,
+                block_hash,
+                genesis_hash,
+                chain_id,
+                genesis_hash,
+                &[valid_transfer],
+            )
+            .expect("apply inbound block");
+        drop(state);
+
+        let reopened = StateManager::open(&path).expect("reopen state");
+        assert_eq!(reopened.block_height(), 1);
+        assert_eq!(reopened.get_balance("alice"), 38);
+        assert_eq!(reopened.get_balance("bob"), 12);
+        assert_eq!(reopened.get_nonce("alice"), 1);
+        drop(reopened);
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
     fn total_supply_includes_persisted_accounts_after_restart() {
         let path = std::env::temp_dir().join(format!(
             "bleep-state-supply-{}-{}",
@@ -629,11 +1014,12 @@ mod tests {
     }
 
     #[test]
-    fn advance_block_persists_height() {
+    fn legacy_advance_block_does_not_advance_canonical_height() {
         let mut m = fresh();
         assert_eq!(m.block_height(), 0);
+        #[allow(deprecated)]
         m.advance_block();
-        assert_eq!(m.block_height(), 1);
+        assert_eq!(m.block_height(), 0);
     }
 
     #[test]

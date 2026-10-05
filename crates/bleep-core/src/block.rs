@@ -221,6 +221,13 @@ pub struct Block {
 }
 
 impl Block {
+    /// Construct the deterministic unsigned genesis block.
+    pub fn genesis() -> Self {
+        let mut genesis = Self::new(0, vec![], "0".to_string());
+        genesis.timestamp = 0;
+        genesis
+    }
+
     pub fn new(index: u64, transactions: Vec<Transaction>, previous_hash: String) -> Self {
         let timestamp = Utc::now().timestamp() as u64;
         let merkle_root = Block::calculate_merkle_root(&transactions);
@@ -520,7 +527,8 @@ impl Block {
             log::error!("Extended STARK: sig_count mismatch");
             return false;
         }
-        let expected_merkle_root_hash: [u8; 32] = Sha3_256::digest(self.merkle_root.as_bytes()).into();
+        let expected_merkle_root_hash: [u8; 32] =
+            Sha3_256::digest(self.merkle_root.as_bytes()).into();
         if pub_inputs.merkle_root_hash != expected_merkle_root_hash {
             log::error!("Extended STARK: merkle_root_hash mismatch");
             return false;

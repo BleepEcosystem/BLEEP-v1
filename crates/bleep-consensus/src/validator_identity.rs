@@ -441,6 +441,15 @@ impl ValidatorRegistry {
             .collect()
     }
 
+    /// Check whether `signing_key_id` belongs to an active validator.
+    pub fn has_active_signing_key(&self, signing_key_id: &str) -> bool {
+        self.get_active_validators().iter().any(|validator| {
+            validator
+                .signing_key_id
+                .eq_ignore_ascii_case(signing_key_id)
+        })
+    }
+
     /// Get total stake of all active validators.
     pub fn total_active_stake(&self) -> u128 {
         self.total_active_stake

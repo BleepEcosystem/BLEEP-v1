@@ -78,6 +78,7 @@ The audit target consists of the following crates:
 | CON-04 | Block withholding (selfish mining) | bleep-consensus | 3-second timeout; peer reputation | Subtle grinding attacks possible |
 | CON-05 | Nothing-at-stake during fork | bleep-consensus | Slashing penalises signing both chains | Edge: slashing evidence must arrive before unbonding |
 | CON-06 | Unauthorized validator exit request | bleep-rpc, bleep-auth | Require active proof-verified operator binding or explicit system-admin permission | Compromise of the bound operator or system-admin account |
+| CON-07 | Block proposal without distributed finality | bleep-consensus | Active-set deterministic proposer selection and signer checks | Quorum voting/finality is not wired; a valid signature alone is not BFT finality |
 
 ### 3.3 State / Economic Threats
 
@@ -90,6 +91,8 @@ The audit target consists of the following crates:
 | ST-05 | Inflation bypass | bleep-economics | Hard cap 200M BLEEP; epoch-gated emission | Governor parameter change could raise cap |
 | ST-06 | PAT token supply overflow | bleep-pat | supply_cap enforced on mint; u128 arithmetic | Overflow not possible with checked arithmetic |
 | ST-07 | PAT caller impersonation | bleep-rpc, bleep-pat | Verify wallet signature, principal binding, chain ID, endpoint, and single-use nonce before mutation | Nonce replay tracking is scoped to the running PAT registry |
+| ST-08 | Restart with missing or inconsistent canonical history | bleep-state, bleep-core | Persist block bodies, parent/tip hashes, chain ID, account state, and height in one RocksDB batch; validate history before startup | Existing databases with nonzero height but no canonical history fail closed and require migration |
+| ST-09 | Invalid inbound block state application | bleep-rpc, bleep-state | Require an active validator signer, chain/link validation, transaction verification, nonce/balance checks, and atomic state/history persistence | Validator-set distribution and quorum confirmation remain incomplete |
 
 ### 3.4 Cross-Chain / Bridge Threats
 
@@ -145,6 +148,7 @@ The audit target consists of the following crates:
 - **I-CON3:** The chain never forks past a finalised checkpoint.
 - **I-CON4:** Block proposer is selected proportional to stake in the current epoch.
 - **I-CON5:** Validator exit requires an active proof-verified operator binding unless an explicit system-admin permission is used.
+- **I-CON6:** A block proposal is not final unless it has the configured distributed quorum certificate; the current live runner does not yet implement this invariant.
 
 ### Economic invariants
 - **I-E1:** Base fee cannot increase by more than 12.5% in a single block.
@@ -157,6 +161,11 @@ The audit target consists of the following crates:
 - **I-PAT2:** Burn rate may not exceed 1000 bps (10%) per transfer.
 - **I-PAT3:** Only the token owner may mint new supply.
 - **I-PAT4:** RPC mutations require a chain- and endpoint-bound wallet signature whose signer matches the intent principal; signed nonces cannot be reused within the running registry.
+
+### Durable chain invariants
+- **I-CHAIN1:** The persisted block height, canonical block history, chain ID, tip hash, and account changes advance in one RocksDB batch.
+- **I-CHAIN2:** Startup rejects a persisted height or tip that does not match the recovered, linked canonical block history.
+- **I-CHAIN3:** Inbound blocks must be signed by an active registered validator key and extend the exact local tip.
 
 ### Bridge invariants
 - **I-BR1:** An executor's bond is slashed 30% if a committed intent is not fulfilled within timeout.
