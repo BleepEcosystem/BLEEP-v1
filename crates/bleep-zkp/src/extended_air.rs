@@ -98,7 +98,7 @@ pub const COL_PAD_END: usize = 67; // inclusive
 pub const NUM_TRANSITION_CONSTRAINTS: usize = 67;
 
 /// Number of boundary assertions returned by `get_assertions`.
-pub const NUM_ASSERTIONS: usize = 14;
+pub const NUM_ASSERTIONS: usize = 20;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility: encode 32-byte hash into two f128 field elements
@@ -198,12 +198,12 @@ pub struct ExtendedBlockValidityAir {
     pi_merkle_root_lo: BaseElement,
     pi_validator_pk_hi: BaseElement,
     pi_validator_pk_lo: BaseElement,
-    _pi_sk_seed_hash_hi: BaseElement,
-    _pi_sk_seed_hash_lo: BaseElement,
-    _pi_block_hash_hi: BaseElement,
-    _pi_block_hash_lo: BaseElement,
-    _pi_smt_root_hi: BaseElement,
-    _pi_smt_root_lo: BaseElement,
+    pi_sk_seed_hash_hi: BaseElement,
+    pi_sk_seed_hash_lo: BaseElement,
+    pi_block_hash_hi: BaseElement,
+    pi_block_hash_lo: BaseElement,
+    pi_smt_root_hi: BaseElement,
+    pi_smt_root_lo: BaseElement,
     pi_sig_root_hi: BaseElement,
     pi_sig_root_lo: BaseElement,
     pi_sig_count: BaseElement,
@@ -260,12 +260,12 @@ impl Air for ExtendedBlockValidityAir {
             pi_merkle_root_lo: bytes_lo(&pub_inputs.merkle_root_hash),
             pi_validator_pk_hi: bytes_hi(&pub_inputs.validator_pk_hash),
             pi_validator_pk_lo: bytes_lo(&pub_inputs.validator_pk_hash),
-            _pi_sk_seed_hash_hi: bytes_hi(&pub_inputs.sk_seed_hash),
-            _pi_sk_seed_hash_lo: bytes_lo(&pub_inputs.sk_seed_hash),
-            _pi_block_hash_hi: bytes_hi(&pub_inputs.block_hash),
-            _pi_block_hash_lo: bytes_lo(&pub_inputs.block_hash),
-            _pi_smt_root_hi: bytes_hi(&pub_inputs.smt_root),
-            _pi_smt_root_lo: bytes_lo(&pub_inputs.smt_root),
+            pi_sk_seed_hash_hi: bytes_hi(&pub_inputs.sk_seed_hash),
+            pi_sk_seed_hash_lo: bytes_lo(&pub_inputs.sk_seed_hash),
+            pi_block_hash_hi: bytes_hi(&pub_inputs.block_hash),
+            pi_block_hash_lo: bytes_lo(&pub_inputs.block_hash),
+            pi_smt_root_hi: bytes_hi(&pub_inputs.smt_root),
+            pi_smt_root_lo: bytes_lo(&pub_inputs.smt_root),
             pi_sig_root_hi: bytes_hi(&pub_inputs.sig_commitment_root),
             pi_sig_root_lo: bytes_lo(&pub_inputs.sig_commitment_root),
             pi_sig_count: BaseElement::new(pub_inputs.sig_count as u128),
@@ -343,6 +343,12 @@ impl Air for ExtendedBlockValidityAir {
             Assertion::single(COL_MERKLE_ROOT_LO, 0, self.pi_merkle_root_lo),
             Assertion::single(COL_VALIDATOR_PK_HI, 0, self.pi_validator_pk_hi),
             Assertion::single(COL_VALIDATOR_PK_LO, 0, self.pi_validator_pk_lo),
+            Assertion::single(COL_SK_SEED_HASH_HI, 0, self.pi_sk_seed_hash_hi),
+            Assertion::single(COL_SK_SEED_HASH_LO, 0, self.pi_sk_seed_hash_lo),
+            Assertion::single(COL_SMT_ROOT_HI, 0, self.pi_smt_root_hi),
+            Assertion::single(COL_SMT_ROOT_LO, 0, self.pi_smt_root_lo),
+            Assertion::single(COL_BLOCK_HASH_HI, 0, self.pi_block_hash_hi),
+            Assertion::single(COL_BLOCK_HASH_LO, 0, self.pi_block_hash_lo),
             // Signature commitment — match public inputs
             Assertion::single(COL_SIG_ROOT_HI, 0, self.pi_sig_root_hi),
             Assertion::single(COL_SIG_ROOT_LO, 0, self.pi_sig_root_lo),

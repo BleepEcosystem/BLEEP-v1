@@ -51,35 +51,49 @@ pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
+    pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
     pub timestamp: u64,
+    pub nonce: u64,
     pub signature: Vec<u8>,
 }
 
 impl Transaction {
     /// Compute the canonical transaction hash used for compact-block propagation.
     pub fn tx_hash(&self) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(self.sender.as_bytes());
-        h.update(self.receiver.as_bytes());
-        h.update(self.amount.to_le_bytes());
-        h.update(self.timestamp.to_le_bytes());
-        h.finalize().into()
+        tx_payload(
+            &self.chain_id,
+            &self.sender,
+            &self.receiver,
+            self.amount,
+            self.timestamp,
+            self.nonce,
+        )
     }
 
     /// Verify the SPHINCS+ transaction signature.
     pub fn verify_signature(&self) -> bool {
         if self.signature.is_empty() {
-            return true; // Legacy / genesis transactions without signatures are accepted.
+            return false;
         }
-        if self.signature.len() < SPHINCS_PK_LEN {
+        if self.signature.len() != VALIDATOR_SIG_LEN || self.chain_id.is_empty() {
             return false;
         }
         let pk_bytes = &self.signature[..SPHINCS_PK_LEN];
         let sig_bytes = &self.signature[SPHINCS_PK_LEN..];
-        let payload = tx_payload(&self.sender, &self.receiver, self.amount, self.timestamp);
+        if bleep_crypto::derive_account_address(pk_bytes) != self.sender {
+            return false;
+        }
+        let payload = tx_payload(
+            &self.chain_id,
+            &self.sender,
+            &self.receiver,
+            self.amount,
+            self.timestamp,
+            self.nonce,
+        );
         verify_tx_signature(&payload, sig_bytes, pk_bytes)
     }
 }
@@ -118,10 +132,12 @@ pub struct BlockHeader {
 /// The full signature is available from the Signature Availability Layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactTransaction {
+    pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
     pub timestamp: u64,
+    pub nonce: u64,
     /// SHA3-256(raw_signature) — matches the corresponding leaf in sig_commitment_root.
     pub sig_hash: [u8; 32],
 }
@@ -283,10 +299,12 @@ impl Block {
                 .iter()
                 .enumerate()
                 .map(|(i, tx)| CompactTransaction {
+                    chain_id: tx.chain_id.clone(),
                     sender: tx.sender.clone(),
                     receiver: tx.receiver.clone(),
                     amount: tx.amount,
                     timestamp: tx.timestamp,
+                    nonce: tx.nonce,
                     sig_hash: sig_hashes.get(i).copied().unwrap_or([0u8; 32]),
                 })
                 .collect(),
@@ -311,7 +329,7 @@ impl Block {
     pub fn compute_hash(&self) -> String {
         let mut h = Sha3_256::new();
         h.update(format!(
-            "{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}",
             self.index,
             self.timestamp,
             self.previous_hash,
@@ -320,7 +338,8 @@ impl Block {
             self.consensus_mode as u8,
             self.protocol_version,
             self.shard_registry_root,
-            self.shard_id
+            self.shard_id,
+            self.shard_state_root
         ));
         // Bind sig_commitment_root into the block hash so the SPHINCS+ signature
         // commits to the SAL root. Non-zero only for blocks with real tx signatures.
@@ -501,6 +520,20 @@ impl Block {
             log::error!("Extended STARK: sig_count mismatch");
             return false;
         }
+        let expected_merkle_root_hash: [u8; 32] = Sha3_256::digest(self.merkle_root.as_bytes()).into();
+        if pub_inputs.merkle_root_hash != expected_merkle_root_hash {
+            log::error!("Extended STARK: merkle_root_hash mismatch");
+            return false;
+        }
+        let expected_smt_root: [u8; 32] = Sha3_256::digest(self.shard_state_root.as_bytes()).into();
+        if pub_inputs.smt_root != expected_smt_root {
+            log::error!("Extended STARK: smt_root mismatch");
+            return false;
+        }
+        if pub_inputs.block_hash != self.compute_hash_bytes() {
+            log::error!("Extended STARK: block_hash mismatch");
+            return false;
+        }
         if pub_inputs.sig_commitment_root != self.sig_commitment_root {
             log::error!("Extended STARK: sig_commitment_root mismatch");
             return false;
@@ -648,34 +681,27 @@ impl Block {
         if transactions.is_empty() {
             return String::new();
         }
-        let mut hashes: Vec<String> = transactions
-            .iter()
-            .map(|tx| {
-                let mut h = Sha3_256::new();
-                h.update(tx.sender.as_bytes());
-                h.update(tx.receiver.as_bytes());
-                h.update(tx.amount.to_le_bytes());
-                h.update(tx.timestamp.to_le_bytes());
-                hex::encode(h.finalize())
-            })
-            .collect();
 
-        while hashes.len() > 1 {
-            if hashes.len() % 2 == 1 {
-                let last = hashes.last().unwrap().clone();
-                hashes.push(last);
+        let mut levels: Vec<[u8; 32]> = transactions.iter().map(|tx| tx.tx_hash()).collect();
+
+        while levels.len() > 1 {
+            if levels.len() % 2 == 1 {
+                let last = *levels.last().unwrap();
+                levels.push(last);
             }
-            hashes = hashes
+
+            levels = levels
                 .chunks(2)
                 .map(|pair| {
                     let mut h = Sha3_256::new();
-                    h.update(pair[0].as_bytes());
-                    h.update(pair[1].as_bytes());
-                    hex::encode(h.finalize())
+                    h.update(pair[0]);
+                    h.update(pair[1]);
+                    h.finalize().into()
                 })
                 .collect();
         }
-        hashes[0].clone()
+
+        hex::encode(levels[0])
     }
 }
 

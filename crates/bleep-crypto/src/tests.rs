@@ -125,7 +125,7 @@ fn asset_recovery_requires_matching_proof_and_approval_threshold() {
 #[test]
 fn transaction_payload_signing_rejects_invalid_key_and_signature() {
     let (public_key, secret_key) = generate_tx_keypair();
-    let payload = tx_payload("Alice", "Bob", 100, 42);
+    let payload = tx_payload("BLEEP-PreTestnet", "Alice", "Bob", 100, 42, 0);
     let signature = sign_tx_payload(&payload, &secret_key).expect("generated key must sign");
 
     assert!(verify_tx_signature(&payload, &signature, &public_key));

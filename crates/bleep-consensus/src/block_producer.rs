@@ -86,6 +86,7 @@ const BLEEP_CHAIN_ID: ChainId = ChainId::Bleep;
 pub struct ProducerConfig {
     pub block_interval_secs: u64,
     pub max_txs_per_block: usize,
+    pub chain_id: String,
     pub validator_id: String,
     /// Full SPHINCS+-SHAKE-256f-simple secret key bytes (128 bytes).
     /// Stored as Vec<u8> because SPHINCS+ SK is 128 bytes, not 32.
@@ -102,6 +103,7 @@ impl Default for ProducerConfig {
         Self {
             block_interval_secs: 3,
             max_txs_per_block: MAX_TXS_PER_BLOCK,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             validator_id: "genesis-validator".to_string(),
             validator_sk: vec![0u8; 128],
             validator_pk: vec![0u8; 64],
@@ -128,6 +130,11 @@ pub struct BlockProducer {
 }
 
 impl BlockProducer {
+    /// Pin transaction execution to the node's configured network chain ID.
+    pub fn set_chain_id(&mut self, chain_id: impl Into<String>) {
+        self.config.chain_id = chain_id.into();
+    }
+
     /// Build a new block producer with a real SPHINCS+-SHAKE-256f-simple keypair.
     ///
     /// `sphincs_sk_bytes` — full SPHINCS+ secret key bytes (128 bytes, from `generate_tx_keypair()`).
@@ -363,9 +370,13 @@ impl BlockProducer {
             let mut state = self.state.lock();
             for (idx, gas, vm_ok, diff) in &vm_results {
                 let zt = &pending[*idx];
-                if !vm_ok {
+                if !vm_ok
+                    || zt.chain_id != self.config.chain_id
+                    || !zt.verify_account_authorization()
+                    || state.get_nonce(&zt.sender) != zt.nonce
+                {
                     warn!(
-                        "[BlockProducer] VM reverted tx {}→{}",
+                        "[BlockProducer] invalid VM result, authorization, chain ID, or nonce for tx {}→{}",
                         zt.sender, zt.receiver
                     );
                     // Track this failed tx for removal from pool
@@ -423,10 +434,12 @@ impl BlockProducer {
 
                 total_gas += gas;
                 block_txs.push(Transaction {
+                    chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
                     timestamp: zt.timestamp,
+                    nonce: zt.nonce,
                     signature: zt.signature.clone(),
                 });
             }
@@ -557,10 +570,12 @@ impl BlockProducer {
         // ── 11: Drain committed txs from pool ─────────────────────────────────
         for tx in &block_txs {
             let tx_id = Self::canonical_tx_id(&ZKTransaction {
+                chain_id: tx.chain_id.clone(),
                 sender: tx.sender.clone(),
                 receiver: tx.receiver.clone(),
                 amount: tx.amount,
                 timestamp: tx.timestamp,
+                nonce: tx.nonce,
                 signature: tx.signature.clone(),
             });
             self.tx_pool.remove_confirmed(&tx_id).await;
@@ -709,10 +724,12 @@ pub fn start_block_producer(
             let txs: Vec<Transaction> = pending
                 .iter()
                 .map(|zt| Transaction {
+                    chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
                     timestamp: zt.timestamp,
+                    nonce: zt.nonce,
                     signature: zt.signature.clone(),
                 })
                 .collect();
@@ -782,23 +799,33 @@ mod real_transaction_benchmark {
 
         let (sender_pk, sender_sk) = generate_tx_keypair();
         let (validator_pk, validator_sk) = generate_tx_keypair();
-        let sender = "bleep1realbenchmarksender";
+        let sender = bleep_crypto::derive_account_address(&sender_pk);
         let receiver = "bleep1realbenchmarkreceiver";
 
         let signing_start = Instant::now();
         let mut transactions = Vec::with_capacity(TRANSACTION_COUNT);
         for index in 0..TRANSACTION_COUNT {
             let timestamp = 1_700_000_000 + index as u64;
-            let payload = tx_payload(sender, receiver, 1, timestamp);
+            let nonce = index as u64;
+            let payload = tx_payload(
+                bleep_crypto::DEFAULT_CHAIN_ID,
+                &sender,
+                receiver,
+                1,
+                timestamp,
+                nonce,
+            );
             let detached = sign_tx_payload(&payload, &sender_sk).expect("transaction signing");
             let mut signature = Vec::with_capacity(sender_pk.len() + detached.len());
             signature.extend_from_slice(&sender_pk);
             signature.extend_from_slice(&detached);
             transactions.push(ZKTransaction {
-                sender: sender.to_string(),
+                chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+                sender: sender.clone(),
                 receiver: receiver.to_string(),
                 amount: 1,
                 timestamp,
+                nonce,
                 signature,
             });
         }

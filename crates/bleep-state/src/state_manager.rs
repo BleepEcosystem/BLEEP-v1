@@ -298,12 +298,36 @@ impl StateManager {
         Ok(new_bal)
     }
 
-    /// Compute total circulating supply by summing all cached account balances.
+    /// Compute total circulating supply from the canonical account set.
     ///
-    /// This is O(n) in the number of cached accounts.  For production use at
-    /// scale, maintain a running total in a dedicated `sys:total_supply` key.
+    /// This must reflect both persisted account entries and any dirty values in
+    /// the in-memory cache, so a restart or a cache flush cannot silently
+    /// undercount supply.
     pub fn total_supply(&self) -> u128 {
-        self.cache.values().map(|e| e.state.balance).sum()
+        let mut balances = HashMap::new();
+
+        for item in self.db.prefix_iterator(PREFIX_ACCOUNT) {
+            let Ok((key, value)) = item else {
+                continue;
+            };
+            if !key.starts_with(PREFIX_ACCOUNT) {
+                break;
+            }
+
+            let Ok(addr) = std::str::from_utf8(&key[PREFIX_ACCOUNT.len()..]) else {
+                continue;
+            };
+            let Ok(acct) = serde_json::from_slice::<AccountState>(&value) else {
+                continue;
+            };
+            balances.insert(addr.to_string(), acct.balance);
+        }
+
+        for (addr, entry) in &self.cache {
+            balances.insert(addr.clone(), entry.state.balance);
+        }
+
+        balances.values().copied().sum()
     }
 
     /// Export account balances from persistent storage and in-memory cache.
@@ -553,6 +577,34 @@ mod tests {
         m.mint("a", 1_000).expect("mint");
         m.mint("b", 2_000).expect("mint");
         assert_eq!(m.total_supply(), 3_000);
+    }
+
+    #[test]
+    fn total_supply_includes_persisted_accounts_after_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "bleep-state-supply-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+
+        let mut first = StateManager::open(&path).expect("state open");
+        first.mint("alice", 1_000).expect("mint");
+        first.commit_block().expect("persist mint");
+        drop(first);
+
+        let reopened = StateManager::open(&path).expect("reopen");
+        assert_eq!(reopened.total_supply(), 1_000);
+        drop(reopened);
+
+        let mut mutated = StateManager::open(&path).expect("reopen writable");
+        mutated.mint("bob", 250).expect("mint second account");
+        mutated.commit_block().expect("persist second mint");
+        assert_eq!(mutated.total_supply(), 1_250);
+
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

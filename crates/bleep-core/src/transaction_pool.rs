@@ -7,11 +7,9 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Minimum signature length: 64-byte pk + at least 100 bytes of sig material.
-const MIN_SIG_LEN: usize = 164;
-
 /// Expected SPHINCS+ public key length for sphincsshake256fsimple: 64 bytes
 const SPHINCS_PK_LEN: usize = 64;
+const SPHINCS_SIG_LEN: usize = 49_856;
 
 // ── TransactionPool ───────────────────────────────────────────────────────────
 
@@ -21,6 +19,8 @@ pub struct TransactionPool {
     pool: Mutex<VecDeque<ZKTransaction>>,
     /// SHA-256 hashes of all transactions ever seen (prevents replay).
     seen_hashes: Mutex<HashSet<[u8; 32]>>,
+    /// Chain ID this pool admits transactions for.
+    chain_id: String,
     /// Maximum number of pending transactions.
     max_size: usize,
 }
@@ -28,9 +28,15 @@ pub struct TransactionPool {
 impl TransactionPool {
     /// Create a new pool with the given capacity limit.
     pub fn new(max_size: usize) -> Arc<Self> {
+        Self::new_with_chain_id(max_size, bleep_crypto::DEFAULT_CHAIN_ID)
+    }
+
+    /// Create a pool pinned to an explicit network chain ID.
+    pub fn new_with_chain_id(max_size: usize, chain_id: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             pool: Mutex::new(VecDeque::with_capacity(max_size.min(65_536))),
             seen_hashes: Mutex::new(HashSet::new()),
+            chain_id: chain_id.into(),
             max_size,
         })
     }
@@ -65,6 +71,14 @@ impl TransactionPool {
             log::error!("[TxPool] Rejected: sender is empty");
             return false;
         }
+        if transaction.chain_id != self.chain_id {
+            log::error!(
+                "[TxPool] Rejected: chain ID mismatch (expected {}, got {})",
+                self.chain_id,
+                transaction.chain_id
+            );
+            return false;
+        }
         if transaction.receiver.is_empty() {
             log::error!("[TxPool] Rejected: receiver is empty");
             return false;
@@ -93,12 +107,11 @@ impl TransactionPool {
 
         // ── Step 3: Signature length check ────────────────────────────────────
         // Reject obviously truncated SPHINCS+ key/signature blobs before verification.
-        if transaction.signature.len() < SPHINCS_PK_LEN + 100 {
-            // At least 64 bytes for PK + some sig
+        if transaction.signature.len() != SPHINCS_PK_LEN + SPHINCS_SIG_LEN {
             log::error!(
-                "[TxPool] Rejected: signature too short ({} bytes, need ≥ {}) from {}",
+                "[TxPool] Rejected: invalid signature length ({} bytes, expected {}) from {}",
                 transaction.signature.len(),
-                SPHINCS_PK_LEN + 100,
+                SPHINCS_PK_LEN + SPHINCS_SIG_LEN,
                 transaction.sender
             );
             return false;
@@ -106,64 +119,12 @@ impl TransactionPool {
 
         // ── Step 4: S-07 — SPHINCS+ cryptographic verification ───────────────
         //
-        // Wire format: signature = pk_bytes(64) || sphincs_detached_sig(49_856)
-        // Canonical payload: SHA3-256(sender || receiver || amount_le8 || timestamp_le8)
-        //
-        // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes and the
-        // detached signature length matches the upstream
-        // `PQCLEAN_SPHINCSSHAKE256FSIMPLE_CLEAN_CRYPTO_BYTES` value.
-        // We split the signature blob into (pk, sig) and verify using the same
-        // tx_payload() function used at signing time.
-
-        if transaction.signature.len() < MIN_SIG_LEN {
+        if !transaction.verify_account_authorization() {
             log::error!(
-                "[TxPool] Rejected: signature too short for SPHINCS+ key (need ≥{} bytes, got {})",
-                MIN_SIG_LEN,
-                transaction.signature.len()
-            );
-            return false;
-        }
-
-        let pk_bytes = &transaction.signature[..SPHINCS_PK_LEN]; // SPHINCS+ PK is 64 bytes
-        let sig_bytes = &transaction.signature[SPHINCS_PK_LEN..];
-
-        eprintln!(
-            "[DEBUG TxPool] Total signature length: {} bytes",
-            transaction.signature.len()
-        );
-        eprintln!("[DEBUG TxPool] PK bytes length: {} bytes", pk_bytes.len());
-        eprintln!("[DEBUG TxPool] Sig bytes length: {} bytes", sig_bytes.len());
-        eprintln!(
-            "[DEBUG TxPool] PK (hex): {}",
-            hex::encode(&pk_bytes[..pk_bytes.len().min(32)])
-        );
-        eprintln!(
-            "[DEBUG TxPool] Payload: sender='{}' receiver='{}' amount={} timestamp={}",
-            transaction.sender, transaction.receiver, transaction.amount, transaction.timestamp
-        );
-
-        let payload = bleep_crypto::tx_signer::tx_payload(
-            &transaction.sender,
-            &transaction.receiver,
-            transaction.amount,
-            transaction.timestamp,
-        );
-
-        eprintln!(
-            "[DEBUG TxPool] Payload hash (32 bytes): {}",
-            hex::encode(payload)
-        );
-
-        if !bleep_crypto::tx_signer::verify_tx_signature(&payload, sig_bytes, pk_bytes) {
-            log::error!(
-                "[TxPool] S-07: SPHINCS+ verification FAILED — tx from {} to {} amount {} rejected",
+                "[TxPool] Rejected: SPHINCS+ authorization failed — tx from {} to {} amount {}",
                 transaction.sender,
                 transaction.receiver,
                 transaction.amount
-            );
-            eprintln!(
-                "[DEBUG TxPool] Verification failed for: {} -> {} amount {}",
-                transaction.sender, transaction.receiver, transaction.amount
             );
             return false;
         }
@@ -173,10 +134,12 @@ impl TransactionPool {
         // Hash the canonical payload (same bytes that were signed).
         // This catches exact replays (same sender/receiver/amount/timestamp).
         let payload = bleep_crypto::tx_signer::tx_payload(
+            &transaction.chain_id,
             &transaction.sender,
             &transaction.receiver,
             transaction.amount,
             transaction.timestamp,
+            transaction.nonce,
         );
         let tx_hash: [u8; 32] = Sha256::digest(payload).into();
 
@@ -264,7 +227,14 @@ mod tests {
     /// Build a properly-signed ZKTransaction.
     fn make_signed_tx(sender: &str, receiver: &str, amount: u64, timestamp: u64) -> ZKTransaction {
         let (pk, sk) = generate_tx_keypair();
-        let payload = tx_payload(sender, receiver, amount, timestamp);
+        let sender = if sender.is_empty() {
+            String::new()
+        } else {
+            bleep_crypto::derive_account_address(&pk)
+        };
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
+        let nonce = 0;
+        let payload = tx_payload(&chain_id, &sender, receiver, amount, timestamp, nonce);
         let sig = sign_tx_payload(&payload, &sk).expect("sign");
         // Wire format: pk(64) || sphincs_sig
         // SPHINCS+ public keys are 64 bytes for sphincsshake256fsimple.
@@ -272,10 +242,12 @@ mod tests {
         full_sig.extend_from_slice(&pk);
         full_sig.extend_from_slice(&sig);
         ZKTransaction {
-            sender: sender.to_string(),
+            chain_id,
+            sender,
             receiver: receiver.to_string(),
             amount,
             timestamp,
+            nonce,
             signature: full_sig,
         }
     }
@@ -299,8 +271,10 @@ mod tests {
         let tx = ZKTransaction {
             sender: "alice".into(),
             receiver: "bob".into(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 100,
             timestamp: 1_700_000_001,
+            nonce: 0,
             signature: vec![],
         };
         assert!(
@@ -315,8 +289,10 @@ mod tests {
         let tx = ZKTransaction {
             sender: "alice".into(),
             receiver: "bob".into(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 100,
             timestamp: 1_700_000_002,
+            nonce: 0,
             signature: vec![0u8; 10], // too short
         };
         assert!(
@@ -332,9 +308,11 @@ mod tests {
         let tx = ZKTransaction {
             sender: "alice".into(),
             receiver: "bob".into(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 100,
             timestamp: 1_700_000_003,
-            signature: vec![0u8; SPHINCS_PK_LEN + 49088],
+            nonce: 0,
+            signature: vec![0u8; SPHINCS_PK_LEN + SPHINCS_SIG_LEN],
         };
         assert!(
             !pool.add_transaction(tx).await,
@@ -365,6 +343,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_sender_must_match_signing_key_address() {
+        let pool = TransactionPool::new(100);
+        let mut tx = make_signed_tx("attacker", "attacker-receiver", 500, 1_700_000_006);
+        tx.sender = "BLEEP1victim".to_string();
+        assert!(!pool.add_transaction(tx).await);
+    }
+
+    #[tokio::test]
+    async fn test_wrong_chain_id_rejected() {
+        let pool = TransactionPool::new(100);
+        let mut tx = make_signed_tx("alice", "bob", 500, 1_700_000_007);
+        tx.chain_id = "BLEEP-Mainnet".to_string();
+        assert!(!pool.add_transaction(tx).await);
+    }
+
     // ── S-09: duplicate detection ─────────────────────────────────────────────
 
     #[tokio::test]
@@ -373,7 +367,7 @@ mod tests {
         let tx1 = make_signed_tx("alice", "bob", 300, 1_700_000_010);
         // Build an identical tx with the same payload (same sender/receiver/amount/timestamp)
         // by re-signing with a different key — same payload hash, so should be caught
-        let tx2 = make_signed_tx("alice", "bob", 300, 1_700_000_010);
+        let tx2 = tx1.clone();
         assert!(pool.add_transaction(tx1).await, "First tx admitted");
         assert!(
             !pool.add_transaction(tx2).await,
@@ -410,9 +404,11 @@ mod tests {
         let tx = ZKTransaction {
             sender: "alice".into(),
             receiver: "bob".into(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 0,
             timestamp: 1_700_000_031,
-            signature: vec![1u8; MIN_SIG_LEN + 10],
+            nonce: 0,
+            signature: vec![1u8; SPHINCS_PK_LEN + SPHINCS_SIG_LEN],
         };
         assert!(!pool.add_transaction(tx).await);
     }
@@ -420,7 +416,8 @@ mod tests {
     #[tokio::test]
     async fn test_self_transfer_rejected() {
         let pool = TransactionPool::new(100);
-        let tx = make_signed_tx("alice", "alice", 100, 1_700_000_032);
+        let mut tx = make_signed_tx("alice", "alice", 100, 1_700_000_032);
+        tx.receiver = tx.sender.clone();
         assert!(!pool.add_transaction(tx).await);
     }
 

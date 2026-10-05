@@ -36,7 +36,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
 
-use bleep_auth::{AuthError, AuthService, SessionClaims};
+use bleep_auth::{AuthError, AuthService, Permission, SessionClaims};
 use bleep_core::{transaction_pool::TransactionPool, Blockchain};
 use bleep_crypto::{tx_payload, verify_tx_signature};
 
@@ -243,10 +243,12 @@ struct JsonReply {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxReq {
+    chain_id: String,
     sender: String,
     receiver: String,
     amount: u64,
     timestamp: u64,
+    nonce: u64,
     signature: Vec<u8>,
 }
 
@@ -493,7 +495,10 @@ pub fn rpc_routes_with_state(
     let tx_submit = warp::path!("rpc" / "tx")
         .and(warp::post())
         .and(warp::body::json::<TxReq>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::SubmitTransaction),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
             |req: TxReq, _claims: SessionClaims, st: RpcState| async move {
@@ -511,10 +516,12 @@ pub fn rpc_routes_with_state(
 
                 // Create ZKTransaction from request
                 let tx = bleep_core::transaction::ZKTransaction {
+                    chain_id: req.chain_id.clone(),
                     sender: req.sender.clone(),
                     receiver: req.receiver.clone(),
                     amount: req.amount,
                     timestamp: req.timestamp,
+                    nonce: req.nonce,
                     signature: req.signature,
                 };
 
@@ -541,51 +548,63 @@ pub fn rpc_routes_with_state(
             },
         );
 
-    // POST /rpc/mint — Temporary endpoint for testing (mint tokens to address)
+    // POST /rpc/mint — disabled by default. A non-mainnet dev/test network can
+    // opt in with BLEEP_ENABLE_PUBLIC_MINT=true, but production mainnet never
+    // exposes a direct native minting endpoint.
     let mint = warp::path!("rpc" / "mint")
         .and(warp::post())
         .and(warp::body::json::<MintReq>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_rpc_state(rpc.clone()))
-        .and_then(
-            |req: MintReq, _claims: SessionClaims, st: RpcState| async move {
-                // Check if StateManager is attached
-                let state_mgr = match st.state_mgr {
-                    Some(sm) => sm,
-                    None => {
-                        let resp = warp::reply::json(&MintResp {
-                            address: req.address.clone(),
+        .and_then(|req: MintReq, _claims: SessionClaims, st: RpcState| async move {
+            if !public_native_mint_enabled() {
+                return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "Public native minting is disabled. Set BLEEP_ENABLE_PUBLIC_MINT=true only for non-mainnet test/dev environments.".to_string(),
+                    }),
+                    warp::http::StatusCode::FORBIDDEN,
+                ));
+            }
+
+            let state_mgr = match st.state_mgr {
+                Some(sm) => sm,
+                None => {
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&MintResp {
+                            address: req.address,
                             new_balance: "0".to_string(),
                             status: "StateManager not attached to RPC state".to_string(),
-                        });
-                        return Ok::<_, warp::Rejection>(resp);
-                    }
-                };
-
-                // Mint tokens (convert u64 to u128)
-                let amount_u128 = req.amount as u128;
-                let mint_result = state_mgr.lock().mint(&req.address, amount_u128);
-
-                match mint_result {
-                    Ok(new_balance) => {
-                        let resp = warp::reply::json(&MintResp {
-                            address: req.address,
-                            new_balance: new_balance.to_string(),
-                            status: "minted".to_string(),
-                        });
-                        Ok(resp)
-                    }
-                    Err(err) => {
-                        let resp = warp::reply::json(&MintResp {
-                            address: req.address,
-                            new_balance: "0".to_string(),
-                            status: err,
-                        });
-                        Ok(resp)
-                    }
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
                 }
-            },
-        );
+            };
+
+            let amount_u128 = req.amount as u128;
+            let mint_result = state_mgr.lock().mint(&req.address, amount_u128);
+
+            match mint_result {
+                Ok(new_balance) => Ok(warp::reply::with_status(
+                    warp::reply::json(&MintResp {
+                        address: req.address,
+                        new_balance: new_balance.to_string(),
+                        status: "minted".to_string(),
+                    }),
+                    warp::http::StatusCode::OK,
+                )),
+                Err(err) => Ok(warp::reply::with_status(
+                    warp::reply::json(&MintResp {
+                        address: req.address,
+                        new_balance: "0".to_string(),
+                        status: err,
+                    }),
+                    warp::http::StatusCode::BAD_REQUEST,
+                )),
+            }
+        });
 
     // GET /rpc/tx/history
     let tx_history = warp::path!("rpc" / "tx" / "history")
@@ -716,7 +735,10 @@ pub fn rpc_routes_with_state(
     let validator_stake = warp::path!("rpc" / "validator" / "stake")
         .and(warp::post())
         .and(warp::body::json::<StakeRequest>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::BindValidator),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
             |req: StakeRequest, _claims: SessionClaims, st: RpcState| async move {
@@ -756,7 +778,14 @@ pub fn rpc_routes_with_state(
                     }
                 };
                 if !verify_tx_signature(
-                    &tx_payload(&req.label, "validator", req.amount, req.timestamp),
+                    &tx_payload(
+                        bleep_crypto::DEFAULT_CHAIN_ID,
+                        &req.label,
+                        "validator",
+                        req.amount,
+                        req.timestamp,
+                        0,
+                    ),
                     &proof,
                     &signing_public_key,
                 ) {
@@ -848,7 +877,10 @@ pub fn rpc_routes_with_state(
     let validator_unstake = warp::path!("rpc" / "validator" / "unstake")
         .and(warp::post())
         .and(warp::body::json::<UnstakeRequest>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::BindValidator),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
             |req: UnstakeRequest, _claims: SessionClaims, st: RpcState| async move {
@@ -951,7 +983,10 @@ pub fn rpc_routes_with_state(
     let validator_evidence = warp::path!("rpc" / "validator" / "evidence")
         .and(warp::post())
         .and(warp::body::bytes())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::SubmitSlashingEvidence),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .map(
             |body: bytes::Bytes,
@@ -1048,11 +1083,11 @@ pub fn rpc_routes_with_state(
         // ── Sprint 8 ──────────────────────────────────────────────────────
         .or(faucet_drip(Arc::clone(&state_inner)))
         .or(faucet_status(Arc::clone(&state_inner)))
-        .or(auth_register_operator(Arc::clone(&state_inner)))
         .or(auth_register_dapp(Arc::clone(&state_inner)))
         .or(auth_login(Arc::clone(&state_inner)))
         .or(auth_logout(Arc::clone(&state_inner)))
         .or(auth_rotate_secret(Arc::clone(&state_inner)))
+        .or(auth_confirm_secret_rotation(Arc::clone(&state_inner)))
         .or(auth_audit_export(Arc::clone(&state_inner)))
         .or(explorer_ui())
         .or(explorer_api_blocks(Arc::clone(&state_inner)))
@@ -1192,9 +1227,16 @@ fn with_arc_state(
 fn auth_filter(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = (SessionClaims,), Error = warp::Rejection> + Clone {
+    auth_filter_with_permission(state, None)
+}
+
+fn auth_filter_with_permission(
+    state: Arc<RpcState>,
+    permission: Option<Permission>,
+) -> impl Filter<Extract = (SessionClaims,), Error = warp::Rejection> + Clone {
     warp::header::<String>("authorization")
         .and(with_arc_state(Arc::clone(&state)))
-        .and_then(|auth_header: String, st: Arc<RpcState>| async move {
+        .and_then(move |auth_header: String, st: Arc<RpcState>| async move {
             if !auth_header.starts_with("Bearer ") {
                 return Err(warp::reject::custom(AuthRejection(
                     AuthError::InvalidSession,
@@ -1211,8 +1253,37 @@ fn auth_filter(
                 .validate(token)
                 .await
                 .map_err(|e| warp::reject::custom(AuthRejection(e)))?;
+
+            if let Some(required) = permission {
+                if !auth_service.rbac.check(&claims.sub, required).is_granted() {
+                    return Err(warp::reject::custom(AuthRejection(
+                        AuthError::Unauthorized(format!(
+                            "Missing required permission: {required:?}"
+                        )),
+                    )));
+                }
+            }
+
             Ok(claims)
         })
+}
+
+fn public_native_mint_enabled() -> bool {
+    let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
+    let explicitly_enabled = std::env::var("BLEEP_ENABLE_PUBLIC_MINT")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    is_dev_or_test_network(&network_mode)
+        && matches!(explicitly_enabled.as_str(), "1" | "true" | "yes" | "on")
+}
+
+fn is_dev_or_test_network(network_mode: &str) -> bool {
+    matches!(
+        network_mode.trim().to_ascii_lowercase().as_str(),
+        "dev" | "development" | "test" | "testnet" | "pretestnet"
+    )
 }
 
 // ── GET /rpc/economics/supply ─────────────────────────────────────────────────
@@ -1370,7 +1441,10 @@ fn oracle_update(
     warp::path!("rpc" / "oracle" / "update")
         .and(warp::post())
         .and(warp::body::json::<OracleUpdateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::ConfigureNode),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: OracleUpdateReq, _claims: SessionClaims, st: Arc<RpcState>| {
@@ -1469,7 +1543,10 @@ fn connect_submit_intent(
     warp::path!("rpc" / "connect" / "intent")
         .and(warp::post())
         .and(warp::body::json::<SubmitIntentReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::SubmitTransaction),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: SubmitIntentReq, _claims: SessionClaims, st: Arc<RpcState>| {
@@ -1809,7 +1886,10 @@ fn pat_create(
     warp::path!("rpc" / "pat" / "create")
         .and(warp::post())
         .and(warp::body::json::<PatCreateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::DeployContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatCreateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -1870,7 +1950,10 @@ fn pat_mint(
     warp::path!("rpc" / "pat" / "mint")
         .and(warp::post())
         .and(warp::body::json::<PatMintReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::InvokeContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatMintReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -1931,7 +2014,10 @@ fn pat_burn(
     warp::path!("rpc" / "pat" / "burn")
         .and(warp::post())
         .and(warp::body::json::<PatBurnReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::InvokeContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatBurnReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -1983,7 +2069,10 @@ fn pat_transfer(
     warp::path!("rpc" / "pat" / "transfer")
         .and(warp::post())
         .and(warp::body::json::<PatTransferReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::SubmitTransaction),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatTransferReq, _claims: SessionClaims, st: Arc<RpcState>| {
@@ -2168,7 +2257,10 @@ fn pat_approve(
     warp::path!("rpc" / "pat" / "approve")
         .and(warp::post())
         .and(warp::body::json::<PatApproveReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::InvokeContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatApproveReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -2245,7 +2337,10 @@ fn pat_freeze(
     warp::path!("rpc" / "pat" / "freeze")
         .and(warp::post())
         .and(warp::body::json::<PatFreezeReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatFreezeReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -2309,7 +2404,10 @@ fn pat_set_burn_rate(
     warp::path!("rpc" / "pat" / "set-burn-rate")
         .and(warp::post())
         .and(warp::body::json::<PatSetBurnRateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatSetBurnRateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st
@@ -2375,7 +2473,10 @@ fn pat_set_owner(
     warp::path!("rpc" / "pat" / "set-owner")
         .and(warp::post())
         .and(warp::body::json::<PatSetOwnerReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatSetOwnerReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry
@@ -2467,12 +2568,12 @@ struct AuthRotateResp {
     message: String,
 }
 
-#[derive(Deserialize)]
-struct AuthRegisterOperatorReq {
-    operator_handle: String,
-    display_name: String,
-    password: String,
-    kyber_public_key_b64: String,
+#[derive(Serialize)]
+struct AuthRotatePrepareResp {
+    pending: bool,
+    new_secret_hex: String,
+    confirmation_challenge: String,
+    expires_at: String,
 }
 
 #[derive(Deserialize)]
@@ -2490,13 +2591,13 @@ struct AuthLoginReq {
 
 #[derive(Deserialize)]
 struct AuthLogoutReq {
-    token: String,
+    #[serde(rename = "token")]
+    _token: String,
 }
 
 #[derive(Deserialize)]
-struct AuthRotateReq {
-    /// New JWT secret (base64-encoded, must decode to ≥32 bytes).
-    new_secret_b64: String,
+struct AuthRotateConfirmReq {
+    confirmation_challenge: String,
 }
 
 #[derive(Serialize)]
@@ -2519,6 +2620,16 @@ fn faucet_drip(
         .and(warp::header::optional::<String>("x-forwarded-for"))
         .and(with_arc_state(state))
         .map(|address: String, xff: Option<String>, st: Arc<RpcState>| {
+            let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
+            if !is_dev_or_test_network(&network_mode) {
+                return Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "The faucet is available only on explicit dev/test networks.".into(),
+                    }),
+                    warp::http::StatusCode::FORBIDDEN,
+                )) as Box<dyn warp::Reply + Send>;
+            }
+
             let now = now_secs();
             let ip = xff
                 .and_then(|h| h.split(',').next().map(|s| s.trim().to_string()))
@@ -2633,72 +2744,6 @@ fn faucet_status(
         })
 }
 
-// ── POST /rpc/auth/rotate ─────────────────────────────────────────────────────
-//
-// Rotates the JWT signing secret. The new secret must be supplied as a
-// base64-encoded string decoding to ≥32 bytes of fresh CSPRNG material.
-// In production this endpoint must be protected by an admin RBAC role.
-fn auth_register_operator(
-    state: Arc<RpcState>,
-) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-    warp::path!("rpc" / "auth" / "register" / "operator")
-        .and(warp::post())
-        .and(warp::body::json::<AuthRegisterOperatorReq>())
-        .and(with_arc_state(state))
-        .and_then(
-            |req: AuthRegisterOperatorReq, st: Arc<RpcState>| async move {
-                let auth_service = match &st.auth_service {
-                    Some(svc) => Arc::clone(svc),
-                    None => {
-                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: "Auth service not mounted in RPC state.".into(),
-                            }),
-                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        ));
-                    }
-                };
-
-                let kyber_public_key = match base64::decode(&req.kyber_public_key_b64) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        return Ok(warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: format!("Invalid kyber_public_key base64: {}", e),
-                            }),
-                            warp::http::StatusCode::BAD_REQUEST,
-                        ));
-                    }
-                };
-
-                match auth_service
-                    .register_operator(
-                        req.operator_handle,
-                        req.display_name,
-                        req.password,
-                        kyber_public_key,
-                    )
-                    .await
-                {
-                    Ok((_identity, token)) => Ok(warp::reply::with_status(
-                        warp::reply::json(&AuthTokenResp {
-                            token: token.token,
-                            jti: token.jti,
-                            expires_at: token.expires_at.to_rfc3339(),
-                        }),
-                        warp::http::StatusCode::CREATED,
-                    )),
-                    Err(err) => Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrResp {
-                            error: format!("Auth registration failed: {}", err),
-                        }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    )),
-                }
-            },
-        )
-}
-
 fn auth_register_dapp(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
@@ -2789,7 +2834,7 @@ fn auth_logout(
         .and(auth_filter(Arc::clone(&state)))
         .and(with_arc_state(state))
         .and_then(
-            |req: AuthLogoutReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+            |_req: AuthLogoutReq, claims: SessionClaims, st: Arc<RpcState>| async move {
                 let auth_service = match &st.auth_service {
                     Some(svc) => Arc::clone(svc),
                     None => {
@@ -2802,7 +2847,7 @@ fn auth_logout(
                     }
                 };
 
-                match auth_service.logout(&req.token).await {
+                match auth_service.sessions.revoke(&claims.jti) {
                     Ok(_) => Ok(warp::reply::with_status(
                         warp::reply::json(&JsonReply {
                             result: "logout succeeded".into(),
@@ -2825,10 +2870,12 @@ fn auth_rotate_secret(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "rotate")
         .and(warp::post())
-        .and(warp::body::json::<AuthRotateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::RotateJwtSecret),
+        ))
         .and(with_arc_state(state))
-        .and_then(|req: AuthRotateReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+        .and_then(|_claims: SessionClaims, st: Arc<RpcState>| async move {
             let auth_service = match &st.auth_service {
                 Some(svc) => Arc::clone(svc),
                 None => {
@@ -2841,47 +2888,76 @@ fn auth_rotate_secret(
                 }
             };
 
-            let bytes = match base64::decode(&req.new_secret_b64) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrResp {
-                            error: format!("Invalid base64: {}", e),
-                        }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    ));
-                }
-            };
-
-            if bytes.len() < 32 {
-                return Ok(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: "Decoded secret is shorter than 32 bytes.".into(),
-                    }),
-                    warp::http::StatusCode::BAD_REQUEST,
-                ));
-            }
-
-            match auth_service.sessions.rotate_secret(bytes).await {
-                Ok(count) => Ok(warp::reply::with_status(
-                    warp::reply::json(&AuthRotateResp {
-                        ok: true,
-                        rotation_count: count,
-                        message: format!(
-                            "Secret rotated successfully (rotation #{}). All existing sessions will be invalidated on next validation.",
-                            count
-                        ),
+            match auth_service.sessions.prepare_secret_rotation().await {
+                Ok((secret, challenge, expires_at)) => Ok(warp::reply::with_status(
+                    warp::reply::json(&AuthRotatePrepareResp {
+                        pending: true,
+                        new_secret_hex: hex::encode(secret),
+                        confirmation_challenge: challenge,
+                        expires_at: expires_at.to_rfc3339(),
                     }),
                     warp::http::StatusCode::OK,
                 )),
                 Err(err) => Ok(warp::reply::with_status(
                     warp::reply::json(&ErrResp {
-                        error: format!("Rotation failed: {}", err),
+                        error: format!("Rotation preparation failed: {}", err),
                     }),
                     warp::http::StatusCode::BAD_REQUEST,
                 )),
             }
         })
+}
+
+fn auth_confirm_secret_rotation(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "auth" / "rotate" / "confirm")
+        .and(warp::post())
+        .and(warp::body::json::<AuthRotateConfirmReq>())
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::RotateJwtSecret),
+        ))
+        .and(with_arc_state(state))
+        .and_then(
+            |req: AuthRotateConfirmReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+                let auth_service = match &st.auth_service {
+                    Some(svc) => Arc::clone(svc),
+                    None => {
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Auth service not mounted in RPC state.".into(),
+                            }),
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
+                    }
+                };
+
+                match auth_service
+                    .sessions
+                    .confirm_secret_rotation(&req.confirmation_challenge)
+                    .await
+                {
+                    Ok(count) => Ok(warp::reply::with_status(
+                        warp::reply::json(&AuthRotateResp {
+                            ok: true,
+                            rotation_count: count,
+                            message: format!(
+                                "Secret rotation #{} confirmed; all existing sessions were invalidated.",
+                                count
+                            ),
+                        }),
+                        warp::http::StatusCode::OK,
+                    )),
+                    Err(err) => Ok(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Rotation confirmation failed: {}", err),
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    )),
+                }
+            },
+        )
 }
 
 // ── GET /rpc/auth/audit ───────────────────────────────────────────────────────
@@ -2895,7 +2971,10 @@ fn auth_audit_export(
     warp::path!("rpc" / "auth" / "audit")
         .and(warp::get())
         .and(warp::query::<std::collections::HashMap<String, String>>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::ViewAuditLog),
+        ))
         .and(with_arc_state(state))
         .and_then(
             |params: std::collections::HashMap<String, String>,
@@ -3141,22 +3220,26 @@ mod tests {
         let pool = TransactionPool::new(10);
 
         let (public_key, secret_key) = generate_tx_keypair();
-        let sender = "BLEEP1sender".to_string();
+        let sender = bleep_crypto::derive_account_address(&public_key);
         let receiver = "BLEEP1receiver".to_string();
         let amount = 123u64;
         let timestamp = 1_700_000_000u64;
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
+        let nonce = 0;
 
-        let payload = tx_payload(&sender, &receiver, amount, timestamp);
+        let payload = tx_payload(&chain_id, &sender, &receiver, amount, timestamp, nonce);
         let detached_sig = sign_tx_payload(&payload, &secret_key).expect("sign payload");
 
         let mut signature = public_key.clone();
         signature.extend_from_slice(&detached_sig);
 
         let tx = ZKTransaction {
+            chain_id,
             sender: sender.clone(),
             receiver: receiver.clone(),
             amount,
             timestamp,
+            nonce,
             signature,
         };
 
@@ -3183,7 +3266,14 @@ mod tests {
     #[tokio::test]
     async fn validator_stake_accepts_valid_sphincs_signature() {
         let (public_key, secret_key) = generate_tx_keypair();
-        let payload = tx_payload("validator-local-test", "validator", 1_000_000, 1_234_567);
+        let payload = tx_payload(
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            "validator-local-test",
+            "validator",
+            1_000_000,
+            1_234_567,
+            0,
+        );
         let proof = sign_tx_payload(&payload, &secret_key).expect("sign payload");
 
         assert!(!proof.is_empty());
@@ -3409,6 +3499,7 @@ setInterval(refresh, 6000);
 
 // ── base64 shim (use the base64 crate already in scope via bleep-crypto) ──────
 mod base64 {
+    #[cfg(test)]
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
         // Base64 standard alphabet decoder (no padding required)
         use std::collections::HashMap;
@@ -3459,6 +3550,37 @@ mod base64 {
 #[cfg(test)]
 mod tests_sprint8 {
     use super::*;
+
+    #[tokio::test]
+    async fn dapp_session_cannot_rotate_jwt() {
+        let secret: Vec<u8> = (0..32).collect();
+        let auth = Arc::new(AuthService::new(secret).unwrap());
+        let (_, token) = auth
+            .register_dapp(
+                "security-test-developer".into(),
+                "Security Test".into(),
+                "test-password".into(),
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(RpcState::new().with_auth_service(auth));
+        let filter = auth_filter_with_permission(state, Some(Permission::RotateJwtSecret));
+
+        let response = warp::test::request()
+            .header("authorization", format!("Bearer {}", token.token))
+            .filter(&filter)
+            .await;
+        assert!(response.is_err());
+    }
+
+    #[test]
+    fn production_and_unknown_networks_never_enable_dev_gates() {
+        assert!(!is_dev_or_test_network("mainnet"));
+        assert!(!is_dev_or_test_network("production"));
+        assert!(!is_dev_or_test_network(""));
+        assert!(is_dev_or_test_network("testnet"));
+        assert!(is_dev_or_test_network("DEV"));
+    }
 
     #[test]
     fn faucet_initial_balance() {
@@ -3644,7 +3766,10 @@ pub fn governance_propose_route(
         .and(warp::post())
         .and(warp::body::content_length_limit(65_536))
         .and(warp::body::json())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::VoteOnGovernance),
+        ))
         .map(move |body: serde_json::Value, _claims: SessionClaims| {
             let title = body
                 .get("title")
@@ -3688,7 +3813,10 @@ pub fn governance_vote_route(
         .and(warp::post())
         .and(warp::body::content_length_limit(65_536))
         .and(warp::body::json())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::VoteOnGovernance),
+        ))
         .map(move |body: serde_json::Value, _claims: SessionClaims| {
             let proposal_id = body
                 .get("proposal_id")
