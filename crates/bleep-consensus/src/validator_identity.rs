@@ -24,7 +24,7 @@ pub struct ValidatorIdentity {
     /// Kyber-1024 public key for key encapsulation (post-quantum security)
     pub kyber_public_key: Vec<u8>,
 
-    /// Ed25519-style deterministic signing key for protocol messages
+    /// Hex-encoded SPHINCS+ public key used to verify validator signatures.
     pub signing_key_id: String,
 
     /// Stake amount in microBLEEP

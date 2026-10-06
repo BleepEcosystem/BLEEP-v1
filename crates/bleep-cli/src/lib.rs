@@ -172,8 +172,9 @@ pub enum ValidatorCommand {
 
     /// Submit slashing evidence for a misbehaving validator.
     ///
-    /// Evidence format: JSON-encoded `SlashingEvidence` (DoubleSigning | Equivocation | Downtime).
-    /// If valid, the SlashingEngine applies the penalty immediately.
+    /// Evidence format: JSON-encoded `SlashingEvidence` (DoubleSigning | Equivocation).
+    /// SPHINCS+ proofs are checked against the registered validator key. Downtime
+    /// counters are rejected because they have no independently verifiable proof.
     SubmitEvidence {
         /// Path to JSON file containing SlashingEvidence
         #[arg(long)]

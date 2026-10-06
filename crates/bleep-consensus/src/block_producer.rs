@@ -800,6 +800,26 @@ impl BlockProducer {
 
 // ── Legacy shim ───────────────────────────────────────────────────────────────
 
+fn sign_and_add_legacy_block(
+    blockchain: &Arc<RwLock<Blockchain>>,
+    mut block: Block,
+    config: &ProducerConfig,
+) -> bool {
+    if let Err(e) = block.sign_block(&config.validator_sk) {
+        warn!("Legacy sign_block: {}", e);
+        return false;
+    }
+
+    let accepted = blockchain
+        .write()
+        .unwrap()
+        .add_block(block.clone(), &config.validator_pk);
+    if !accepted {
+        warn!("Legacy block {} failed validation", block.index);
+    }
+    accepted
+}
+
 pub fn start_block_producer(
     blockchain: Arc<RwLock<Blockchain>>,
     tx_pool: Arc<TransactionPool>,
@@ -833,7 +853,7 @@ pub fn start_block_producer(
                     None => continue,
                 }
             };
-            let mut block = Block::with_consensus_and_sharding(
+            let block = Block::with_consensus_and_sharding(
                 next_height,
                 txs.clone(),
                 prev_hash,
@@ -844,14 +864,7 @@ pub fn start_block_producer(
                 0,
                 String::new(),
             );
-            if let Err(e) = block.sign_block(&config.validator_sk) {
-                block.validator_signature = config.validator_id.as_bytes().to_vec();
-                warn!("Legacy sign_block: {}", e);
-            }
-            let accepted = blockchain
-                .write()
-                .unwrap()
-                .add_block(block.clone(), &config.validator_pk);
+            let accepted = sign_and_add_legacy_block(&blockchain, block.clone(), &config);
             if accepted {
                 let n = blocks_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 info!(
@@ -861,7 +874,7 @@ pub fn start_block_producer(
                     n
                 );
             } else {
-                blockchain.write().unwrap().chain.push_back(block.clone());
+                continue;
             }
             for tx in &txs {
                 tx_pool
@@ -880,6 +893,28 @@ mod real_transaction_benchmark {
     use super::*;
     use bleep_core::blockchain::{Blockchain, BlockchainState};
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+
+    #[test]
+    fn legacy_signing_failure_does_not_append_block() {
+        let tx_pool = TransactionPool::new(1);
+        let genesis = Block::new(0, vec![], "0".to_string());
+        let blockchain = Arc::new(RwLock::new(Blockchain::new(
+            genesis,
+            BlockchainState::new(),
+            tx_pool,
+        )));
+        let config = ProducerConfig {
+            validator_sk: vec![0; 1],
+            ..ProducerConfig::default()
+        };
+        let block = Block::new(1, vec![], "previous".to_string());
+
+        assert!(!sign_and_add_legacy_block(&blockchain, block, &config));
+
+        let chain = blockchain.read().unwrap();
+        assert_eq!(chain.chain.len(), 1);
+        assert_eq!(chain.latest_block().unwrap().index, 0);
+    }
 
     #[tokio::test]
     #[ignore = "explicit 1000-real-transaction benchmark"]

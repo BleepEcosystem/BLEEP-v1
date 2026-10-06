@@ -109,9 +109,9 @@ Each epoch (1,000 blocks on mainnet / 100 blocks on testnet):
 |---|---|---|
 | Double-sign | **33% of stake burned**; validator tombstoned | `double_signing_penalty: 0.33` |
 | Equivocation | **25% of stake burned** | `equivocation_penalty: 0.25` |
-| Downtime | **0.1% per consecutive missed block** | `downtime_penalty_per_block` |
+| Downtime | **Disabled for externally submitted evidence** | `downtime_penalty_per_block` |
 
-Evidence is submitted via `POST /rpc/validator/evidence` and processed by `SlashingEngine`. All slashing actions are written to the tamper-evident audit log with the evidence hash.
+Evidence is submitted via `POST /rpc/validator/evidence` and processed by `SlashingEngine`. Double-signing proofs must contain two SPHINCS+ signatures over distinct block hashes; equivocation proofs must contain two signatures over distinct 32-byte block hashes in canonical vote messages. Both are verified against the validator's registered signing key before slashing. Caller-supplied downtime counters are rejected until an independently verifiable evidence format is available. All accepted slashing actions are written to the tamper-evident audit log.
 
 ---
 

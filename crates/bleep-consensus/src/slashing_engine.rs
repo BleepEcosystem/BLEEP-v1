@@ -10,15 +10,24 @@
 
 use crate::validator_identity::{ValidatorIdentity, ValidatorRegistry};
 use log::info;
+use pqcrypto_sphincsplus::sphincsshake256fsimple;
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+const SPHINCS_PUBLIC_KEY_LEN: usize = 64;
+const SPHINCS_SIGNATURE_LEN: usize = 49_856;
+const SIGNED_BLOCK_SIGNATURE_LEN: usize = SPHINCS_PUBLIC_KEY_LEN + SPHINCS_SIGNATURE_LEN;
+const EQUIVOCATION_DOMAIN: &[u8] = b"BLEEP:CONSENSUS:VOTE:V1\0";
 
 /// Evidence of a slashable offense.
 ///
 /// SAFETY: All slashing decisions require evidence that can be cryptographically verified.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SlashingEvidence {
-    /// Two blocks signed by the same validator at the same height with different hashes
+    /// Two block hashes signed by the same validator at the same height.
+    /// Signatures are detached SPHINCS+ signatures over each decoded hash, or
+    /// standard block signatures containing the registered key and signature.
     DoubleSigning {
         validator_id: String,
         height: u64,
@@ -28,17 +37,21 @@ pub enum SlashingEvidence {
         signature_2: Vec<u8>,
     },
 
-    /// Two votes for conflicting validators at the same height
+    /// Two distinct 32-byte block hashes signed by the same validator at the
+    /// same height. Each signature covers the canonical vote message.
     Equivocation {
         validator_id: String,
         height: u64,
         vote_1: Vec<u8>,
         vote_2: Vec<u8>,
+        signature_1: Vec<u8>,
+        signature_2: Vec<u8>,
         timestamp_1: u64,
         timestamp_2: u64,
     },
 
-    /// Validator offline for more than N blocks (measurable via gossip)
+    /// Unauthenticated downtime counters. The slashing engine rejects this
+    /// variant until it carries independently verifiable evidence.
     Downtime {
         validator_id: String,
         missed_blocks: u64,
@@ -67,29 +80,68 @@ impl SlashingEvidence {
                 height,
                 block_hash_1,
                 block_hash_2,
-                ..
+                signature_1,
+                signature_2,
             } => {
                 if validator_id.is_empty() {
                     return Err("validator_id cannot be empty".to_string());
                 }
-                if block_hash_1 == block_hash_2 {
-                    return Err("Block hashes must be different for double-signing".to_string());
-                }
                 if *height == 0 {
                     return Err("Height must be > 0".to_string());
+                }
+                if block_hash_1.len() != 64 || block_hash_2.len() != 64 {
+                    return Err("Block hashes must each be 32 bytes of hexadecimal data".into());
+                }
+                let decoded_hash_1 = hex::decode(block_hash_1)
+                    .map_err(|_| "Block hash must be valid hexadecimal".to_string())?;
+                let decoded_hash_2 = hex::decode(block_hash_2)
+                    .map_err(|_| "Block hash must be valid hexadecimal".to_string())?;
+                if decoded_hash_1.len() != 32 || decoded_hash_2.len() != 32 {
+                    return Err("Block hashes must each be 32 bytes".to_string());
+                }
+                if decoded_hash_1 == decoded_hash_2 {
+                    return Err("Block hashes must be different for double-signing".to_string());
+                }
+                if !has_valid_signature_length(signature_1)
+                    || !has_valid_signature_length(signature_2)
+                {
+                    return Err(
+                        "Double-signing evidence has an invalid SPHINCS+ signature length".into(),
+                    );
                 }
                 Ok(())
             }
             SlashingEvidence::Equivocation {
                 validator_id,
                 height,
-                ..
+                vote_1,
+                vote_2,
+                signature_1,
+                signature_2,
+                timestamp_1,
+                timestamp_2,
             } => {
                 if validator_id.is_empty() {
                     return Err("validator_id cannot be empty".to_string());
                 }
                 if *height == 0 {
                     return Err("Height must be > 0".to_string());
+                }
+                if vote_1.len() != 32 || vote_2.len() != 32 {
+                    return Err("Equivocation votes must each be 32-byte block hashes".to_string());
+                }
+                if vote_1 == vote_2 {
+                    return Err("Block hashes must differ for equivocation".to_string());
+                }
+                if timestamp_1 == timestamp_2 {
+                    return Err("Vote timestamps must differ for equivocation".to_string());
+                }
+                if !has_valid_signature_length(signature_1)
+                    || !has_valid_signature_length(signature_2)
+                {
+                    return Err(
+                        "Equivocation evidence has an invalid SPHINCS+ signature length".into(),
+                    );
                 }
                 Ok(())
             }
@@ -188,8 +240,8 @@ impl SlashingEngine {
 
     /// Process evidence and slash the validator.
     ///
-    /// SAFETY: This is the entry point for all slashing.
-    /// Must verify evidence before calling this.
+    /// SAFETY: This is the entry point for all slashing and verifies evidence
+    /// authenticity against the validator's registered signing key.
     pub fn process_evidence(
         &mut self,
         evidence: SlashingEvidence,
@@ -220,6 +272,8 @@ impl SlashingEngine {
         let validator = validator_registry
             .get(&validator_id)
             .ok_or_else(|| format!("Validator {} not found", validator_id))?;
+
+        verify_evidence_signatures(&evidence, validator)?;
 
         let slash_amount = self.calculate_slash_amount(&evidence, validator)?;
 
@@ -355,6 +409,131 @@ impl SlashingEngine {
     }
 }
 
+fn has_valid_signature_length(signature: &[u8]) -> bool {
+    matches!(
+        signature.len(),
+        SPHINCS_SIGNATURE_LEN | SIGNED_BLOCK_SIGNATURE_LEN
+    )
+}
+
+fn verify_evidence_signatures(
+    evidence: &SlashingEvidence,
+    validator: &ValidatorIdentity,
+) -> Result<(), String> {
+    let public_key_bytes = hex::decode(&validator.signing_key_id)
+        .map_err(|_| format!("Validator {} has an invalid signing key ID", validator.id))?;
+    if public_key_bytes.len() != SPHINCS_PUBLIC_KEY_LEN {
+        return Err(format!(
+            "Validator {} signing key must be a {}-byte SPHINCS+ public key",
+            validator.id, SPHINCS_PUBLIC_KEY_LEN
+        ));
+    }
+    let public_key = sphincsshake256fsimple::PublicKey::from_bytes(&public_key_bytes)
+        .map_err(|e| format!("Invalid SPHINCS+ public key for {}: {:?}", validator.id, e))?;
+
+    match evidence {
+        SlashingEvidence::DoubleSigning {
+            height,
+            block_hash_1,
+            block_hash_2,
+            signature_1,
+            signature_2,
+            ..
+        } => {
+            verify_block_hash(block_hash_1, signature_1, &public_key_bytes, &public_key).map_err(
+                |e| format!("Invalid first double-signing proof at height {height}: {e}"),
+            )?;
+            verify_block_hash(block_hash_2, signature_2, &public_key_bytes, &public_key)
+                .map_err(|e| format!("Invalid second double-signing proof at height {height}: {e}"))
+        }
+        SlashingEvidence::Equivocation {
+            validator_id,
+            height,
+            vote_1,
+            vote_2,
+            signature_1,
+            signature_2,
+            timestamp_1,
+            timestamp_2,
+        } => {
+            verify_validator_signature(
+                signature_1,
+                &equivocation_vote_message(validator_id, *height, *timestamp_1, vote_1),
+                &public_key_bytes,
+                &public_key,
+            )
+            .map_err(|e| format!("Invalid first equivocation proof: {e}"))?;
+            verify_validator_signature(
+                signature_2,
+                &equivocation_vote_message(validator_id, *height, *timestamp_2, vote_2),
+                &public_key_bytes,
+                &public_key,
+            )
+            .map_err(|e| format!("Invalid second equivocation proof: {e}"))
+        }
+        SlashingEvidence::Downtime { .. } => Err(
+            "Downtime evidence cannot be authenticated from caller-supplied counters".to_string(),
+        ),
+    }
+}
+
+fn verify_block_hash(
+    block_hash: &str,
+    signature: &[u8],
+    expected_public_key: &[u8],
+    public_key: &sphincsshake256fsimple::PublicKey,
+) -> Result<(), String> {
+    if block_hash.len() != 64 {
+        return Err("block hash must be 32 bytes of hexadecimal data".to_string());
+    }
+    let message =
+        hex::decode(block_hash).map_err(|_| "block hash is not valid hexadecimal".to_string())?;
+    verify_validator_signature(signature, &message, expected_public_key, public_key)
+}
+
+fn verify_validator_signature(
+    signature: &[u8],
+    message: &[u8],
+    expected_public_key: &[u8],
+    public_key: &sphincsshake256fsimple::PublicKey,
+) -> Result<(), String> {
+    let signature_bytes = match signature.len() {
+        SPHINCS_SIGNATURE_LEN => signature,
+        SIGNED_BLOCK_SIGNATURE_LEN => {
+            if &signature[..SPHINCS_PUBLIC_KEY_LEN] != expected_public_key {
+                return Err(
+                    "signature public key does not match the registered validator key".into(),
+                );
+            }
+            &signature[SPHINCS_PUBLIC_KEY_LEN..]
+        }
+        _ => return Err("invalid SPHINCS+ signature length".into()),
+    };
+    let signature = sphincsshake256fsimple::DetachedSignature::from_bytes(signature_bytes)
+        .map_err(|e| format!("Invalid SPHINCS+ signature: {:?}", e))?;
+    sphincsshake256fsimple::verify_detached_signature(&signature, message, public_key)
+        .map_err(|e| format!("SPHINCS+ signature verification failed: {:?}", e))
+}
+
+fn equivocation_vote_message(
+    validator_id: &str,
+    height: u64,
+    timestamp: u64,
+    vote: &[u8],
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        EQUIVOCATION_DOMAIN.len() + 8 + validator_id.len() + 16 + 8 + vote.len(),
+    );
+    message.extend_from_slice(EQUIVOCATION_DOMAIN);
+    message.extend_from_slice(&(validator_id.len() as u64).to_le_bytes());
+    message.extend_from_slice(validator_id.as_bytes());
+    message.extend_from_slice(&height.to_le_bytes());
+    message.extend_from_slice(&timestamp.to_le_bytes());
+    message.extend_from_slice(&(vote.len() as u64).to_le_bytes());
+    message.extend_from_slice(vote);
+    message
+}
+
 impl Default for SlashingEngine {
     fn default() -> Self {
         Self::new()
@@ -364,16 +543,47 @@ impl Default for SlashingEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pqcrypto_traits::sign::SecretKey as _;
 
-    fn create_test_validator(id: &str) -> ValidatorIdentity {
-        ValidatorIdentity::new(
+    fn create_test_validator(id: &str) -> (ValidatorIdentity, Vec<u8>) {
+        let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+        let validator = ValidatorIdentity::new(
             id.to_string(),
             vec![0u8; 1568],
-            format!("{}_signing_key", id),
-            1000000,
+            hex::encode(public_key.as_bytes()),
+            1_000_000,
             0,
         )
-        .unwrap()
+        .unwrap();
+        (validator, secret_key.as_bytes().to_vec())
+    }
+
+    fn hash(byte: u8) -> String {
+        hex::encode([byte; 32])
+    }
+
+    fn sign(message: &[u8], secret_key: &[u8]) -> Vec<u8> {
+        let secret_key = sphincsshake256fsimple::SecretKey::from_bytes(secret_key).unwrap();
+        sphincsshake256fsimple::detached_sign(message, &secret_key)
+            .as_bytes()
+            .to_vec()
+    }
+
+    fn double_signing_evidence(
+        validator_id: &str,
+        height: u64,
+        secret_key: &[u8],
+    ) -> SlashingEvidence {
+        let block_hash_1 = hash(1);
+        let block_hash_2 = hash(2);
+        SlashingEvidence::DoubleSigning {
+            validator_id: validator_id.to_string(),
+            height,
+            signature_1: sign(&hex::decode(&block_hash_1).unwrap(), secret_key),
+            signature_2: sign(&hex::decode(&block_hash_2).unwrap(), secret_key),
+            block_hash_1,
+            block_hash_2,
+        }
     }
 
     #[test]
@@ -381,10 +591,10 @@ mod tests {
         let evidence = SlashingEvidence::DoubleSigning {
             validator_id: "v1".to_string(),
             height: 100,
-            block_hash_1: "hash1".to_string(),
-            block_hash_2: "hash2".to_string(),
-            signature_1: vec![1, 2, 3],
-            signature_2: vec![4, 5, 6],
+            block_hash_1: hash(1),
+            block_hash_2: hash(2),
+            signature_1: vec![0; SPHINCS_SIGNATURE_LEN],
+            signature_2: vec![0; SPHINCS_SIGNATURE_LEN],
         };
 
         assert!(evidence.is_well_formed().is_ok());
@@ -395,8 +605,8 @@ mod tests {
         let evidence = SlashingEvidence::DoubleSigning {
             validator_id: "v1".to_string(),
             height: 100,
-            block_hash_1: "hash1".to_string(),
-            block_hash_2: "hash1".to_string(), // Same hash!
+            block_hash_1: hash(1),
+            block_hash_2: hash(1).to_uppercase(),
             signature_1: vec![1, 2, 3],
             signature_2: vec![4, 5, 6],
         };
@@ -405,10 +615,10 @@ mod tests {
     }
 
     #[test]
-    fn test_slashing_engine_double_signing() {
+    fn test_fake_double_signing_evidence_does_not_slash() {
         let mut engine = SlashingEngine::new();
         let mut registry = ValidatorRegistry::new();
-        let validator = create_test_validator("v1");
+        let (validator, _) = create_test_validator("v1");
 
         registry.register_validator(validator).unwrap();
         registry.activate_validator("v1").unwrap();
@@ -416,105 +626,156 @@ mod tests {
         let evidence = SlashingEvidence::DoubleSigning {
             validator_id: "v1".to_string(),
             height: 100,
-            block_hash_1: "hash1".to_string(),
-            block_hash_2: "hash2".to_string(),
-            signature_1: vec![1, 2, 3],
-            signature_2: vec![4, 5, 6],
+            block_hash_1: hash(1),
+            block_hash_2: hash(2),
+            signature_1: vec![0; SPHINCS_SIGNATURE_LEN],
+            signature_2: vec![0; SPHINCS_SIGNATURE_LEN],
         };
 
-        let event = engine
+        assert!(engine
             .process_evidence(evidence, &mut registry, 1, 1000)
-            .unwrap();
-
-        assert_eq!(event.validator_id, "v1");
-        assert_eq!(event.evidence_type, "DOUBLE_SIGNING");
-        assert_eq!(event.slash_amount, 1000000); // Full stake slashed
-
-        let validator = registry.get("v1").unwrap();
-        assert!(validator.is_ejected());
+            .is_err());
+        assert_eq!(registry.get("v1").unwrap().stake, 1_000_000);
+        assert!(engine.history().is_empty());
     }
 
     #[test]
-    fn test_slashing_engine_equivocation() {
+    fn test_valid_double_signing_evidence_slashes_and_deduplicates() {
         let mut engine = SlashingEngine::new();
         let mut registry = ValidatorRegistry::new();
-        let validator = create_test_validator("v1");
-
+        let (validator, secret_key) = create_test_validator("v1");
         registry.register_validator(validator).unwrap();
         registry.activate_validator("v1").unwrap();
 
+        let event = engine
+            .process_evidence(
+                double_signing_evidence("v1", 100, &secret_key),
+                &mut registry,
+                1,
+                1000,
+            )
+            .unwrap();
+        assert_eq!(event.slash_amount, 1_000_000);
+        assert!(registry.get("v1").unwrap().is_ejected());
+        assert!(engine
+            .process_evidence(
+                double_signing_evidence("v1", 100, &secret_key),
+                &mut registry,
+                1,
+                1001
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn test_equivocation_signatures_bind_canonical_votes() {
+        let mut engine = SlashingEngine::new();
+        let mut registry = ValidatorRegistry::new();
+        let (validator, secret_key) = create_test_validator("v1");
+        registry.register_validator(validator).unwrap();
+        registry.activate_validator("v1").unwrap();
+
+        let validator_id = "v1";
+        let height = 100;
+        let vote_1 = [3u8; 32].to_vec();
+        let vote_2 = [4u8; 32].to_vec();
+        let timestamp_1 = 1000;
+        let timestamp_2 = 1001;
         let evidence = SlashingEvidence::Equivocation {
-            validator_id: "v1".to_string(),
-            height: 100,
-            vote_1: vec![1, 2, 3],
-            vote_2: vec![4, 5, 6],
-            timestamp_1: 1000,
-            timestamp_2: 1001,
+            validator_id: validator_id.to_string(),
+            height,
+            signature_1: sign(
+                &equivocation_vote_message(validator_id, height, timestamp_1, &vote_1),
+                &secret_key,
+            ),
+            signature_2: sign(
+                &equivocation_vote_message(validator_id, height, timestamp_2, &vote_2),
+                &secret_key,
+            ),
+            vote_1,
+            vote_2,
+            timestamp_1,
+            timestamp_2,
         };
-
         let event = engine
             .process_evidence(evidence, &mut registry, 1, 1000)
             .unwrap();
-
         assert_eq!(event.evidence_type, "EQUIVOCATION");
-        assert!(event.slash_amount > 0);
-        assert!(event.slash_amount < 1000000); // Partial slash
+        assert!(event.slash_amount > 0 && event.slash_amount < 1_000_000);
     }
 
     #[test]
-    fn test_slashing_engine_duplicate_evidence() {
+    fn test_tampered_equivocation_and_downtime_claims_do_not_slash() {
         let mut engine = SlashingEngine::new();
         let mut registry = ValidatorRegistry::new();
-        let validator = create_test_validator("v1");
-
+        let (validator, secret_key) = create_test_validator("v1");
         registry.register_validator(validator).unwrap();
         registry.activate_validator("v1").unwrap();
 
-        let evidence = SlashingEvidence::DoubleSigning {
-            validator_id: "v1".to_string(),
-            height: 100,
-            block_hash_1: "hash1".to_string(),
-            block_hash_2: "hash2".to_string(),
-            signature_1: vec![1, 2, 3],
-            signature_2: vec![4, 5, 6],
+        let validator_id = "v1";
+        let height = 100;
+        let timestamp_1 = 1000;
+        let timestamp_2 = 1001;
+        let vote_1 = [3u8; 32].to_vec();
+        let vote_2 = [4u8; 32].to_vec();
+        let mut evidence = SlashingEvidence::Equivocation {
+            validator_id: validator_id.to_string(),
+            height,
+            signature_1: sign(
+                &equivocation_vote_message(validator_id, height, timestamp_1, &vote_1),
+                &secret_key,
+            ),
+            signature_2: sign(
+                &equivocation_vote_message(validator_id, height, timestamp_2, &vote_2),
+                &secret_key,
+            ),
+            vote_1,
+            vote_2,
+            timestamp_1,
+            timestamp_2,
         };
+        if let SlashingEvidence::Equivocation { vote_1, .. } = &mut evidence {
+            vote_1[0] ^= 0xff;
+        }
+        assert!(engine
+            .process_evidence(evidence, &mut registry, 1, 1000)
+            .is_err());
 
-        // First evidence should succeed
-        let result1 = engine.process_evidence(evidence.clone(), &mut registry, 1, 1000);
-        assert!(result1.is_ok());
-
-        // Second evidence should fail (already processed)
-        let result2 = engine.process_evidence(evidence, &mut registry, 1, 1001);
-        assert!(result2.is_err());
+        let downtime = SlashingEvidence::Downtime {
+            validator_id: "v1".to_string(),
+            missed_blocks: 100,
+            total_blocks_in_epoch: 1000,
+        };
+        assert!(engine
+            .process_evidence(downtime, &mut registry, 1, 1000)
+            .is_err());
+        assert_eq!(registry.get("v1").unwrap().stake, 1_000_000);
+        assert!(engine.history().is_empty());
     }
 
     #[test]
-    fn test_slashing_history() {
-        let mut engine = SlashingEngine::new();
-        let mut registry = ValidatorRegistry::new();
+    fn test_standard_block_signature_matches_registered_key() {
+        let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+        let public_key_bytes = public_key.as_bytes();
+        let message = [7u8; 32];
+        let detached_signature = sphincsshake256fsimple::detached_sign(&message, &secret_key);
+        let mut block_signature = public_key_bytes.to_vec();
+        block_signature.extend_from_slice(detached_signature.as_bytes());
+        assert!(verify_validator_signature(
+            &block_signature,
+            &message,
+            public_key_bytes,
+            &public_key,
+        )
+        .is_ok());
 
-        for i in 1..=3 {
-            let validator = create_test_validator(&format!("v{}", i));
-            registry.register_validator(validator).unwrap();
-            registry.activate_validator(&format!("v{}", i)).unwrap();
-        }
-
-        for i in 1..=3 {
-            let evidence = SlashingEvidence::DoubleSigning {
-                validator_id: format!("v{}", i),
-                height: 100 + i as u64,
-                block_hash_1: "hash1".to_string(),
-                block_hash_2: "hash2".to_string(),
-                signature_1: vec![1, 2, 3],
-                signature_2: vec![4, 5, 6],
-            };
-
-            engine
-                .process_evidence(evidence, &mut registry, 1, 1000 + i as u64)
-                .unwrap();
-        }
-
-        assert_eq!(engine.history().len(), 3);
-        assert_eq!(engine.total_slashed(), 3000000); // 3 validators * 1M stake
+        block_signature[0] ^= 0xff;
+        assert!(verify_validator_signature(
+            &block_signature,
+            &message,
+            public_key_bytes,
+            &public_key,
+        )
+        .is_err());
     }
 }
