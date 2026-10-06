@@ -59,7 +59,7 @@ use bleep_state::state_manager::StateManager;
 // ── Consensus ─────────────────────────────────────────────────────────────────
 use bleep_consensus::slashing_engine::SlashingEngine;
 use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
-use bleep_consensus::{run_consensus_engine, BlockProducer};
+use bleep_consensus::BlockProducer;
 use bleep_sig_availability::{
     AvailabilityConfig, MempoolSigCache, SigAvailabilityGossipHandler, SigAvailabilityLayer,
     ValidatorRegistry as SalValidatorRegistry,
@@ -739,6 +739,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue; // not a block message
                     }
 
+                    let active_validator_count =
+                        inbound_validators.lock().get_active_validators().len();
+                    if let Err(e) =
+                        bleep_consensus::ensure_live_finality_mode_supported(active_validator_count)
+                    {
+                        warn!(
+                            "[InboundBlockHandler] Rejecting block without supported finality: {}",
+                            e
+                        );
+                        continue;
+                    }
+
                     // Deserialise
                     let block: bleep_core::block::Block = match serde_json::from_slice(&msg.payload)
                     {
@@ -874,9 +886,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     warn!("  ⚠️  Distributed quorum/finality voting is not wired; produced blocks are not BFT-finalized.");
     info!("  ✅ Scheduler: 20 maintenance tasks registered.");
 
-    // ── Step 15: Consensus engine ─────────────────────────────────────────────
-    info!("🗂  [15/16] Wiring consensus engine (PoS-Normal mode)…");
-    run_consensus_engine()?;
+    // ── Step 15: Consensus status ─────────────────────────────────────────────
+    info!("🗂  [15/16] Consensus status checked; live PBFT quorum voting is unavailable.");
 
     // ── Step 16: RPC server ───────────────────────────────────────────────────
     let rpc_listen_addr = std::env::var("BLEEP_RPC_LISTEN_ADDR")

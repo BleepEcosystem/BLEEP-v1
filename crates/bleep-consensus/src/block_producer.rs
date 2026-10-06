@@ -82,6 +82,18 @@ const PROTOCOL_VERSION: u32 = 1;
 /// BLEEP native chain ID for intent routing
 const BLEEP_CHAIN_ID: ChainId = ChainId::Bleep;
 
+/// The live commit path has no PBFT vote transport or certificate verification.
+/// Until that is wired, only a one-validator committee can safely commit here.
+pub fn ensure_live_finality_mode_supported(active_validator_count: usize) -> Result<(), String> {
+    match active_validator_count {
+        1 => Ok(()),
+        0 => Err("Cannot commit without an active validator".to_string()),
+        _ => Err(format!(
+            "Cannot commit with {active_validator_count} active validators: authenticated PBFT quorum finality is not wired into the live node"
+        )),
+    }
+}
+
 // ── ProducerConfig ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -350,6 +362,7 @@ impl BlockProducer {
                         .saturating_add(validator.downtime_count),
                 })
                 .collect();
+            ensure_live_finality_mode_supported(active_validators.len())?;
             let selected =
                 PoSConsensusEngine::select_proposer(next_height, &active_validators, &prev_hash)
                     .map_err(|e| {
@@ -795,6 +808,18 @@ impl BlockProducer {
         );
 
         Ok((out, elapsed_ms))
+    }
+}
+
+#[cfg(test)]
+mod live_finality_policy_tests {
+    use super::ensure_live_finality_mode_supported;
+
+    #[test]
+    fn live_commit_requires_a_supported_committee_size() {
+        assert!(ensure_live_finality_mode_supported(0).is_err());
+        assert!(ensure_live_finality_mode_supported(1).is_ok());
+        assert!(ensure_live_finality_mode_supported(2).is_err());
     }
 }
 

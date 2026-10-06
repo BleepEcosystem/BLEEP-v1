@@ -57,8 +57,8 @@ pub fn run_consensus_engine() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub use block_producer::{
-    start_block_producer, BlockProducer, FinalizedBlock, ProducerConfig, BLOCK_INTERVAL_MS,
-    MAX_TXS_PER_BLOCK,
+    ensure_live_finality_mode_supported, start_block_producer, BlockProducer, FinalizedBlock,
+    ProducerConfig, BLOCK_INTERVAL_MS, MAX_TXS_PER_BLOCK,
 };
 
 pub mod gossip_bridge;
