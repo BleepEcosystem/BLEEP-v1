@@ -5,11 +5,25 @@
 #[cfg(test)]
 mod phase1_integration_tests {
     use bleep_consensus::{
-        ValidatorIdentity, ValidatorRegistry, ValidatorState,
-        SlashingEngine, SlashingEvidence, SlashingPenalty,
-        FinalizyCertificate, FinalityManager,
-        EpochConfig, EpochState, ConsensusMode,
+        ConsensusMode, EpochConfig, EpochState, FinalityManager, FinalizyCertificate,
+        SlashingEngine, SlashingEvidence, SlashingPenalty, ValidatorIdentity, ValidatorRegistry,
+        ValidatorState,
     };
+    use bleep_crypto::SignatureScheme;
+
+    fn add_test_signature(cert: &mut FinalizyCertificate, validator_id: &str, voting_power: u128) {
+        let (public_key, secret_key) = SignatureScheme::keygen().expect("SPHINCS+ keygen failed");
+        let signature = SignatureScheme::sign(&cert.signature_message(), &secret_key)
+            .expect("SPHINCS+ signing failed")
+            .as_bytes();
+        cert.add_validator_signature(
+            validator_id.to_string(),
+            public_key.to_vec(),
+            signature,
+            voting_power,
+        )
+        .unwrap();
+    }
 
     /// Helper function to create a test validator
     fn create_test_validator(id: &str, stake: u128) -> ValidatorIdentity {
@@ -54,31 +68,20 @@ mod phase1_integration_tests {
         registry.register_validator(validator).unwrap();
         registry.activate_validator("v1").unwrap();
 
-        // Create double-signing evidence
         let evidence = SlashingEvidence::DoubleSigning {
             validator_id: "v1".to_string(),
             height: 100,
-            block_hash_1: "hash1_abc".to_string(),
-            block_hash_2: "hash1_xyz".to_string(), // Different hash, same height!
+            block_hash_1: hex::encode([1u8; 32]),
+            block_hash_2: hex::encode([2u8; 32]),
             signature_1: vec![1, 2, 3],
             signature_2: vec![4, 5, 6],
         };
 
-        // Process slashing
-        let event = slashing_engine
+        assert!(slashing_engine
             .process_evidence(evidence, &mut registry, 1, 1000)
-            .unwrap();
-
-        // Verify slashing occurred
-        assert_eq!(event.validator_id, "v1");
-        assert_eq!(event.evidence_type, "DOUBLE_SIGNING");
-        assert_eq!(event.slash_amount, 1000000); // Full stake
-
-        // Verify validator is ejected
-        let validator = registry.get("v1").unwrap();
-        assert!(!validator.can_participate());
-        assert!(validator.is_ejected());
-        assert_eq!(validator.stake, 0);
+            .is_err());
+        assert_eq!(registry.get("v1").unwrap().stake, 1000000);
+        assert!(registry.get("v1").unwrap().can_participate());
     }
 
     #[test]
@@ -97,13 +100,10 @@ mod phase1_integration_tests {
             total_blocks_in_epoch: 1000,
         };
 
-        let event = slashing_engine
+        assert!(slashing_engine
             .process_evidence(evidence, &mut registry, 1, 1000)
-            .unwrap();
-
-        // Light penalty for downtime
-        assert!(event.slash_amount > 0);
-        assert!(event.slash_amount < 1000000); // Not full slash
+            .is_err());
+        assert_eq!(registry.get("v1").unwrap().stake, 1000000);
     }
 
     #[test]
@@ -116,23 +116,25 @@ mod phase1_integration_tests {
         registry.activate_validator("v1").unwrap();
 
         // Two conflicting votes for the same height
+        let vote_1 = [3u8; 32].to_vec();
+        let vote_2 = [4u8; 32].to_vec();
+        let timestamp_1 = 1000;
+        let timestamp_2 = 1001;
         let evidence = SlashingEvidence::Equivocation {
             validator_id: "v1".to_string(),
             height: 100,
-            vote_1: vec![1, 2, 3], // Vote for BlockA
-            vote_2: vec![4, 5, 6], // Vote for BlockB (different!)
-            timestamp_1: 1000,
-            timestamp_2: 1001,
+            signature_1: vec![1, 2, 3],
+            signature_2: vec![4, 5, 6],
+            vote_1,
+            vote_2,
+            timestamp_1,
+            timestamp_2,
         };
 
-        let event = slashing_engine
+        assert!(slashing_engine
             .process_evidence(evidence, &mut registry, 1, 1000)
-            .unwrap();
-
-        assert_eq!(event.evidence_type, "EQUIVOCATION");
-        // Equivocation is serious but not as severe as double-signing
-        assert!(event.slash_amount > 0);
-        assert!(event.slash_amount < 1000000);
+            .is_err());
+        assert_eq!(registry.get("v1").unwrap().stake, 1000000);
     }
 
     #[test]
@@ -152,14 +154,17 @@ mod phase1_integration_tests {
         .unwrap();
 
         // Add signatures from 2 validators (only 2000 stake)
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 1000).unwrap();
-        cert.add_validator_signature("v2".to_string(), vec![4, 5, 6], 1000).unwrap();
+        cert.add_validator_signature("v1".to_string(), vec![0; 64], vec![1, 2, 3], 1000)
+            .unwrap();
+        cert.add_validator_signature("v2".to_string(), vec![0; 64], vec![4, 5, 6], 1000)
+            .unwrap();
 
         // Does not meet quorum yet (need >2/3 of 3000 = > 2000)
         assert!(!cert.meets_quorum(total_stake));
 
         // Add third validator (now have 3000 stake)
-        cert.add_validator_signature("v3".to_string(), vec![7, 8, 9], 1000).unwrap();
+        cert.add_validator_signature("v3".to_string(), vec![0; 64], vec![7, 8, 9], 1000)
+            .unwrap();
 
         // Now meets quorum
         assert!(cert.meets_quorum(total_stake));
@@ -180,7 +185,7 @@ mod phase1_integration_tests {
         )
         .unwrap();
 
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700).unwrap();
+        add_test_signature(&mut cert, "v1", 700);
 
         // Finalize the block
         manager.finalize_block(cert).unwrap();
@@ -198,7 +203,9 @@ mod phase1_integration_tests {
         )
         .unwrap();
 
-        cert2.add_validator_signature("v2".to_string(), vec![1, 2, 3], 700).unwrap();
+        cert2
+            .add_validator_signature("v2".to_string(), vec![0; 64], vec![1, 2, 3], 700)
+            .unwrap();
 
         let result = manager.finalize_block(cert2);
         assert!(result.is_err()); // Cannot finalize same height twice
@@ -209,11 +216,11 @@ mod phase1_integration_tests {
         let config = EpochConfig::new(1000, 0, 1).unwrap();
 
         // Test that epoch boundaries are deterministic
-        assert_eq!(config.epoch_id(0), 0);     // First epoch
-        assert_eq!(config.epoch_id(999), 0);   // Still epoch 0
-        assert_eq!(config.epoch_id(1000), 1);  // Epoch 1
-        assert_eq!(config.epoch_id(1999), 1);  // Still epoch 1
-        assert_eq!(config.epoch_id(2000), 2);  // Epoch 2
+        assert_eq!(config.epoch_id(0), 0); // First epoch
+        assert_eq!(config.epoch_id(999), 0); // Still epoch 0
+        assert_eq!(config.epoch_id(1000), 1); // Epoch 1
+        assert_eq!(config.epoch_id(1999), 1); // Still epoch 1
+        assert_eq!(config.epoch_id(2000), 2); // Epoch 2
 
         // All nodes compute the same epoch_id for a given height
         let epoch_100_node1 = config.epoch_id(100);
@@ -267,34 +274,33 @@ mod phase1_integration_tests {
         let mut slashing_engine = SlashingEngine::new();
 
         for i in 1..=5 {
-            let validator = create_test_validator(&format!("v{}", i), 1000000);
+            let validator_id = format!("v{}", i);
+            let validator = create_test_validator(&validator_id, 1000000);
             registry.register_validator(validator).unwrap();
-            registry.activate_validator(&format!("v{}", i)).unwrap();
+            registry.activate_validator(&validator_id).unwrap();
         }
 
         assert_eq!(registry.active_count(), 5);
         assert_eq!(registry.total_active_stake(), 5000000);
 
-        // v5 double-signs
+        // Fabricated signatures must not slash v5.
         let evidence = SlashingEvidence::DoubleSigning {
             validator_id: "v5".to_string(),
             height: 100,
-            block_hash_1: "hash1".to_string(),
-            block_hash_2: "hash2".to_string(),
+            block_hash_1: hex::encode([1u8; 32]),
+            block_hash_2: hex::encode([2u8; 32]),
             signature_1: vec![1, 2, 3],
             signature_2: vec![4, 5, 6],
         };
 
-        slashing_engine
+        assert!(slashing_engine
             .process_evidence(evidence, &mut registry, 1, 1000)
-            .unwrap();
+            .is_err());
 
-        // v5 is removed
-        assert_eq!(registry.active_count(), 4);
-        assert!(!registry.can_participate("v5"));
+        assert_eq!(registry.active_count(), 5);
+        assert!(registry.can_participate("v5"));
 
-        // Remaining 4 validators control 4M of 4M stake = 100% (> 2/3 quorum)
-        assert!(registry.total_active_stake() > (5000000 * 2) / 3);
+        assert_eq!(registry.total_active_stake(), 5_000_000);
     }
 
     #[test]
@@ -302,40 +308,32 @@ mod phase1_integration_tests {
         let mut slashing_engine = SlashingEngine::new();
         let mut registry = ValidatorRegistry::new();
 
-        // Slash 3 validators
+        // Submit forged evidence against 3 validators.
         for i in 1..=3 {
-            let validator = create_test_validator(&format!("v{}", i), 1000000);
+            let validator_id = format!("v{}", i);
+            let validator = create_test_validator(&validator_id, 1000000);
             registry.register_validator(validator).unwrap();
-            registry.activate_validator(&format!("v{}", i)).unwrap();
+            registry.activate_validator(&validator_id).unwrap();
         }
 
         for i in 1..=3 {
+            let validator_id = format!("v{}", i);
             let evidence = SlashingEvidence::DoubleSigning {
-                validator_id: format!("v{}", i),
+                validator_id,
                 height: 100 + i as u64,
-                block_hash_1: "hash1".to_string(),
-                block_hash_2: "hash2".to_string(),
+                block_hash_1: hex::encode([1u8; 32]),
+                block_hash_2: hex::encode([2u8; 32]),
                 signature_1: vec![1, 2, 3],
                 signature_2: vec![4, 5, 6],
             };
 
-            slashing_engine
+            assert!(slashing_engine
                 .process_evidence(evidence, &mut registry, 1, 1000 + i as u64)
-                .unwrap();
+                .is_err());
         }
 
-        // Verify audit trail
-        let history = slashing_engine.history();
-        assert_eq!(history.len(), 3);
-
-        // All three slashing events are recorded
-        for (i, event) in history.iter().enumerate() {
-            assert_eq!(event.evidence_type, "DOUBLE_SIGNING");
-            assert_eq!(event.slash_amount, 1000000);
-        }
-
-        // Total slashed amount is correct
-        assert_eq!(slashing_engine.total_slashed(), 3000000);
+        assert!(slashing_engine.history().is_empty());
+        assert_eq!(slashing_engine.total_slashed(), 0);
     }
 
     #[test]
@@ -354,7 +352,7 @@ mod phase1_integration_tests {
         )
         .unwrap();
 
-        cert.add_validator_signature("v1".to_string(), vec![1, 2, 3], 700).unwrap();
+        add_test_signature(&mut cert, "v1", 700);
 
         // Finalize block
         manager.finalize_block(cert.clone()).unwrap();
@@ -384,10 +382,14 @@ mod phase1_integration_tests {
         assert!(registry.activate_validator("nonexistent").is_err());
 
         // Try to slash non-existent validator
-        assert!(registry.slash_validator_double_sign("nonexistent", 100).is_err());
+        assert!(registry
+            .slash_validator_double_sign("nonexistent", 100)
+            .is_err());
 
         // Try to record downtime for non-existent validator
-        assert!(registry.record_validator_downtime("nonexistent", 100).is_err());
+        assert!(registry
+            .record_validator_downtime("nonexistent", 100)
+            .is_err());
 
         // All handled gracefully - no panics
     }

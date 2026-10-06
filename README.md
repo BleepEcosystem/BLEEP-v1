@@ -15,7 +15,7 @@
 ## What is BLEEP?
 
 BLEEP is a distributed execution protocol built on three invariants: every block ships with a cryptographic proof of its own correctness, every instruction is expressed as intent rather than bytecode, and the entire cryptographic foundation survives a quantum computer — by construction, from genesis.
-Every block produced by BLEEP includes a Winterfell STARK proof of its own validity — generated before broadcast, verified independently by every validator, requiring no trusted setup and no privileged operator. Transaction signing, peer authentication, key encapsulation, and zero-knowledge proof verification are each secured exclusively by NIST-finalised post-quantum standards — FIPS 205 (SPHINCS+) and FIPS 203 (Kyber-1024/ML-KEM-1024) — at Security Level 5.
+Every block produced by BLEEP includes a Winterfell STARK proof of its own validity — generated before broadcast, verified independently by every validator, requiring no trusted setup and no privileged operator. Transaction signing, block and finality-certificate signing, peer authentication, key encapsulation, and zero-knowledge proof verification are each secured exclusively by NIST-finalised post-quantum standards — FIPS 205 (SPHINCS+) and FIPS 203 (Kyber-1024/ML-KEM-1024) — at Security Level 5.
 
 
 BLEEP is post-quantum from genesis. There is no classical fallback. There is no migration path needed — because the problem was solved before the protocol accumulated economic value and ecosystem dependencies.

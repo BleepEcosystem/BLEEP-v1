@@ -43,7 +43,6 @@ bleep-sig-availability = { path = "../bleep-sig-availability" }
 
 # Randomness
 rand = "0.8.5"
-blst = "0.3"
 
 # Error Handling
 thiserror = "1.0.39"

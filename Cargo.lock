@@ -1232,7 +1232,6 @@ dependencies = [
  "bleep-state",
  "bleep-vm",
  "bleep-zkp",
- "blst",
  "chrono",
  "env_logger",
  "futures",

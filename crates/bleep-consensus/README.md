@@ -99,7 +99,7 @@ Each epoch (1,000 blocks on mainnet / 100 blocks on testnet):
 
 ## Finality
 
-`FinalityManager` finalises blocks when precommits representing **>6,667 bps (66.67%) of total staked supply** are received. Finalisation is irreversible. Long-range reorgs are rejected regardless of claimed proof-of-work — verified in the adversarial test suite at depths of 10 and 50 blocks.
+`FinalityManager` finalises blocks when valid SPHINCS+-SHAKE-256f-simple signatures from precommits represent **>6,667 bps (66.67%) of total staked supply**. Each validator signature is verified before a certificate is accepted; signatures are stored individually because SPHINCS+ does not provide BLS-style aggregation. Finalisation is irreversible. Long-range reorgs are rejected regardless of claimed proof-of-work — verified in the adversarial test suite at depths of 10 and 50 blocks.
 
 ---
 
