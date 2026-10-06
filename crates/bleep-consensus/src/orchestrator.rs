@@ -301,7 +301,7 @@ impl ConsensusOrchestrator {
     /// * `epoch_state` - Current epoch state
     pub fn execute_pbft_pre_prepare(
         &mut self,
-        block: &Block,
+        _block: &Block,
         epoch_state: &EpochState,
     ) -> Result<(), ConsensusError> {
         // SAFETY: Verify we're in PBFT mode
@@ -313,20 +313,10 @@ impl ConsensusOrchestrator {
             });
         }
 
-        // Get the PBFT engine (downcasting would be needed in real impl, using Arc<dyn...>)
-        info!(
-            "PBFT orchestrator: Starting pre-prepare for block {}",
-            block.index
-        );
-
-        // In a real implementation with concrete engine types, we would:
-        // let pbft_engine = self.get_pbft_engine_mut()?;
-        // pbft_engine.pre_prepare(block.index, block)?;
-
-        // For now, log the operation
-        info!("Pre-prepare phase initiated for block {}", block.index);
-
-        Ok(())
+        Err(ConsensusError::ProposalRejected {
+            reason: "PBFT pre-prepare requires registered block-signature verification; the unauthenticated orchestrator path is disabled"
+                .to_string(),
+        })
     }
 
     /// Execute PBFT prepare phase for a specific block.
@@ -351,16 +341,12 @@ impl ConsensusOrchestrator {
             });
         }
 
-        info!(
-            "PBFT orchestrator: Processing prepare from {} for block {}",
-            validator_id, block_height
-        );
-
-        // In a real implementation, this would call:
-        // let pbft_engine = self.get_pbft_engine_mut()?;
-        // pbft_engine.process_prepare(block_height, validator_id)?;
-
-        Ok(())
+        let _ = (block_height, validator_id);
+        Err(ConsensusError::ProposalRejected {
+            reason:
+                "PBFT prepare votes require a cryptographic signature; ID-only votes are disabled"
+                    .to_string(),
+        })
     }
 
     /// Execute PBFT commit phase for a specific block.
@@ -385,16 +371,12 @@ impl ConsensusOrchestrator {
             });
         }
 
-        info!(
-            "PBFT orchestrator: Processing commit from {} for block {}",
-            validator_id, block_height
-        );
-
-        // In a real implementation, this would call:
-        // let pbft_engine = self.get_pbft_engine_mut()?;
-        // pbft_engine.process_commit(block_height, validator_id)?;
-
-        Ok(())
+        let _ = (block_height, validator_id);
+        Err(ConsensusError::ProposalRejected {
+            reason:
+                "PBFT commit votes require a cryptographic signature; ID-only votes are disabled"
+                    .to_string(),
+        })
     }
 
     /// Get a reference to the engine for a given mode.

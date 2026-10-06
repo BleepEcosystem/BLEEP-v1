@@ -10,10 +10,38 @@
 
 use crate::engine::{ConsensusEngine, ConsensusError};
 use crate::epoch::EpochState;
-use bleep_core::block::{Block, ConsensusMode, Transaction};
+use bleep_core::block::{Block, ConsensusMode, Transaction, SPHINCS_PK_LEN, SPHINCS_SIG_LEN};
 use bleep_core::blockchain::BlockchainState;
 use log::{info, warn};
-use std::collections::HashMap;
+use pqcrypto_sphincsplus::sphincsshake256fsimple;
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
+use std::collections::{HashMap, HashSet};
+
+const PBFT_VOTE_DOMAIN: &[u8] = b"BLEEP:PBFT:VOTE:V1\0";
+
+/// Encode the signed payload for one prepare or commit vote.
+pub fn pbft_vote_message(
+    phase: PbftPhase,
+    block_height: u64,
+    block_hash: &str,
+    validator_id: &str,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        PBFT_VOTE_DOMAIN.len() + 1 + 8 + block_hash.len() + 8 + validator_id.len(),
+    );
+    message.extend_from_slice(PBFT_VOTE_DOMAIN);
+    message.push(match phase {
+        PbftPhase::PrePrepare => 0,
+        PbftPhase::Prepare => 1,
+        PbftPhase::Commit => 2,
+    });
+    message.extend_from_slice(&block_height.to_le_bytes());
+    message.extend_from_slice(&(block_hash.len() as u64).to_le_bytes());
+    message.extend_from_slice(block_hash.as_bytes());
+    message.extend_from_slice(&(validator_id.len() as u64).to_le_bytes());
+    message.extend_from_slice(validator_id.as_bytes());
+    message
+}
 
 /// PBFT message types for the 3-phase protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,29 +91,26 @@ pub enum PbftBlockState {
 /// `process_prepare` + `process_commit` once each, completely bypassing the
 /// 2/3+1 quorum requirement that PBFT's Byzantine-fault tolerance depends on.
 ///
-/// The fix maintains per-block `HashSet<validator_id>` vote accumulators for
-/// each of the two voting phases. A block only advances when the number of
-/// distinct known-validator senders reaches `quorum_size = 2/3 * n + 1`.
-/// Unknown or duplicate senders are silently ignored.
+/// Vote accumulators are updated only after a registered validator's signature
+/// verifies over the exact phase, block height, block hash, and validator ID.
 pub struct PbftConsensusEngine {
-    validator_id: String,
     total_validators: usize,
     quorum_size: usize,
     finalized_blocks: HashMap<u64, PbftBlockState>,
     #[allow(dead_code)]
     current_view: u64,
 
-    /// H-02 FIX: per-block prepare-vote accumulators.
-    /// Key: block_height. Value: set of validator IDs that sent Prepare.
-    prepare_votes: HashMap<u64, std::collections::HashSet<String>>,
+    /// Per-block prepare-vote accumulators, populated after signature checks.
+    prepare_votes: HashMap<u64, HashSet<String>>,
 
-    /// H-02 FIX: per-block commit-vote accumulators.
-    /// Key: block_height. Value: set of validator IDs that sent Commit.
-    commit_votes: HashMap<u64, std::collections::HashSet<String>>,
+    /// Per-block commit-vote accumulators, populated after signature checks.
+    commit_votes: HashMap<u64, HashSet<String>>,
 
     /// The set of validator IDs that are currently registered.
     /// Only votes from known validators are counted.
-    known_validators: std::collections::HashSet<String>,
+    known_validators: HashSet<String>,
+    validator_pubkeys: HashMap<String, Vec<u8>>,
+    block_hashes: HashMap<u64, String>,
 }
 
 impl PbftConsensusEngine {
@@ -93,40 +118,117 @@ impl PbftConsensusEngine {
     ///
     /// `validator_ids` is the full validator set for the current epoch.
     /// The quorum is computed as `2/3 * len + 1` (BFT threshold).
+    /// This ID-only constructor is retained for compatibility; votes and blocks
+    /// cannot be authenticated until public keys are registered.
     pub fn new(validator_id: String, validator_ids: Vec<String>) -> Result<Self, ConsensusError> {
-        let total_validators = validator_ids.len();
-        if total_validators == 0 {
+        let known_validators: HashSet<String> = validator_ids.into_iter().collect();
+        if known_validators.is_empty() {
+            return Err(ConsensusError::ProposalRejected {
+                reason: "total_validators must be > 0".to_string(),
+            });
+        }
+        if !known_validators.contains(&validator_id) {
+            return Err(ConsensusError::ProposalRejected {
+                reason: format!("Local validator '{validator_id}' is not registered"),
+            });
+        }
+        Ok(Self::from_validator_keys(known_validators, HashMap::new()))
+    }
+
+    /// Create a PBFT engine with SPHINCS+ public keys for every voting validator.
+    pub fn new_with_validator_keys(
+        validator_id: String,
+        validator_keys: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self, ConsensusError> {
+        if validator_keys.is_empty() {
             return Err(ConsensusError::ProposalRejected {
                 reason: "total_validators must be > 0".to_string(),
             });
         }
 
-        let quorum_size = (total_validators * 2) / 3 + 1;
-        let known_validators: std::collections::HashSet<String> =
-            validator_ids.into_iter().collect();
+        let mut public_keys = HashMap::with_capacity(validator_keys.len());
+        for (id, key) in validator_keys {
+            if id.is_empty() || key.len() != SPHINCS_PK_LEN {
+                return Err(ConsensusError::ProposalRejected {
+                    reason: format!("Invalid validator ID or SPHINCS+ public key for '{id}'"),
+                });
+            }
+            sphincsshake256fsimple::PublicKey::from_bytes(&key).map_err(|e| {
+                ConsensusError::ProposalRejected {
+                    reason: format!("Invalid SPHINCS+ public key for '{id}': {e:?}"),
+                }
+            })?;
+            if public_keys.insert(id.clone(), key).is_some() {
+                return Err(ConsensusError::ProposalRejected {
+                    reason: format!("Duplicate validator ID '{id}'"),
+                });
+            }
+        }
 
-        Ok(PbftConsensusEngine {
-            validator_id,
+        let known_validators = public_keys.keys().cloned().collect();
+        if !public_keys.contains_key(&validator_id) {
+            return Err(ConsensusError::ProposalRejected {
+                reason: format!("Local validator '{validator_id}' has no registered public key"),
+            });
+        }
+        Ok(Self::from_validator_keys(known_validators, public_keys))
+    }
+
+    fn from_validator_keys(
+        known_validators: HashSet<String>,
+        validator_pubkeys: HashMap<String, Vec<u8>>,
+    ) -> Self {
+        let total_validators = known_validators.len();
+        Self {
             total_validators,
-            quorum_size,
+            quorum_size: (total_validators * 2) / 3 + 1,
             finalized_blocks: HashMap::new(),
             current_view: 0,
             prepare_votes: HashMap::new(),
             commit_votes: HashMap::new(),
             known_validators,
-        })
+            validator_pubkeys,
+            block_hashes: HashMap::new(),
+        }
     }
 
-    /// Register a new validator (e.g. after an epoch rotation).
+    /// Register an ID-only validator (e.g. after an epoch rotation).
+    ///
+    /// This updates the quorum set, but the validator cannot vote until its
+    /// public key is registered with `add_validator_with_public_key`.
     pub fn add_validator(&mut self, validator_id: String) {
         self.known_validators.insert(validator_id);
         self.total_validators = self.known_validators.len();
         self.quorum_size = (self.total_validators * 2) / 3 + 1;
     }
 
+    /// Register a validator with the public key required to authenticate votes.
+    pub fn add_validator_with_public_key(
+        &mut self,
+        validator_id: String,
+        public_key: Vec<u8>,
+    ) -> Result<(), ConsensusError> {
+        if validator_id.is_empty() || public_key.len() != SPHINCS_PK_LEN {
+            return Err(ConsensusError::ProposalRejected {
+                reason: "Invalid validator ID or SPHINCS+ public key".to_string(),
+            });
+        }
+        sphincsshake256fsimple::PublicKey::from_bytes(&public_key).map_err(|e| {
+            ConsensusError::ProposalRejected {
+                reason: format!("Invalid SPHINCS+ public key: {e:?}"),
+            }
+        })?;
+        self.known_validators.insert(validator_id.clone());
+        self.validator_pubkeys.insert(validator_id, public_key);
+        self.total_validators = self.known_validators.len();
+        self.quorum_size = (self.total_validators * 2) / 3 + 1;
+        Ok(())
+    }
+
     /// Remove a validator (e.g. after slashing or exit).
     pub fn remove_validator(&mut self, validator_id: &str) {
         self.known_validators.remove(validator_id);
+        self.validator_pubkeys.remove(validator_id);
         self.total_validators = self.known_validators.len();
         self.quorum_size = if self.total_validators > 0 {
             (self.total_validators * 2) / 3 + 1
@@ -139,7 +241,16 @@ impl PbftConsensusEngine {
     ///
     /// SAFETY: Block must already be produced by PoS. PBFT only finalizes.
     #[allow(dead_code)]
-    fn pre_prepare(&mut self, block_height: u64, _block: &Block) -> Result<(), ConsensusError> {
+    fn pre_prepare(&mut self, block_height: u64, block: &Block) -> Result<(), ConsensusError> {
+        if block.index != block_height {
+            return Err(ConsensusError::ProposalRejected {
+                reason: format!(
+                    "Pre-prepare height {} does not match block height {}",
+                    block_height, block.index
+                ),
+            });
+        }
+        self.verify_registered_block_signature(block)?;
         if self.finalized_blocks.contains_key(&block_height) {
             return Err(ConsensusError::ProposalRejected {
                 reason: format!("Block {} already in finalization pipeline", block_height),
@@ -148,6 +259,7 @@ impl PbftConsensusEngine {
 
         self.finalized_blocks
             .insert(block_height, PbftBlockState::Proposed);
+        self.block_hashes.insert(block_height, block.compute_hash());
         self.prepare_votes.entry(block_height).or_default();
         self.commit_votes.entry(block_height).or_default();
 
@@ -158,19 +270,41 @@ impl PbftConsensusEngine {
         Ok(())
     }
 
-    /// Process a prepare vote from `preparer_id`.
-    ///
-    /// # H-02 FIX
-    ///
-    /// Votes are accumulated in a `HashSet` keyed by validator ID. The block
-    /// advances to `Prepared` only when `|prepare_votes| >= quorum_size`.
-    /// Unknown validators and duplicate votes are both silently rejected so
-    /// that vote stuffing or replay cannot manufacture a false quorum.
+    fn verify_registered_block_signature(&self, block: &Block) -> Result<(), ConsensusError> {
+        if block.validator_signature.len() != SPHINCS_PK_LEN + SPHINCS_SIG_LEN {
+            return Err(ConsensusError::InvalidSignature {
+                validator_id: "unknown".to_string(),
+            });
+        }
+        let stored_public_key = &block.validator_signature[..SPHINCS_PK_LEN];
+        let (validator_id, public_key) = self
+            .validator_pubkeys
+            .iter()
+            .find(|(_, key)| key.as_slice() == stored_public_key)
+            .ok_or_else(|| ConsensusError::InvalidSignature {
+                validator_id: "unregistered".to_string(),
+            })?;
+        if !block
+            .verify_signature(public_key)
+            .map_err(|_| ConsensusError::InvalidSignature {
+                validator_id: validator_id.clone(),
+            })?
+        {
+            return Err(ConsensusError::InvalidSignature {
+                validator_id: validator_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Process a prepare vote from `preparer_id` after verifying its SPHINCS+
+    /// signature over the canonical vote payload.
     #[allow(dead_code)]
     fn process_prepare(
         &mut self,
         block_height: u64,
         preparer_id: &str,
+        signature: &[u8],
     ) -> Result<(), ConsensusError> {
         // Only accept votes for blocks in Proposed state
         if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Proposed) {
@@ -185,6 +319,7 @@ impl PbftConsensusEngine {
             );
             return Ok(());
         }
+        self.verify_vote(PbftPhase::Prepare, block_height, preparer_id, signature)?;
 
         let votes = self.prepare_votes.entry(block_height).or_default();
         votes.insert(preparer_id.to_string());
@@ -209,18 +344,14 @@ impl PbftConsensusEngine {
         Ok(())
     }
 
-    /// Process a commit vote from `committer_id`.
-    ///
-    /// # H-02 FIX
-    ///
-    /// Same real vote-accumulation logic as `process_prepare`. The block is
-    /// only committed once `|commit_votes| >= quorum_size` distinct known
-    /// validators have committed.
+    /// Process a commit vote from `committer_id` after verifying its SPHINCS+
+    /// signature over the canonical vote payload.
     #[allow(dead_code)]
     fn process_commit(
         &mut self,
         block_height: u64,
         committer_id: &str,
+        signature: &[u8],
     ) -> Result<(), ConsensusError> {
         // Only accept commits for blocks that have reached Prepared
         if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Prepared) {
@@ -234,6 +365,7 @@ impl PbftConsensusEngine {
             );
             return Ok(());
         }
+        self.verify_vote(PbftPhase::Commit, block_height, committer_id, signature)?;
 
         let votes = self.commit_votes.entry(block_height).or_default();
         votes.insert(committer_id.to_string());
@@ -259,6 +391,47 @@ impl PbftConsensusEngine {
         }
 
         Ok(())
+    }
+
+    fn verify_vote(
+        &self,
+        phase: PbftPhase,
+        block_height: u64,
+        validator_id: &str,
+        signature: &[u8],
+    ) -> Result<(), ConsensusError> {
+        let public_key = self.validator_pubkeys.get(validator_id).ok_or_else(|| {
+            ConsensusError::InvalidSignature {
+                validator_id: validator_id.to_string(),
+            }
+        })?;
+        if signature.len() != SPHINCS_SIG_LEN {
+            return Err(ConsensusError::InvalidSignature {
+                validator_id: validator_id.to_string(),
+            });
+        }
+        let block_hash = self.block_hashes.get(&block_height).ok_or_else(|| {
+            ConsensusError::ProposalRejected {
+                reason: format!("No pre-prepare block hash for height {block_height}"),
+            }
+        })?;
+        let message = pbft_vote_message(phase, block_height, block_hash, validator_id);
+        let public_key =
+            sphincsshake256fsimple::PublicKey::from_bytes(public_key).map_err(|_| {
+                ConsensusError::InvalidSignature {
+                    validator_id: validator_id.to_string(),
+                }
+            })?;
+        let signature =
+            sphincsshake256fsimple::DetachedSignature::from_bytes(signature).map_err(|_| {
+                ConsensusError::InvalidSignature {
+                    validator_id: validator_id.to_string(),
+                }
+            })?;
+        sphincsshake256fsimple::verify_detached_signature(&signature, &message, &public_key)
+            .map_err(|_| ConsensusError::InvalidSignature {
+                validator_id: validator_id.to_string(),
+            })
     }
 
     /// Returns how many distinct prepare votes have been received for `block_height`.
@@ -308,17 +481,7 @@ impl ConsensusEngine for PbftConsensusEngine {
             });
         }
 
-        // SAFETY: Verify signature exists
-        if block.validator_signature.is_empty() {
-            return Err(ConsensusError::InvalidSignature {
-                validator_id: "unknown".to_string(),
-            });
-        }
-
-        // In a real implementation, we would:
-        // 1. Verify the block was produced by PoS consensus
-        // 2. Check that we can reach PBFT quorum for this block
-        // 3. Verify threshold of prepare/commit signatures
+        self.verify_registered_block_signature(block)?;
 
         info!(
             "PBFT verification passed for block {} in epoch {}",
@@ -330,42 +493,15 @@ impl ConsensusEngine for PbftConsensusEngine {
 
     fn propose_block(
         &self,
-        height: u64,
-        previous_hash: String,
-        transactions: Vec<Transaction>,
-        epoch_state: &EpochState,
+        _height: u64,
+        _previous_hash: String,
+        _transactions: Vec<Transaction>,
+        _epoch_state: &EpochState,
         _blockchain_state: &BlockchainState,
     ) -> Result<Block, ConsensusError> {
-        // SAFETY: PBFT does NOT produce blocks independently!
-        // This should only be called during PoS consensus when PBFT is NOT active.
-        // However, we provide a fallback to create properly-marked blocks.
-
-        warn!(
-            "PBFT propose_block called at height {} - PBFT should not produce blocks!",
-            height
-        );
-
-        let mut block = Block::with_consensus_and_sharding(
-            height,
-            transactions,
-            previous_hash,
-            epoch_state.epoch_id,
-            ConsensusMode::PbftFastFinality,
-            1,             // protocol_version
-            String::new(), // shard_registry_root
-            0,             // shard_id
-            String::new(), // shard_state_root
-        );
-
-        // Sign with our validator key
-        block.validator_signature = self.validator_id.as_bytes().to_vec();
-
-        info!(
-            "PBFT created block {} (should normally be finalized, not proposed)",
-            height
-        );
-
-        Ok(block)
+        Err(ConsensusError::ProposalRejected {
+            reason: "PBFT is a finality gadget and cannot propose blocks".to_string(),
+        })
     }
 
     fn consensus_mode(&self) -> crate::epoch::ConsensusMode {
@@ -391,9 +527,78 @@ impl ConsensusEngine for PbftConsensusEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::epoch::{ConsensusMode as EpochConsensusMode, EpochState};
+    use bleep_core::blockchain::BlockchainState;
+    use pqcrypto_traits::sign::SecretKey as _;
 
     fn validators(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn engine_with_keys(ids: &[&str]) -> (PbftConsensusEngine, HashMap<String, Vec<u8>>) {
+        let mut keys = Vec::new();
+        let mut secret_keys = HashMap::new();
+        for id in ids {
+            let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+            keys.push(((*id).to_string(), public_key.as_bytes().to_vec()));
+            secret_keys.insert((*id).to_string(), secret_key.as_bytes().to_vec());
+        }
+        (
+            PbftConsensusEngine::new_with_validator_keys("v1".to_string(), keys).unwrap(),
+            secret_keys,
+        )
+    }
+
+    fn signed_vote(
+        engine: &PbftConsensusEngine,
+        secret_keys: &HashMap<String, Vec<u8>>,
+        phase: PbftPhase,
+        height: u64,
+        validator_id: &str,
+    ) -> Vec<u8> {
+        let block_hash = engine.block_hashes.get(&height).unwrap();
+        let message = pbft_vote_message(phase, height, block_hash, validator_id);
+        let secret_key =
+            sphincsshake256fsimple::SecretKey::from_bytes(secret_keys.get(validator_id).unwrap())
+                .unwrap();
+        sphincsshake256fsimple::detached_sign(&message, &secret_key)
+            .as_bytes()
+            .to_vec()
+    }
+
+    fn signed_block(
+        engine: &PbftConsensusEngine,
+        secret_keys: &HashMap<String, Vec<u8>>,
+        height: u64,
+        previous_hash: &str,
+    ) -> Block {
+        let public_key = engine.validator_pubkeys.get("v1").unwrap();
+        let mut block = Block::with_consensus_and_sharding(
+            height,
+            vec![],
+            previous_hash.to_string(),
+            0,
+            ConsensusMode::PosNormal,
+            1,
+            String::new(),
+            0,
+            String::new(),
+        );
+        block
+            .sign_block_with_pk(secret_keys.get("v1").unwrap(), public_key)
+            .unwrap();
+        block
+    }
+
+    fn process_all_votes(engine: &mut PbftConsensusEngine, secret_keys: &HashMap<String, Vec<u8>>) {
+        for id in ["v1", "v2", "v3"] {
+            let signature = signed_vote(engine, secret_keys, PbftPhase::Prepare, 100, id);
+            engine.process_prepare(100, id, &signature).unwrap();
+        }
+        for id in ["v1", "v2", "v3"] {
+            let signature = signed_vote(engine, secret_keys, PbftPhase::Commit, 100, id);
+            engine.process_commit(100, id, &signature).unwrap();
+        }
     }
 
     #[test]
@@ -403,7 +608,6 @@ mod tests {
             validators(&["validator1", "v2", "v3"]),
         )
         .unwrap();
-        assert_eq!(engine.validator_id, "validator1");
         assert_eq!(engine.total_validators, 3);
         assert_eq!(engine.quorum_size, 3); // 2/3 + 1 of 3 = 3
     }
@@ -431,13 +635,13 @@ mod tests {
     #[test]
     fn test_pbft_real_quorum_required() {
         // 3 validators: quorum = 3
-        let mut engine =
-            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
-        let block = Block::new(100, vec![], "hash99".to_string());
+        let (mut engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let block = signed_block(&engine, &secret_keys, 100, "hash99");
         engine.pre_prepare(100, &block).unwrap();
 
         // After 1 prepare vote — should still be Proposed (not Prepared yet)
-        engine.process_prepare(100, "v1").unwrap();
+        let signature = signed_vote(&engine, &secret_keys, PbftPhase::Prepare, 100, "v1");
+        engine.process_prepare(100, "v1", &signature).unwrap();
         assert_eq!(
             engine.block_state(100),
             Some(PbftBlockState::Proposed),
@@ -445,32 +649,38 @@ mod tests {
         );
 
         // After 2nd prepare vote — still Proposed
-        engine.process_prepare(100, "v2").unwrap();
+        let signature = signed_vote(&engine, &secret_keys, PbftPhase::Prepare, 100, "v2");
+        engine.process_prepare(100, "v2", &signature).unwrap();
         assert_eq!(engine.block_state(100), Some(PbftBlockState::Proposed));
 
         // After 3rd prepare vote — quorum reached, now Prepared
-        engine.process_prepare(100, "v3").unwrap();
+        let signature = signed_vote(&engine, &secret_keys, PbftPhase::Prepare, 100, "v3");
+        engine.process_prepare(100, "v3", &signature).unwrap();
         assert_eq!(engine.block_state(100), Some(PbftBlockState::Prepared));
 
         // Commit: need 3 votes too
-        engine.process_commit(100, "v1").unwrap();
+        let signature = signed_vote(&engine, &secret_keys, PbftPhase::Commit, 100, "v1");
+        engine.process_commit(100, "v1", &signature).unwrap();
         assert_eq!(engine.block_state(100), Some(PbftBlockState::Prepared));
-        engine.process_commit(100, "v2").unwrap();
+        let signature = signed_vote(&engine, &secret_keys, PbftPhase::Commit, 100, "v2");
+        engine.process_commit(100, "v2", &signature).unwrap();
         assert_eq!(engine.block_state(100), Some(PbftBlockState::Prepared));
-        engine.process_commit(100, "v3").unwrap();
+        let signature = signed_vote(&engine, &secret_keys, PbftPhase::Commit, 100, "v3");
+        engine.process_commit(100, "v3", &signature).unwrap();
         assert_eq!(engine.block_state(100), Some(PbftBlockState::Committed));
         assert!(engine.is_finalized(100));
     }
 
     #[test]
     fn test_pbft_unknown_validator_vote_ignored() {
-        let mut engine =
-            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
-        let block = Block::new(200, vec![], "h200".to_string());
+        let (mut engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let block = signed_block(&engine, &secret_keys, 200, "h199");
         engine.pre_prepare(200, &block).unwrap();
 
         // Vote from an unknown validator — should be ignored
-        engine.process_prepare(200, "attacker").unwrap();
+        engine
+            .process_prepare(200, "attacker", &[0; SPHINCS_SIG_LEN])
+            .unwrap();
         assert_eq!(
             engine.prepare_vote_count(200),
             0,
@@ -481,15 +691,15 @@ mod tests {
 
     #[test]
     fn test_pbft_duplicate_vote_not_double_counted() {
-        let mut engine =
-            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
-        let block = Block::new(300, vec![], "h300".to_string());
+        let (mut engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let block = signed_block(&engine, &secret_keys, 300, "h299");
         engine.pre_prepare(300, &block).unwrap();
 
         // v2 votes three times — must only count once
-        engine.process_prepare(300, "v2").unwrap();
-        engine.process_prepare(300, "v2").unwrap();
-        engine.process_prepare(300, "v2").unwrap();
+        let signature = signed_vote(&engine, &secret_keys, PbftPhase::Prepare, 300, "v2");
+        engine.process_prepare(300, "v2", &signature).unwrap();
+        engine.process_prepare(300, "v2", &signature).unwrap();
+        engine.process_prepare(300, "v2", &signature).unwrap();
         assert_eq!(
             engine.prepare_vote_count(300),
             1,
@@ -500,36 +710,129 @@ mod tests {
 
     #[test]
     fn test_pbft_health_status_perfect() {
-        let mut engine =
-            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
-        let block = Block::new(100, vec![], "hash99".to_string());
+        let (mut engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let block = signed_block(&engine, &secret_keys, 100, "hash99");
         engine.pre_prepare(100, &block).unwrap();
-        for v in &["v1", "v2", "v3"] {
-            engine.process_prepare(100, v).unwrap();
-        }
-        for v in &["v1", "v2", "v3"] {
-            engine.process_commit(100, v).unwrap();
-        }
+        process_all_votes(&mut engine, &secret_keys);
         assert_eq!(engine.health_status(), 1.0);
     }
 
     #[test]
     fn test_pbft_health_status_degraded() {
-        let mut engine =
-            PbftConsensusEngine::new("v1".to_string(), validators(&["v1", "v2", "v3"])).unwrap();
-        let block1 = Block::new(100, vec![], "hash99".to_string());
+        let (mut engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let block1 = signed_block(&engine, &secret_keys, 100, "hash99");
         engine.pre_prepare(100, &block1).unwrap();
-        for v in &["v1", "v2", "v3"] {
-            engine.process_prepare(100, v).unwrap();
-        }
-        for v in &["v1", "v2", "v3"] {
-            engine.process_commit(100, v).unwrap();
-        }
+        process_all_votes(&mut engine, &secret_keys);
 
-        let block2 = Block::new(101, vec![], "hash100".to_string());
+        let block2 = signed_block(&engine, &secret_keys, 101, "hash100");
         engine.pre_prepare(101, &block2).unwrap();
 
         // 1 finalized / 2 total = 0.5
         assert_eq!(engine.health_status(), 0.5);
+    }
+
+    #[test]
+    fn test_pbft_forged_votes_do_not_advance_quorum() {
+        let (mut engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let block = signed_block(&engine, &secret_keys, 400, "h399");
+        engine.pre_prepare(400, &block).unwrap();
+
+        for id in ["v1", "v2", "v3"] {
+            assert!(engine
+                .process_prepare(400, id, &[0; SPHINCS_SIG_LEN])
+                .is_err());
+        }
+        assert_eq!(engine.prepare_vote_count(400), 0);
+        assert_eq!(engine.block_state(400), Some(PbftBlockState::Proposed));
+    }
+
+    #[test]
+    fn test_pbft_vote_signature_is_bound_to_phase_and_block() {
+        let (mut engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let block = signed_block(&engine, &secret_keys, 500, "h499");
+        engine.pre_prepare(500, &block).unwrap();
+
+        let wrong_block_message =
+            pbft_vote_message(PbftPhase::Prepare, 500, "different-block-hash", "v1");
+        let secret_key =
+            sphincsshake256fsimple::SecretKey::from_bytes(secret_keys.get("v1").unwrap()).unwrap();
+        let wrong_block_signature =
+            sphincsshake256fsimple::detached_sign(&wrong_block_message, &secret_key)
+                .as_bytes()
+                .to_vec();
+        assert!(engine
+            .process_prepare(500, "v1", &wrong_block_signature)
+            .is_err());
+        assert_eq!(engine.prepare_vote_count(500), 0);
+
+        for id in ["v1", "v2", "v3"] {
+            let signature = signed_vote(&engine, &secret_keys, PbftPhase::Prepare, 500, id);
+            engine.process_prepare(500, id, &signature).unwrap();
+        }
+        let prepare = signed_vote(&engine, &secret_keys, PbftPhase::Prepare, 500, "v1");
+        assert!(engine.process_commit(500, "v1", &prepare).is_err());
+        assert_eq!(engine.commit_vote_count(500), 0);
+    }
+
+    #[test]
+    fn test_pbft_propose_block_fails_closed() {
+        let engine = PbftConsensusEngine::new("v1".to_string(), validators(&["v1"])).unwrap();
+        let epoch = EpochState::new(0, EpochConsensusMode::PbftFastFinality, 0, 999);
+        let result = engine.propose_block(
+            1,
+            "previous".to_string(),
+            vec![],
+            &epoch,
+            &BlockchainState::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ProposalRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn test_pbft_verify_block_rejects_id_bytes_as_signature() {
+        let engine = PbftConsensusEngine::new("v1".to_string(), validators(&["v1"])).unwrap();
+        let epoch = EpochState::new(0, EpochConsensusMode::PbftFastFinality, 0, 999);
+        let mut block = Block::with_consensus_and_sharding(
+            1,
+            vec![],
+            "previous".to_string(),
+            0,
+            ConsensusMode::PbftFastFinality,
+            1,
+            String::new(),
+            0,
+            String::new(),
+        );
+        block.validator_signature = b"v1".to_vec();
+        assert!(matches!(
+            engine.verify_block(&block, &epoch, &BlockchainState::new()),
+            Err(ConsensusError::InvalidSignature { .. })
+        ));
+    }
+
+    #[test]
+    fn test_pbft_verify_block_accepts_registered_cryptographic_signature() {
+        let (engine, secret_keys) = engine_with_keys(&["v1"]);
+        let public_key = engine.validator_pubkeys.get("v1").unwrap();
+        let secret_key = secret_keys.get("v1").unwrap();
+        let mut block = Block::with_consensus_and_sharding(
+            1,
+            vec![],
+            "previous".to_string(),
+            0,
+            ConsensusMode::PbftFastFinality,
+            1,
+            String::new(),
+            0,
+            String::new(),
+        );
+        block.sign_block_with_pk(secret_key, public_key).unwrap();
+        let epoch = EpochState::new(0, EpochConsensusMode::PbftFastFinality, 0, 999);
+        assert!(engine
+            .verify_block(&block, &epoch, &BlockchainState::new())
+            .is_ok());
     }
 }

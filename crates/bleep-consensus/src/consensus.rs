@@ -29,11 +29,10 @@
 //! **Fix:** A fresh `sha2::Sha256` is constructed per iteration over
 //! `block_commitment(32B) || nonce_le8(8B)`.
 //!
-//! ### S-04 — MEDIUM: `collect_votes` documented as network integration point
+//! ### S-04 — PBFT requires authenticated quorum evidence
 //!
-//! `eligible_voters()` replaces `collect_votes()` and is documented honestly:
-//! it returns eligible voter IDs from the local registry.  Real vote accumulation
-//! is handled by `PbftConsensusEngine` (the H-02-hardened engine).
+//! The adaptive driver does not infer a PBFT quorum from its local validator
+//! registry. PBFT finality requires authenticated prepare and commit votes.
 //!
 //! ### S-05 — MEDIUM: `verify_signature` uses correct peer public key
 //!
@@ -46,7 +45,7 @@
 //! Fixed: `filter(reputation < REPUTATION_SUSPECT_THRESHOLD)` → marked inactive.
 
 use log::{info, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use bincode;
@@ -75,7 +74,6 @@ const SPHINCS_PK_LEN: usize = 32;
 // ── Reputation thresholds ─────────────────────────────────────────────────────
 
 /// Validators must meet this minimum to be eligible to vote in PBFT.
-const MIN_REPUTATION_FOR_VOTE: f64 = 0.75;
 
 /// Validators below this threshold are flagged and deactivated by monitoring.
 const REPUTATION_SUSPECT_THRESHOLD: f64 = 0.30;
@@ -342,62 +340,12 @@ impl BLEEPAdaptiveConsensus {
     // ── PBFT  ─  S-04 FIX ────────────────────────────────────────────────────
 
     fn pbft_algorithm(&self, block: &Block, state: &mut BlockchainState) -> bool {
-        let leader = match self.select_pbft_leader() {
-            Some(l) => l,
-            None => return false,
-        };
-        if self
-            .networking
-            .broadcast_proposal(block, &leader.id.clone())
-            .is_err()
-        {
-            warn!("PBFT: broadcast failed for block {}", block.index);
-            return false;
-        }
-
-        // eligible_voters returns the candidate set from the local registry.
-        // Actual quorum enforcement (real network vote counting) is done by
-        // PbftConsensusEngine — this path is the mode-level driver only.
-        let candidates = self.eligible_voters();
-        if !self.has_quorum(&candidates) {
-            warn!(
-                "PBFT: insufficient eligible voters for block {} ({}/{})",
-                block.index,
-                candidates.len(),
-                (self.validators.len() as f64 * 0.66).ceil() as usize
-            );
-            return false;
-        }
-        state.add_block(block.clone()).is_ok()
-    }
-
-    fn select_pbft_leader(&self) -> Option<&Validator> {
-        let mut active: Vec<&Validator> = self
-            .validators
-            .values()
-            .filter(|v| v.active && v.reputation > 0.7)
-            .collect();
-        if active.is_empty() {
-            warn!("No eligible PBFT leaders.");
-            return None;
-        }
-        active.sort_by(|a, b| b.stake.cmp(&a.stake).then_with(|| a.id.cmp(&b.id)));
-        active.into_iter().next()
-    }
-
-    /// Return the set of validator IDs eligible to vote (local registry only).
-    /// S-04: renamed from `collect_votes`; no longer claims to count network votes.
-    fn eligible_voters(&self) -> HashSet<String> {
-        self.validators
-            .iter()
-            .filter(|(_, v)| v.active && v.reputation >= MIN_REPUTATION_FOR_VOTE)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    fn has_quorum(&self, votes: &HashSet<String>) -> bool {
-        let required = (self.validators.len() as f64 * 0.66).ceil() as usize;
-        votes.len() >= required
+        let _ = state;
+        warn!(
+            "PBFT cannot accept block {} based on local validator eligibility; authenticated prepare and commit quorum is required",
+            block.index
+        );
+        false
     }
 
     // ── Validator monitoring  ─  logic-inversion fix ──────────────────────────
