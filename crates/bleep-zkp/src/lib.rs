@@ -58,25 +58,15 @@ pub const BLOCK_CIRCUIT_PUBLIC_INPUTS: usize = 5;
 
 // ── Block Validity Circuit ───────────────────────────────────────────────────
 
-/// STARK Air that proves knowledge of a valid block.
-///
-/// # Soundness
-/// A malicious prover cannot generate a valid proof without knowing a `sk_seed`
-/// whose SHA3-256 hash equals the `validator_pk_hash` public input, NOR without
-/// knowing a block preimage whose hash matches the committed `block_hash`.
-///
-/// # Constraints generated
-/// This Air generates transition constraints over the execution trace.
+/// Legacy block circuit descriptor. Its underlying AIR does not constrain block
+/// validity, so the associated proof-generation API is disabled.
 #[derive(Clone)]
 pub struct BlockValidityCircuit {
     air: BlockValidityAir,
 }
 
 impl BlockValidityCircuit {
-    /// Construct a circuit for proving.
-    ///
-    /// `sk_seed` and `block_hash` are the private witnesses. All other fields
-    /// are public inputs that the verifier also computes from the block header.
+    /// Construct a descriptor for the disabled legacy circuit.
     pub fn for_proving(
         block_index: u64,
         epoch_id: u64,
@@ -124,7 +114,7 @@ impl BlockValidityCircuit {
 
 // ── STARK Prover/Verifier ──────────────────────────────────────────────────
 
-/// Block-level STARK prover.
+/// Legacy block-level STARK prover. Proof generation is disabled.
 pub struct BlockProver;
 
 impl Default for BlockProver {
@@ -139,15 +129,7 @@ impl BlockProver {
         Self
     }
 
-    /// Generate a STARK proof for a block.
-    ///
-    /// This generates a production-grade zero-knowledge proof that:
-    ///   1. The proposer knows the block hash preimage
-    ///   2. The proposer knows a secret key correlating to their public key
-    ///   3. Block index is consistent with epoch
-    ///   4. Merkle root commitment is valid
-    ///
-    /// Returns serialized proof bytes.
+    /// Reject legacy proof generation; this circuit does not constrain block validity.
     pub fn prove(&self, circuit: BlockValidityCircuit) -> Result<Vec<u8>, String> {
         let proof = BlockValidityProver::prove(
             circuit.air.block_index,
@@ -170,7 +152,7 @@ impl BlockProver {
     }
 }
 
-/// Block-level STARK verifier.
+/// Legacy block-level STARK verifier. It rejects the unsupported `STARK_V1` format.
 pub struct BlockVerifier;
 
 impl Default for BlockVerifier {
@@ -216,8 +198,8 @@ impl BlockVerifier {
     }
 }
 
-/// Production-grade generic STARK proof verifier.
-/// Performs cryptographic verification of STARK proofs using structural validation.
+/// Generic legacy proof dispatcher. `STARK_V1` block proofs are rejected;
+/// metadata checks on batch proofs are not execution proofs.
 pub struct ProofVerifier;
 
 impl ProofVerifier {
@@ -226,12 +208,9 @@ impl ProofVerifier {
         Self
     }
 
-    /// Verify a STARK proof using structural validation.
-    ///
-    /// This performs cryptographic verification by checking:
-    ///   1. Proof format and header validity (STARK_V1 or BATCH_STARKv1)
-    ///   2. Proof metadata consistency
-    ///   3. Proof size constraints
+    /// Verify a supported STARK proof format.
+    /// Legacy `STARK_V1` block proofs are rejected because their AIR does not
+    /// constrain block validity.
     ///
     /// For batch proofs, also verifies:
     ///   - Transaction count bounds
@@ -264,77 +243,9 @@ impl ProofVerifier {
         }
     }
 
-    /// Verify STARK block proof structure
-    fn verify_stark_block_proof(&self, proof_bytes: &[u8]) -> bool {
-        // Minimum size: header (8) + metadata (24) + options (12) + trace dims (8) + hashes (126)
-        if proof_bytes.len() < 178 {
-            info!(
-                "❌ Block proof too short: expected at least 178 bytes, got {}",
-                proof_bytes.len()
-            );
-            return false;
-        }
-
-        // Extract and validate metadata
-        if proof_bytes.len() >= 32 {
-            let mut offset = 8;
-
-            // Parse block metadata
-            let block_index = u64::from_le_bytes([
-                proof_bytes[offset],
-                proof_bytes[offset + 1],
-                proof_bytes[offset + 2],
-                proof_bytes[offset + 3],
-                proof_bytes[offset + 4],
-                proof_bytes[offset + 5],
-                proof_bytes[offset + 6],
-                proof_bytes[offset + 7],
-            ]);
-            offset += 8;
-
-            let epoch_id = u64::from_le_bytes([
-                proof_bytes[offset],
-                proof_bytes[offset + 1],
-                proof_bytes[offset + 2],
-                proof_bytes[offset + 3],
-                proof_bytes[offset + 4],
-                proof_bytes[offset + 5],
-                proof_bytes[offset + 6],
-                proof_bytes[offset + 7],
-            ]);
-            offset += 8;
-
-            let tx_count = u64::from_le_bytes([
-                proof_bytes[offset],
-                proof_bytes[offset + 1],
-                proof_bytes[offset + 2],
-                proof_bytes[offset + 3],
-                proof_bytes[offset + 4],
-                proof_bytes[offset + 5],
-                proof_bytes[offset + 6],
-                proof_bytes[offset + 7],
-            ]);
-
-            // Validate consistency constraints
-            if tx_count > 65536 {
-                info!("❌ Invalid tx_count: {}", tx_count);
-                return false;
-            }
-
-            if block_index > u64::MAX / 2 {
-                info!("❌ Invalid block_index: {}", block_index);
-                return false;
-            }
-
-            info!(
-                "✅ Block STARK proof verified (block={}, epoch={}, tx_count={})",
-                block_index, epoch_id, tx_count
-            );
-            true
-        } else {
-            info!("❌ Block proof metadata extraction failed");
-            false
-        }
+    /// Reject the obsolete metadata-only block-proof format.
+    fn verify_stark_block_proof(&self, _proof_bytes: &[u8]) -> bool {
+        false
     }
 
     /// Verify batch transaction proof structure
@@ -547,66 +458,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_devnet_setup_and_block_prove_verify() {
+    fn legacy_block_prover_is_disabled() {
         let prover = BlockProver::new();
-        let verifier = BlockVerifier::new();
-
-        let sk_seed = [0x42u8; 32];
-        let block_hash = [0xABu8; 32];
-        let merkle_root = "deadbeef00000000000000000000000000000000000000000000000000000000";
-        let validator_pk = [0x11u8; 64]; // mock SPHINCS+ pk bytes
-
-        let circuit = BlockValidityCircuit::for_proving(
-            /*block_index=*/ 1,
-            /*epoch_id=*/ 0,
-            /*tx_count=*/ 3,
-            merkle_root,
-            &validator_pk,
-            block_hash,
-            sk_seed,
-        );
-        let proof_bytes = prover.prove(circuit).expect("prove failed");
-
-        assert!(!proof_bytes.is_empty(), "proof should be non-empty");
-        assert!(
-            verifier
-                .verify(&proof_bytes, 1, 0, 3, merkle_root.as_bytes(), &validator_pk)
-                .unwrap(),
-            "proof verification failed"
-        );
-    }
-
-    #[test]
-    fn test_block_proof_wrong_inputs_fails() {
-        let prover = BlockProver::new();
-        let verifier = BlockVerifier::new();
-
         let circuit = BlockValidityCircuit::for_proving(
             1,
             0,
             3,
-            "aabbcc",
+            "deadbeef",
             &[0x11u8; 64],
+            [0xABu8; 32],
             [0x42u8; 32],
-            [0x99u8; 32],
         );
-        let proof_bytes = prover.prove(circuit).expect("prove failed");
+        assert!(prover.prove(circuit).is_err());
+    }
 
-        // Tamper with public inputs — verifier must reject
-        let wrong_merkle = "wrongmerkle00000000000000000000000000000000000000000000000000000000";
-        assert!(
-            !verifier
-                .verify(
-                    &proof_bytes,
-                    2,
-                    0,
-                    3,
-                    wrong_merkle.as_bytes(),
-                    &[0x11u8; 64]
-                )
-                .unwrap(),
-            "tampered inputs should fail verification"
-        );
+    #[test]
+    fn metadata_only_stark_v1_is_rejected() {
+        let mut proof_bytes = b"STARK_V1".to_vec();
+        proof_bytes.extend_from_slice(&[0; 24 + 31 * 2 + 64]);
+        assert!(!ProofVerifier::new().verify(&proof_bytes));
     }
 
     #[test]
