@@ -1,40 +1,10 @@
-//! Extended 68-column `BlockValidityAir` for BLEEP Protocol Version 5.
+//! AIR for bounded block metadata and commitment fields.
 //!
-//! ## Column layout
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────────────┐
-//! │ BLOCK VALIDITY STATE  (cols 0–47)  — constant across all trace rows     │
-//! │                                                                         │
-//! │   0  block_index          4–5  merkle_root (hi/lo)   10–11 smt_root    │
-//! │   1  epoch_id             6–7  validator_pk (hi/lo)   12–13 block_hash  │
-//! │   2  tx_count             8–9  sk_seed_hash (hi/lo)   14–47 reserved=0  │
-//! │   3  blocks_per_epoch                                                   │
-//! ├─────────────────────────────────────────────────────────────────────────┤
-//! │ SIGNATURE COMMITMENT STATE  (cols 48–67)  — evolves per row             │
-//! │                                                                         │
-//! │  48–49  sig_commitment_root (hi/lo)  — constant                         │
-//! │  50     sig_count           — constant                                  │
-//! │  51     batch_seq_id        — constant                                  │
-//! │  52     avail_threshold_bps — constant                                  │
-//! │  53     processed_count     — increments by 1 each active row           │
-//! │  54–55  current_sig_hash (hi/lo)  — changes each row (informational)    │
-//! │  56     is_active           — 1 for rows 0..sig_count-1, then 0         │
-//! │  57–67  padding / reserved  — always 0                                  │
-//! └─────────────────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! ## Constraint count
-//!
-//! | Group                              | Type   | Count |
-//! |------------------------------------|--------|-------|
-//! | Block validity state (cols 0–47)   | Deg 1  | 48    |
-//! | Sig commitment metadata (48–52)    | Deg 1  |  5    |
-//! | `processed_count` evolution (53)   | Deg 2  |  2    |
-//! | `is_active` state machine (56)     | Deg 2  |  1    |
-//! | Padding / reserved (57–67)         | Deg 1  | 11    |
-//! | **Total transition**               |        | **67**|
-//! | **Boundary assertions**            |        | **14**|
+//! The AIR constrains epoch arithmetic, transaction/signature counts, the
+//! transaction cap, and batch sequence using range-constrained witnesses.
+//! Hash preimages, transaction signature verification, commitment-root
+//! derivation, and state-transition execution are not proved here; those remain
+//! the responsibility of conventional block validation and execution.
 
 use serde::{Deserialize, Serialize};
 use winterfell::{
@@ -43,21 +13,10 @@ use winterfell::{
     TraceInfo, TransitionConstraintDegree,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Trace geometry
-// ─────────────────────────────────────────────────────────────────────────────
+pub const TRACE_WIDTH: usize = 48;
+pub const MIN_TRACE_LENGTH: usize = 32;
+pub const MAX_BLOCK_TRANSACTIONS: u32 = 4_096;
 
-/// Total number of columns in the extended trace.
-pub const TRACE_WIDTH: usize = 68;
-
-/// Minimum trace length required by the Winterfell prover/verifier stack.
-pub const MIN_TRACE_LENGTH: usize = 8;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Column index constants
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Block validity — constant throughout trace
 pub const COL_BLOCK_INDEX: usize = 0;
 pub const COL_EPOCH_ID: usize = 1;
 pub const COL_TX_COUNT: usize = 2;
@@ -72,39 +31,28 @@ pub const COL_SMT_ROOT_HI: usize = 10;
 pub const COL_SMT_ROOT_LO: usize = 11;
 pub const COL_BLOCK_HASH_HI: usize = 12;
 pub const COL_BLOCK_HASH_LO: usize = 13;
-// cols 14–47 reserved (always 0)
-pub const COL_BLOCK_RESERVED_START: usize = 14;
-pub const COL_BLOCK_RESERVED_END: usize = 47; // inclusive
+pub const COL_SIG_ROOT_HI: usize = 14;
+pub const COL_SIG_ROOT_LO: usize = 15;
+pub const COL_SIG_COUNT: usize = 16;
+pub const COL_BATCH_SEQ_ID: usize = 17;
+pub const COL_EPOCH_REMAINDER: usize = 18;
+pub const COL_EPOCH_REMAINDER_GAP: usize = 19;
+pub const COL_TX_COUNT_GAP: usize = 20;
+pub const COL_BLOCKS_PER_EPOCH_INVERSE: usize = 21;
+pub const COL_RANGE_BITS_START: usize = 22;
+pub const COL_RANGE_BITS_END: usize = 37;
+pub const COL_RANGE_VALUE: usize = 38;
+pub const COL_RESERVED_START: usize = 39;
+pub const COL_RESERVED_END: usize = 47;
 
-// Signature commitment — cols 48–67
-pub const COL_SIG_ROOT_HI: usize = 48;
-pub const COL_SIG_ROOT_LO: usize = 49;
-pub const COL_SIG_COUNT: usize = 50;
-pub const COL_BATCH_SEQ_ID: usize = 51;
-pub const COL_AVAIL_THRESHOLD: usize = 52;
-pub const COL_PROCESSED_COUNT: usize = 53;
-pub const COL_CURR_SIG_HI: usize = 54;
-pub const COL_CURR_SIG_LO: usize = 55;
-pub const COL_IS_ACTIVE: usize = 56;
-// cols 57–67 padding / reserved
-pub const COL_PAD_START: usize = 57;
-pub const COL_PAD_END: usize = 67; // inclusive
+const EPOCH_REMAINDER_LIMB: usize = 20;
+const EPOCH_REMAINDER_GAP_LIMB: usize = 21;
+const TX_COUNT_GAP_LIMB: usize = 22;
+pub(crate) const NUM_RANGE_LIMBS: usize = 23;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constraint counts — must match evaluate_transition and get_assertions exactly
-// ─────────────────────────────────────────────────────────────────────────────
+pub const NUM_TRANSITION_CONSTRAINTS: usize = 54;
+pub const NUM_ASSERTIONS: usize = 59;
 
-/// Number of transition constraint results written by `evaluate_transition`.
-pub const NUM_TRANSITION_CONSTRAINTS: usize = 67;
-
-/// Number of boundary assertions returned by `get_assertions`.
-pub const NUM_ASSERTIONS: usize = 20;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility: encode 32-byte hash into two f128 field elements
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Encode bytes `[0..16)` of a 32-byte hash as a `BaseElement`.
 #[inline]
 pub fn bytes_hi(hash: &[u8; 32]) -> BaseElement {
     let mut buf = [0u8; 16];
@@ -112,7 +60,6 @@ pub fn bytes_hi(hash: &[u8; 32]) -> BaseElement {
     BaseElement::new(u128::from_le_bytes(buf))
 }
 
-/// Encode bytes `[16..32)` of a 32-byte hash as a `BaseElement`.
 #[inline]
 pub fn bytes_lo(hash: &[u8; 32]) -> BaseElement {
     let mut buf = [0u8; 16];
@@ -120,94 +67,63 @@ pub fn bytes_lo(hash: &[u8; 32]) -> BaseElement {
     BaseElement::new(u128::from_le_bytes(buf))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ExtendedBlockPublicInputs
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Public inputs for the extended block-validity STARK proof.
-///
-/// Every field is committed to during proof generation and checked by every
-/// verifier before accepting a `StarkProof`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtendedBlockPublicInputs {
-    /// Block height (`block_index` in the consensus layer).
     pub block_index: u64,
-    /// Epoch identifier (`block_index / blocks_per_epoch`).
     pub epoch_id: u64,
-    /// Number of transactions in the block.
     pub tx_count: u32,
-    /// Epoch length in blocks (`BLOCKS_PER_EPOCH` from genesis config).
     pub blocks_per_epoch: u64,
-    /// Sparse Merkle Trie commitment (32 bytes).
     pub merkle_root_hash: [u8; 32],
-    /// SHA3-256 of the block proposer's SPHINCS+ public key.
     pub validator_pk_hash: [u8; 32],
-    /// SHA3-256 of the proposer's secret-key seed (private witness commitment).
     pub sk_seed_hash: [u8; 32],
-    /// SHA3-256 of the canonical block header bytes.
     pub block_hash: [u8; 32],
-    /// SHA3-256 of the Sparse Merkle Trie root (non-zero check).
     pub smt_root: [u8; 32],
-    /// Blake3 Merkle root over `SHA3-256(sig_i)` for all transactions.
-    /// This is the SAL commitment bound into the proof.
     pub sig_commitment_root: [u8; 32],
-    /// Number of signature commitments (= `tx_count`).
     pub sig_count: u32,
-    /// Monotonically increasing batch sequence number from `bleep-consensus`.
     pub batch_seq_id: u64,
 }
 
 impl ToElements<BaseElement> for ExtendedBlockPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        let mut v = Vec::with_capacity(20);
-        v.push(BaseElement::new(self.block_index as u128));
-        v.push(BaseElement::new(self.epoch_id as u128));
-        v.push(BaseElement::new(self.tx_count as u128));
-        v.push(BaseElement::new(self.blocks_per_epoch as u128));
-        v.push(BaseElement::new(self.sig_count as u128));
-        v.push(BaseElement::new(self.batch_seq_id as u128));
-        v.push(bytes_hi(&self.merkle_root_hash));
-        v.push(bytes_lo(&self.merkle_root_hash));
-        v.push(bytes_hi(&self.validator_pk_hash));
-        v.push(bytes_lo(&self.validator_pk_hash));
-        v.push(bytes_hi(&self.sk_seed_hash));
-        v.push(bytes_lo(&self.sk_seed_hash));
-        v.push(bytes_hi(&self.block_hash));
-        v.push(bytes_lo(&self.block_hash));
-        v.push(bytes_hi(&self.smt_root));
-        v.push(bytes_lo(&self.smt_root));
-        v.push(bytes_hi(&self.sig_commitment_root));
-        v.push(bytes_lo(&self.sig_commitment_root));
-        v
+        vec![
+            BaseElement::new(self.block_index as u128),
+            BaseElement::new(self.epoch_id as u128),
+            BaseElement::new(self.tx_count as u128),
+            BaseElement::new(self.blocks_per_epoch as u128),
+            bytes_hi(&self.merkle_root_hash),
+            bytes_lo(&self.merkle_root_hash),
+            bytes_hi(&self.validator_pk_hash),
+            bytes_lo(&self.validator_pk_hash),
+            bytes_hi(&self.sk_seed_hash),
+            bytes_lo(&self.sk_seed_hash),
+            bytes_hi(&self.smt_root),
+            bytes_lo(&self.smt_root),
+            bytes_hi(&self.block_hash),
+            bytes_lo(&self.block_hash),
+            bytes_hi(&self.sig_commitment_root),
+            bytes_lo(&self.sig_commitment_root),
+            BaseElement::new(self.sig_count as u128),
+            BaseElement::new(self.batch_seq_id as u128),
+        ]
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ExtendedBlockValidityAir
-// ─────────────────────────────────────────────────────────────────────────────
+impl ExtendedBlockPublicInputs {
+    /// Check the metadata relationships enforced by this AIR.
+    pub fn is_consistent(&self) -> bool {
+        self.blocks_per_epoch != 0
+            && self.tx_count == self.sig_count
+            && self.tx_count <= MAX_BLOCK_TRANSACTIONS
+            && self.sig_count <= MAX_BLOCK_TRANSACTIONS
+            && self.batch_seq_id == self.block_index
+            && self.epoch_id == self.block_index / self.blocks_per_epoch
+    }
+}
 
-/// Winterfell AIR for the extended 68-column block validity proof.
 pub struct ExtendedBlockValidityAir {
     context: AirContext<BaseElement>,
-    // Public input field-element copies (pre-decoded for use in get_assertions).
-    pi_block_index: BaseElement,
-    pi_epoch_id: BaseElement,
-    pi_tx_count: BaseElement,
-    pi_blocks_per_epoch: BaseElement,
-    pi_merkle_root_hi: BaseElement,
-    pi_merkle_root_lo: BaseElement,
-    pi_validator_pk_hi: BaseElement,
-    pi_validator_pk_lo: BaseElement,
-    pi_sk_seed_hash_hi: BaseElement,
-    pi_sk_seed_hash_lo: BaseElement,
-    pi_block_hash_hi: BaseElement,
-    pi_block_hash_lo: BaseElement,
-    pi_smt_root_hi: BaseElement,
-    pi_smt_root_lo: BaseElement,
-    pi_sig_root_hi: BaseElement,
-    pi_sig_root_lo: BaseElement,
-    pi_sig_count: BaseElement,
-    pi_batch_seq_id: BaseElement,
+    pub_inputs: ExtendedBlockPublicInputs,
+    range_values: Vec<BaseElement>,
 }
 
 impl Air for ExtendedBlockValidityAir {
@@ -219,57 +135,31 @@ impl Air for ExtendedBlockValidityAir {
         pub_inputs: ExtendedBlockPublicInputs,
         options: ProofOptions,
     ) -> Self {
-        // ── Transition constraint degrees ─────────────────────────────────
-        // Group 1: block validity cols 0–47 constant (48 × degree 1)
-        let mut degrees: Vec<TransitionConstraintDegree> =
-            vec![TransitionConstraintDegree::new(1); 48];
+        let mut degrees = Vec::with_capacity(NUM_TRANSITION_CONSTRAINTS);
+        degrees.extend((0..18).map(|_| TransitionConstraintDegree::new(1)));
+        degrees.extend((0..4).map(|_| TransitionConstraintDegree::new(1)));
+        degrees.extend((0..16).map(|_| TransitionConstraintDegree::new(2)));
+        degrees.push(TransitionConstraintDegree::new(1));
+        degrees.push(TransitionConstraintDegree::new(1));
+        degrees.extend((0..4).map(|_| TransitionConstraintDegree::new(1)));
+        degrees.push(TransitionConstraintDegree::new(1));
+        degrees.extend((0..9).map(|_| TransitionConstraintDegree::new(1)));
+        assert_eq!(degrees.len(), NUM_TRANSITION_CONSTRAINTS);
 
-        // Group 2: sig commitment metadata 48–52 constant (5 × degree 1)
-        for _ in 0..5 {
-            degrees.push(TransitionConstraintDegree::new(1));
-        }
-
-        // Group 3: processed_count evolution — 2 × degree 2
-        degrees.push(TransitionConstraintDegree::new(2));
-        degrees.push(TransitionConstraintDegree::new(2));
-
-        // Group 4: is_active state machine — 1 × degree 2
-        // (1 - is_active[t]) * is_active[t+1] = 0 (no 0→1 transition)
-        degrees.push(TransitionConstraintDegree::new(2));
-
-        // Group 5: padding / reserved cols 57–67 constant (11 × degree 1)
-        for _ in 0..11 {
-            degrees.push(TransitionConstraintDegree::new(1));
-        }
-
-        assert_eq!(
-            degrees.len(),
-            NUM_TRANSITION_CONSTRAINTS,
-            "constraint degree list length must equal NUM_TRANSITION_CONSTRAINTS"
-        );
-
-        let context = AirContext::new(trace_info, degrees, NUM_ASSERTIONS, options);
-
+        let epoch_remainder = if pub_inputs.blocks_per_epoch == 0 {
+            0
+        } else {
+            pub_inputs.block_index % pub_inputs.blocks_per_epoch
+        };
+        let epoch_remainder_gap = pub_inputs
+            .blocks_per_epoch
+            .saturating_sub(epoch_remainder.saturating_add(1));
+        let tx_count_gap = u64::from(MAX_BLOCK_TRANSACTIONS)
+            .saturating_sub(u64::from(pub_inputs.tx_count));
         Self {
-            context,
-            pi_block_index: BaseElement::new(pub_inputs.block_index as u128),
-            pi_epoch_id: BaseElement::new(pub_inputs.epoch_id as u128),
-            pi_tx_count: BaseElement::new(pub_inputs.tx_count as u128),
-            pi_blocks_per_epoch: BaseElement::new(pub_inputs.blocks_per_epoch as u128),
-            pi_merkle_root_hi: bytes_hi(&pub_inputs.merkle_root_hash),
-            pi_merkle_root_lo: bytes_lo(&pub_inputs.merkle_root_hash),
-            pi_validator_pk_hi: bytes_hi(&pub_inputs.validator_pk_hash),
-            pi_validator_pk_lo: bytes_lo(&pub_inputs.validator_pk_hash),
-            pi_sk_seed_hash_hi: bytes_hi(&pub_inputs.sk_seed_hash),
-            pi_sk_seed_hash_lo: bytes_lo(&pub_inputs.sk_seed_hash),
-            pi_block_hash_hi: bytes_hi(&pub_inputs.block_hash),
-            pi_block_hash_lo: bytes_lo(&pub_inputs.block_hash),
-            pi_smt_root_hi: bytes_hi(&pub_inputs.smt_root),
-            pi_smt_root_lo: bytes_lo(&pub_inputs.smt_root),
-            pi_sig_root_hi: bytes_hi(&pub_inputs.sig_commitment_root),
-            pi_sig_root_lo: bytes_lo(&pub_inputs.sig_commitment_root),
-            pi_sig_count: BaseElement::new(pub_inputs.sig_count as u128),
-            pi_batch_seq_id: BaseElement::new(pub_inputs.batch_seq_id as u128),
+            context: AirContext::new(trace_info, degrees, NUM_ASSERTIONS, options),
+            range_values: range_values(&pub_inputs, epoch_remainder, epoch_remainder_gap, tx_count_gap),
+            pub_inputs,
         }
     }
 
@@ -277,115 +167,168 @@ impl Air for ExtendedBlockValidityAir {
         &self.context
     }
 
-    // ── Transition constraints ─────────────────────────────────────────────
-
     fn evaluate_transition<E: FieldElement<BaseField = BaseElement>>(
         &self,
         frame: &EvaluationFrame<E>,
         _periodic_values: &[E],
         result: &mut [E],
     ) {
-        let cur = frame.current();
+        let current = frame.current();
         let next = frame.next();
         let one = E::ONE;
+        let mut index = 0;
 
-        // ── Group 1: block validity cols 0–47 must not change (48 constraints) ─
-        // result[0..48]
-        for i in 0..48 {
-            result[i] = next[i] - cur[i];
+        for column in 0..18 {
+            result[index] = next[column] - current[column];
+            index += 1;
+        }
+        for column in COL_EPOCH_REMAINDER..=COL_BLOCKS_PER_EPOCH_INVERSE {
+            result[index] = next[column] - current[column];
+            index += 1;
         }
 
-        // ── Group 2: sig commitment metadata cols 48–52 constant (5 constraints) ─
-        // result[48..53]
-        for i in 0..5 {
-            result[48 + i] = next[COL_SIG_ROOT_HI + i] - cur[COL_SIG_ROOT_HI + i];
+        let mut reconstructed = E::ZERO;
+        let mut bit_weight = E::ONE;
+        for bit_column in COL_RANGE_BITS_START..=COL_RANGE_BITS_END {
+            let bit = current[bit_column];
+            result[index] = bit * (bit - one);
+            index += 1;
+            reconstructed += bit * bit_weight;
+            bit_weight += bit_weight;
         }
+        result[index] = current[COL_RANGE_VALUE] - reconstructed;
+        index += 1;
 
-        // ── Group 3: processed_count evolution (2 constraints) ─────────────
-        // result[53]: next_is_active * (next_processed - cur_processed - 1) = 0
-        // result[54]: (1 - next_is_active) * (next_processed - cur_processed) = 0
-        // The final active row transitions to padding without incrementing.
-        let is_active = cur[COL_IS_ACTIVE];
-        let next_is_active = next[COL_IS_ACTIVE];
-        let cur_processed = cur[COL_PROCESSED_COUNT];
-        let next_processed = next[COL_PROCESSED_COUNT];
-        let delta = next_processed - cur_processed;
+        result[index] = current[COL_BLOCK_INDEX]
+            - current[COL_EPOCH_ID] * current[COL_BLOCKS_PER_EPOCH]
+            - current[COL_EPOCH_REMAINDER];
+        index += 1;
+        result[index] = current[COL_EPOCH_REMAINDER]
+            + current[COL_EPOCH_REMAINDER_GAP]
+            + one
+            - current[COL_BLOCKS_PER_EPOCH];
+        index += 1;
+        let max_tx = E::from(BaseElement::new(u64::from(MAX_BLOCK_TRANSACTIONS) as u128));
+        result[index] = current[COL_TX_COUNT] + current[COL_TX_COUNT_GAP] - max_tx;
+        index += 1;
+        result[index] = current[COL_TX_COUNT] - current[COL_SIG_COUNT];
+        index += 1;
+        result[index] = current[COL_BATCH_SEQ_ID] - current[COL_BLOCK_INDEX];
+        index += 1;
+        result[index] = current[COL_BLOCKS_PER_EPOCH]
+            * current[COL_BLOCKS_PER_EPOCH_INVERSE]
+            - one;
+        index += 1;
 
-        result[53] = next_is_active * (delta - one); // active row: increment by 1
-        result[54] = (one - next_is_active) * delta; // padding row: stay constant
-
-        // ── Group 4: is_active state machine (1 constraint) ────────────────
-        // result[55]: (1 - is_active[t]) * is_active[t+1] = 0
-        // Prevents the flag from going 0 → 1 (once deactivated, stays deactivated).
-        result[55] = (one - is_active) * next[COL_IS_ACTIVE];
-
-        // ── Group 5: padding / reserved cols 57–67 constant (11 constraints) ─
-        // result[56..67]
-        for i in 0..11 {
-            result[56 + i] = next[COL_PAD_START + i] - cur[COL_PAD_START + i];
+        for column in COL_RESERVED_START..=COL_RESERVED_END {
+            result[index] = next[column] - current[column];
+            index += 1;
         }
-
-        // Sanity: result has exactly NUM_TRANSITION_CONSTRAINTS = 67 entries.
-        debug_assert_eq!(result.len(), NUM_TRANSITION_CONSTRAINTS);
+        debug_assert_eq!(index, NUM_TRANSITION_CONSTRAINTS);
     }
 
-    // ── Boundary assertions ────────────────────────────────────────────────
-
     fn get_assertions(&self) -> Vec<Assertion<BaseElement>> {
-        // All 14 assertions are at row 0 (boundary of the trace).
-        vec![
-            // Block validity — match public inputs
-            Assertion::single(COL_BLOCK_INDEX, 0, self.pi_block_index),
-            Assertion::single(COL_EPOCH_ID, 0, self.pi_epoch_id),
-            Assertion::single(COL_TX_COUNT, 0, self.pi_tx_count),
-            Assertion::single(COL_BLOCKS_PER_EPOCH, 0, self.pi_blocks_per_epoch),
-            Assertion::single(COL_MERKLE_ROOT_HI, 0, self.pi_merkle_root_hi),
-            Assertion::single(COL_MERKLE_ROOT_LO, 0, self.pi_merkle_root_lo),
-            Assertion::single(COL_VALIDATOR_PK_HI, 0, self.pi_validator_pk_hi),
-            Assertion::single(COL_VALIDATOR_PK_LO, 0, self.pi_validator_pk_lo),
-            Assertion::single(COL_SK_SEED_HASH_HI, 0, self.pi_sk_seed_hash_hi),
-            Assertion::single(COL_SK_SEED_HASH_LO, 0, self.pi_sk_seed_hash_lo),
-            Assertion::single(COL_SMT_ROOT_HI, 0, self.pi_smt_root_hi),
-            Assertion::single(COL_SMT_ROOT_LO, 0, self.pi_smt_root_lo),
-            Assertion::single(COL_BLOCK_HASH_HI, 0, self.pi_block_hash_hi),
-            Assertion::single(COL_BLOCK_HASH_LO, 0, self.pi_block_hash_lo),
-            // Signature commitment — match public inputs
-            Assertion::single(COL_SIG_ROOT_HI, 0, self.pi_sig_root_hi),
-            Assertion::single(COL_SIG_ROOT_LO, 0, self.pi_sig_root_lo),
-            Assertion::single(COL_SIG_COUNT, 0, self.pi_sig_count),
-            Assertion::single(COL_BATCH_SEQ_ID, 0, self.pi_batch_seq_id),
-            // SAL evolution — initial state
-            Assertion::single(COL_PROCESSED_COUNT, 0, BaseElement::ZERO),
-            Assertion::single(
-                COL_IS_ACTIVE,
-                0,
-                if self.pi_sig_count == BaseElement::ZERO {
-                    BaseElement::ZERO
-                } else {
-                    BaseElement::ONE
-                },
-            ),
-        ]
+        let mut assertions: Vec<_> = self
+            .pub_inputs
+            .to_elements()
+            .into_iter()
+            .enumerate()
+            .map(|(column, value)| Assertion::single(column, 0, value))
+            .collect();
+
+        for (row, value) in self.range_values.iter().copied().enumerate() {
+            assertions.push(Assertion::single(COL_RANGE_VALUE, row, value));
+        }
+
+        for row in [8, 14, 22] {
+            for bit_column in COL_RANGE_BITS_START + 13..=COL_RANGE_BITS_END {
+                assertions.push(Assertion::single(bit_column, row, BaseElement::ZERO));
+            }
+        }
+
+        for column in COL_RESERVED_START..=COL_RESERVED_END {
+            assertions.push(Assertion::single(column, 0, BaseElement::ZERO));
+        }
+
+        debug_assert_eq!(assertions.len(), NUM_ASSERTIONS);
+        assertions
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Default ProofOptions for BLEEP Phase-6 testnet
-// ─────────────────────────────────────────────────────────────────────────────
+pub(crate) fn range_values(
+    inputs: &ExtendedBlockPublicInputs,
+    epoch_remainder: u64,
+    epoch_remainder_gap: u64,
+    tx_count_gap: u64,
+) -> Vec<BaseElement> {
+    let mut values = Vec::with_capacity(NUM_RANGE_LIMBS);
+    push_u64_limbs(&mut values, inputs.block_index);
+    push_u64_limbs(&mut values, inputs.epoch_id);
+    push_u32_limbs(&mut values, inputs.tx_count);
+    push_u64_limbs(&mut values, inputs.blocks_per_epoch);
+    push_u32_limbs(&mut values, inputs.sig_count);
+    push_u64_limbs(&mut values, inputs.batch_seq_id);
+    values.push(BaseElement::new(epoch_remainder as u128));
+    values.push(BaseElement::new(epoch_remainder_gap as u128));
+    values.push(BaseElement::new(tx_count_gap as u128));
+    debug_assert_eq!(values.len(), NUM_RANGE_LIMBS);
+    values
+}
 
-/// 96-bit conjectured security with Blake3 and no field extension.
-///
-/// Tuned for the 3,000 ms slot budget on 8-core / 32 GB reference hardware.
-/// Adjust `blowup_factor` or `num_queries` to trade proof size vs. generation time.
+fn push_u64_limbs(values: &mut Vec<BaseElement>, value: u64) {
+    for shift in [0, 16, 32, 48] {
+        values.push(BaseElement::from(((value >> shift) & 0xffff) as u64));
+    }
+}
+
+fn push_u32_limbs(values: &mut Vec<BaseElement>, value: u32) {
+    for shift in [0, 16] {
+        values.push(BaseElement::from(((value >> shift) & 0xffff) as u64));
+    }
+}
+
 pub fn bleep_proof_options() -> ProofOptions {
     ProofOptions::new(
-        27, // num_queries       → ~96-bit security
-        8,  // blowup_factor     (must be power of 2)
-        16, // grinding_factor
+        27,
+        8,
+        16,
         FieldExtension::None,
-        8,   // FRI folding factor
-        127, // FRI max remainder degree
+        8,
+        127,
         BatchingMethod::Linear,
         BatchingMethod::Linear,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_witness_has_fixed_48_column_trace_layout() {
+        let inputs = ExtendedBlockPublicInputs {
+            block_index: 999,
+            epoch_id: 9,
+            tx_count: 12,
+            blocks_per_epoch: 100,
+            merkle_root_hash: [0x11; 32],
+            validator_pk_hash: [0x22; 32],
+            sk_seed_hash: [0x33; 32],
+            block_hash: [0x44; 32],
+            smt_root: [0x55; 32],
+            sig_commitment_root: [0x66; 32],
+            sig_count: 12,
+            batch_seq_id: 999,
+        };
+        let values = range_values(&inputs, 99, 0, 4_084);
+        assert_eq!(TRACE_WIDTH, 48);
+        assert_eq!(values.len(), NUM_RANGE_LIMBS);
+        assert_eq!(values[EPOCH_REMAINDER_LIMB], BaseElement::from(99u64));
+        assert_eq!(values[EPOCH_REMAINDER_GAP_LIMB], BaseElement::ZERO);
+        assert_eq!(values[TX_COUNT_GAP_LIMB], BaseElement::from(4_084u64));
+        assert!(inputs.is_consistent());
+        let mut zero_epoch_length = inputs;
+        zero_epoch_length.blocks_per_epoch = 0;
+        assert!(!zero_epoch_length.is_consistent());
+    }
 }

@@ -1,0 +1,37 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "cargo-zkp-test",
+			"type": "shell",
+			"command": "cargo test -p bleep-zkp --lib --quiet",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "cargo-zkp-test-rustup",
+			"type": "shell",
+			"command": "export PATH=\"$HOME/.cargo/bin:$PATH\" && cargo test -p bleep-zkp --lib --quiet",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "bleep-zkp-fmt-check",
+			"type": "shell",
+			"command": "export PATH=\"$HOME/.cargo/bin:$PATH\" && cargo fmt --all -- --check",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "bleep-zkp-crate-tests",
+			"type": "shell",
+			"command": "export PATH=\"$HOME/.cargo/bin:$PATH\" && cargo test -p bleep-zkp --quiet",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		}
+	]
+}

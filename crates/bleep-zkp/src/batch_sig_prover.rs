@@ -1,6 +1,9 @@
-//! Parallel batch signature prover for BLEEP's extended block-validity circuit.
+//! Parallel commitment builder and prover for BLEEP's bounded block-metadata AIR.
 //!
-//! ## Timing budget (reference: 8-core / 32 GB RAM)
+//! ## Historical reference estimates (8-core / 32 GB RAM)
+//!
+//! These estimates are not a benchmark result for this crate and do not include
+//! proving SPHINCS+ verification or state-transition execution inside the AIR.
 //!
 //! | Step                              | Time     |
 //! |-----------------------------------|----------|
@@ -10,8 +13,8 @@
 //! | Winterfell STARK proof generation | ~850 ms  |
 //! | **Total**                         | **~950 ms** |
 //!
-//! Well within the 3,000 ms slot budget. The ~850 ms STARK generation figure
-//! matches the existing `BlockValidityProver`
+//! They must not be interpreted as performance measurements for a full
+//! transaction-signature/state-transition proof.
 //!
 //! ## Integration with bleep-consensus
 //!
@@ -36,7 +39,7 @@
 //!     smt_root: [0xDD; 32],
 //!     sig_commitment_root: [0u8; 32],
 //!     sig_count: 4,
-//!     batch_seq_id: 1,
+//!     batch_seq_id: 42,
 //! };
 //!
 //! let prover = ParallelBatchSigProver::new(blocks_per_epoch, bleep_proof_options());
@@ -51,10 +54,9 @@
 //! ```
 
 use sha3::{Digest, Sha3_256};
-use std::sync::Arc;
 use winterfell::{
     crypto::{hashers::Blake3_256, DefaultRandomCoin},
-    math::{fields::f128::BaseElement, FieldElement, StarkField},
+    math::{fields::f128::BaseElement, FieldElement, StarkField, ToElements},
     matrix::ColMatrix,
     verify as winterfell_verify, AcceptableOptions, AuxRandElements,
     ConstraintCompositionCoefficients, DefaultConstraintEvaluator, DefaultTraceLde,
@@ -62,13 +64,14 @@ use winterfell::{
 };
 
 use crate::extended_air::{
-    bytes_hi, bytes_lo, ExtendedBlockPublicInputs, ExtendedBlockValidityAir, COL_AVAIL_THRESHOLD,
-    COL_BATCH_SEQ_ID, COL_BLOCKS_PER_EPOCH, COL_BLOCK_HASH_HI, COL_BLOCK_HASH_LO, COL_BLOCK_INDEX,
-    COL_BLOCK_RESERVED_END, COL_BLOCK_RESERVED_START, COL_CURR_SIG_HI, COL_CURR_SIG_LO,
-    COL_EPOCH_ID, COL_IS_ACTIVE, COL_MERKLE_ROOT_HI, COL_MERKLE_ROOT_LO, COL_PROCESSED_COUNT,
-    COL_SIG_COUNT, COL_SIG_ROOT_HI, COL_SIG_ROOT_LO, COL_SK_SEED_HASH_HI, COL_SK_SEED_HASH_LO,
-    COL_SMT_ROOT_HI, COL_SMT_ROOT_LO, COL_TX_COUNT, COL_VALIDATOR_PK_HI, COL_VALIDATOR_PK_LO,
-    MIN_TRACE_LENGTH, TRACE_WIDTH,
+    range_values, ExtendedBlockPublicInputs, ExtendedBlockValidityAir, COL_BATCH_SEQ_ID,
+    COL_BLOCK_HASH_HI, COL_BLOCK_HASH_LO, COL_BLOCK_INDEX,
+    COL_BLOCKS_PER_EPOCH, COL_BLOCKS_PER_EPOCH_INVERSE, COL_EPOCH_ID, COL_EPOCH_REMAINDER,
+    COL_EPOCH_REMAINDER_GAP, COL_MERKLE_ROOT_HI, COL_MERKLE_ROOT_LO, COL_RANGE_BITS_END,
+    COL_RANGE_BITS_START, COL_RANGE_VALUE, COL_RESERVED_END, COL_RESERVED_START, COL_SIG_COUNT,
+    COL_SIG_ROOT_HI, COL_SIG_ROOT_LO, COL_SK_SEED_HASH_HI, COL_SK_SEED_HASH_LO, COL_SMT_ROOT_HI,
+    COL_SMT_ROOT_LO, COL_TX_COUNT, COL_TX_COUNT_GAP, COL_VALIDATOR_PK_HI, COL_VALIDATOR_PK_LO,
+    MIN_TRACE_LENGTH, NUM_RANGE_LIMBS, TRACE_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +86,9 @@ pub enum BatchProverError {
 
     #[error("sig_count ({sig_count}) does not match signatures length ({sigs_len})")]
     SignatureCountMismatch { sig_count: u32, sigs_len: usize },
+
+    #[error("tx_count ({tx_count}) does not match signatures length ({sigs_len})")]
+    TransactionCountMismatch { tx_count: u32, sigs_len: usize },
 
     #[error("Winterfell prover error: {0}")]
     WinterfellProver(String),
@@ -104,6 +110,7 @@ pub enum BatchVerifyError {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Full output of a successful `prove_block` call.
+#[derive(Debug)]
 pub struct BatchProveResult {
     /// Winterfell STARK proof — embed in the block header.
     pub proof: winterfell::Proof,
@@ -121,44 +128,32 @@ pub struct BatchProveResult {
 // ParallelBatchSigProver
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Produces Winterfell STARK proofs for BLEEP's extended 68-column
-/// `BlockValidityAir` using Rayon for parallel trace construction.
+/// Produces Winterfell STARK proofs for BLEEP's bounded block-metadata AIR.
 pub struct ParallelBatchSigProver {
     options: ProofOptions,
-    _blocks_per_epoch: u64,
-    /// BPS threshold written into the trace for validators to read.
-    availability_threshold_bps: u32,
 }
 
 impl ParallelBatchSigProver {
     /// Create a prover with the given `blocks_per_epoch` value.
     ///
     /// Pass `bleep_proof_options()` for production; custom options for testing.
-    pub fn new(blocks_per_epoch: u64, options: ProofOptions) -> Self {
-        Self {
-            options,
-            _blocks_per_epoch: blocks_per_epoch,
-            availability_threshold_bps: 6_667,
-        }
-    }
-
-    /// Override the availability threshold written into the trace.
-    pub fn with_threshold(mut self, threshold_bps: u32) -> Self {
-        self.availability_threshold_bps = threshold_bps;
-        self
+    pub fn new(_blocks_per_epoch: u64, options: ProofOptions) -> Self {
+        Self { options }
     }
 
     // ── Main entry point ───────────────────────────────────────────────────
 
-    /// Prove a block's validity with signature commitment.
+    /// Prove the bounded metadata constraints represented by the AIR.
     ///
     /// # Arguments
-    /// * `pub_inputs_template` — block metadata (block_index, epoch_id, etc.)
-    ///   with `sig_commitment_root` and `sig_count` left as zero/placeholder;
-    ///   this function fills them in from `raw_signatures`.
-    /// * `raw_signatures`      — ordered slice of raw SPHINCS+ signature bytes.
-    /// * `sk_seed`             — 32-byte proposer SK seed for the
-    ///   `sk_seed_hash` column (private witness — never leaves the prover).
+    /// * `pub_inputs_template` — block metadata, including the block hash, state
+    ///   root, validator identity hash, and the signature commitment; signature
+    ///   count and commitment root are filled in from `raw_signatures`.
+    /// * `raw_signatures`      — ordered slice of raw SPHINCS+ signature bytes,
+    ///   each leaf of the signature commitment. The AIR does not verify these
+    ///   signatures or constrain how the commitment root was derived.
+    /// * `sk_seed`             — seed used to populate a public metadata hash.
+    ///   The AIR does not prove knowledge of this seed or bind it to a key.
     pub fn prove_block(
         &self,
         mut pub_inputs: ExtendedBlockPublicInputs,
@@ -168,30 +163,47 @@ impl ParallelBatchSigProver {
         if raw_signatures.is_empty() {
             return Err(BatchProverError::EmptySignatureList);
         }
+        if raw_signatures.len() > crate::extended_air::MAX_BLOCK_TRANSACTIONS as usize {
+            return Err(BatchProverError::WinterfellProver(format!(
+                "transaction count exceeds {}",
+                crate::extended_air::MAX_BLOCK_TRANSACTIONS
+            )));
+        }
 
-        // ── Step 1: parallel SHA3-256 hashing + Blake3 Merkle root ────────
-        // Approximately 45 ms for 512 × 49,088-byte signatures on 8 cores.
-        let (sig_commitment_root, sig_hashes) = compute_commitment_parallel(raw_signatures);
-
-        // Verify the count is consistent with the public inputs template.
         if pub_inputs.sig_count != 0 && pub_inputs.sig_count as usize != raw_signatures.len() {
             return Err(BatchProverError::SignatureCountMismatch {
                 sig_count: pub_inputs.sig_count,
                 sigs_len: raw_signatures.len(),
             });
         }
+        if pub_inputs.tx_count as usize != raw_signatures.len() {
+            return Err(BatchProverError::TransactionCountMismatch {
+                tx_count: pub_inputs.tx_count,
+                sigs_len: raw_signatures.len(),
+            });
+        }
 
-        // Fill in the commitment fields that were left as placeholders.
-        pub_inputs.sig_commitment_root = sig_commitment_root;
+        // The signature count may be left as a placeholder by the caller.
         pub_inputs.sig_count = raw_signatures.len() as u32;
+        if !pub_inputs.is_consistent() {
+            return Err(BatchProverError::WinterfellProver(format!(
+                "public metadata is inconsistent for block {}: epoch_id={}, blocks_per_epoch={}, batch_seq_id={}",
+                pub_inputs.block_index,
+                pub_inputs.epoch_id,
+                pub_inputs.blocks_per_epoch,
+                pub_inputs.batch_seq_id,
+            )));
+        }
+
+        // ── Step 1: compute the signature commitment outside the AIR. ─────
+        let (sig_commitment_root, sig_hashes) = compute_commitment_parallel(raw_signatures);
+        pub_inputs.sig_commitment_root = sig_commitment_root;
         pub_inputs.sk_seed_hash = hash_sk_seed(sk_seed);
 
-        // ── Step 2: build the 68-column execution trace ───────────────────
-        // Approximately 50 ms for 512 transactions.
+        // ── Step 2: build the metadata trace ──────────────────────────────
         let trace = self.build_trace(&pub_inputs, &sig_hashes);
 
         // ── Step 3: generate STARK proof ──────────────────────────────────
-        // Approximately 850 ms on reference hardware.
         let proof = self
             .prove(trace)
             .map_err(|e| BatchProverError::WinterfellProver(format!("{e:?}")))?;
@@ -206,8 +218,7 @@ impl ParallelBatchSigProver {
 
     // ── Static verification ────────────────────────────────────────────────
 
-    /// Verify a `StarkProof` produced by `prove_block` against the given
-    /// public inputs. Approximately 12 ms on reference hardware.
+    /// Verify a proof produced by `prove_block` against the given public inputs.
     pub fn verify_block(
         pub_inputs: ExtendedBlockPublicInputs,
         proof: winterfell::Proof,
@@ -228,138 +239,82 @@ impl ParallelBatchSigProver {
 
     // ── Trace construction ─────────────────────────────────────────────────
 
-    /// Build the 68-column execution trace for the given block.
-    ///
-    /// The trace is constructed in two phases:
-    /// 1. **Init** (row 0): all constant block-validity columns are written;
-    ///    the sig-commitment columns are initialised with their starting values.
-    /// 2. **Update** (rows 1..trace_len-1): the proposer ticks through each
-    ///    transaction, incrementing `processed_count` and writing
-    ///    `current_sig_hash` for that row's transaction.
-    ///
-    /// Rows beyond `sig_count - 1` have `is_active = 0` and a frozen
-    /// `processed_count`; the transition constraints handle this correctly.
+    /// Build the metadata trace. Signature hashes are not trace witnesses.
     pub fn build_trace(
         &self,
         pub_inputs: &ExtendedBlockPublicInputs,
-        sig_hashes: &[[u8; 32]],
+        _sig_hashes: &[[u8; 32]],
     ) -> TraceTable<BaseElement> {
-        // Trace length must be a power of 2 and at least MIN_TRACE_LENGTH.
-        let raw_len = (pub_inputs.sig_count as usize).max(MIN_TRACE_LENGTH);
-        let trace_len = raw_len.next_power_of_two();
-        let sig_count = pub_inputs.sig_count as usize;
+        let remainder = if pub_inputs.blocks_per_epoch == 0 {
+            0
+        } else {
+            pub_inputs.block_index % pub_inputs.blocks_per_epoch
+        };
+        let remainder_gap = pub_inputs
+            .blocks_per_epoch
+            .saturating_sub(remainder.saturating_add(1));
+        let tx_count_gap = u64::from(crate::extended_air::MAX_BLOCK_TRANSACTIONS)
+            .saturating_sub(u64::from(pub_inputs.tx_count));
+        let range_values = range_values(pub_inputs, remainder, remainder_gap, tx_count_gap);
+        debug_assert_eq!(range_values.len(), NUM_RANGE_LIMBS);
+        let inverse = BaseElement::new(pub_inputs.blocks_per_epoch as u128).inv();
 
-        // Pre-compute constant field elements (captured by the closures below).
-        let f_block_index = BaseElement::new(pub_inputs.block_index as u128);
-        let f_epoch_id = BaseElement::new(pub_inputs.epoch_id as u128);
-        let f_tx_count = BaseElement::new(pub_inputs.tx_count as u128);
-        let f_blocks_per_epoch = BaseElement::new(pub_inputs.blocks_per_epoch as u128);
-        let f_merkle_root_hi = bytes_hi(&pub_inputs.merkle_root_hash);
-        let f_merkle_root_lo = bytes_lo(&pub_inputs.merkle_root_hash);
-        let f_validator_pk_hi = bytes_hi(&pub_inputs.validator_pk_hash);
-        let f_validator_pk_lo = bytes_lo(&pub_inputs.validator_pk_hash);
-        let f_sk_seed_hi = bytes_hi(&pub_inputs.sk_seed_hash);
-        let f_sk_seed_lo = bytes_lo(&pub_inputs.sk_seed_hash);
-        let f_smt_root_hi = bytes_hi(&pub_inputs.smt_root);
-        let f_smt_root_lo = bytes_lo(&pub_inputs.smt_root);
-        let f_block_hash_hi = bytes_hi(&pub_inputs.block_hash);
-        let f_block_hash_lo = bytes_lo(&pub_inputs.block_hash);
-        let f_sig_root_hi = bytes_hi(&pub_inputs.sig_commitment_root);
-        let f_sig_root_lo = bytes_lo(&pub_inputs.sig_commitment_root);
-        let f_sig_count = BaseElement::new(pub_inputs.sig_count as u128);
-        let f_batch_seq_id = BaseElement::new(pub_inputs.batch_seq_id as u128);
-        let f_avail_threshold = BaseElement::new(self.availability_threshold_bps as u128);
-
-        // Snapshot sig_hashes into an Arc so the update closure can access it.
-        let sig_hashes: Arc<Vec<[u8; 32]>> = Arc::new(sig_hashes.to_vec());
-        let sh_clone = Arc::clone(&sig_hashes);
-
+        let trace_len = next_power_of_two(pub_inputs.tx_count.max(1).max(MIN_TRACE_LENGTH as u32) as usize);
         let mut trace = TraceTable::<BaseElement>::new(TRACE_WIDTH, trace_len);
 
         trace.fill(
-            // ── init: row 0 ───────────────────────────────────────────────
             |state| {
-                // Block validity state (cols 0–13)
-                state[COL_BLOCK_INDEX] = f_block_index;
-                state[COL_EPOCH_ID] = f_epoch_id;
-                state[COL_TX_COUNT] = f_tx_count;
-                state[COL_BLOCKS_PER_EPOCH] = f_blocks_per_epoch;
-                state[COL_MERKLE_ROOT_HI] = f_merkle_root_hi;
-                state[COL_MERKLE_ROOT_LO] = f_merkle_root_lo;
-                state[COL_VALIDATOR_PK_HI] = f_validator_pk_hi;
-                state[COL_VALIDATOR_PK_LO] = f_validator_pk_lo;
-                state[COL_SK_SEED_HASH_HI] = f_sk_seed_hi;
-                state[COL_SK_SEED_HASH_LO] = f_sk_seed_lo;
-                state[COL_SMT_ROOT_HI] = f_smt_root_hi;
-                state[COL_SMT_ROOT_LO] = f_smt_root_lo;
-                state[COL_BLOCK_HASH_HI] = f_block_hash_hi;
-                state[COL_BLOCK_HASH_LO] = f_block_hash_lo;
-
-                // Reserved block validity cols 14–47: zero
+                for (column, value) in pub_inputs.to_elements().into_iter().enumerate() {
+                    state[column] = value;
+                }
+                state[COL_EPOCH_REMAINDER] = BaseElement::from(remainder);
+                state[COL_EPOCH_REMAINDER_GAP] = BaseElement::from(remainder_gap);
+                state[COL_TX_COUNT_GAP] = BaseElement::from(tx_count_gap);
+                state[COL_BLOCKS_PER_EPOCH_INVERSE] = inverse;
                 for value in state
                     .iter_mut()
-                    .take(COL_BLOCK_RESERVED_END + 1)
-                    .skip(COL_BLOCK_RESERVED_START)
+                    .take(COL_RESERVED_END + 1)
+                    .skip(COL_RESERVED_START)
                 {
                     *value = BaseElement::ZERO;
                 }
-
-                // Sig commitment state (cols 48–56)
-                state[COL_SIG_ROOT_HI] = f_sig_root_hi;
-                state[COL_SIG_ROOT_LO] = f_sig_root_lo;
-                state[COL_SIG_COUNT] = f_sig_count;
-                state[COL_BATCH_SEQ_ID] = f_batch_seq_id;
-                state[COL_AVAIL_THRESHOLD] = f_avail_threshold;
-                state[COL_PROCESSED_COUNT] = BaseElement::ZERO;
-                state[COL_IS_ACTIVE] = BaseElement::ONE;
-
-                // First sig_hash (row 0 processes transaction 0)
-                if let Some(h) = sig_hashes.first() {
-                    state[COL_CURR_SIG_HI] = bytes_hi(h);
-                    state[COL_CURR_SIG_LO] = bytes_lo(h);
-                } else {
-                    state[COL_CURR_SIG_HI] = BaseElement::ZERO;
-                    state[COL_CURR_SIG_LO] = BaseElement::ZERO;
-                }
-
-                // Padding / reserved cols 57–67: zero
-                for value in state.iter_mut().take(TRACE_WIDTH).skip(57) {
-                    *value = BaseElement::ZERO;
-                }
+                Self::set_range_row(state, 0, &range_values);
             },
-            // ── update: transition from row `step` → row `step + 1` ───────
             |step, state| {
-                let next_row = step + 1; // the row being written
-
-                // Block validity cols 0–47 are constant — no change needed;
-                // Winterfell's fill() semantics update state in-place and
-                // the constant-transition constraints enforce no divergence.
-
-                // Determine if next_row is still within the active region.
-                let next_is_active = next_row < sig_count;
-
-                if next_is_active {
-                    // Increment processed_count.
-                    let cur_count = state[COL_PROCESSED_COUNT].as_int() as u64;
-                    state[COL_PROCESSED_COUNT] = BaseElement::new((cur_count + 1) as u128);
-                    state[COL_IS_ACTIVE] = BaseElement::ONE;
-
-                    // Write the sig_hash for the transaction at next_row.
-                    if let Some(h) = sh_clone.get(next_row) {
-                        state[COL_CURR_SIG_HI] = bytes_hi(h);
-                        state[COL_CURR_SIG_LO] = bytes_lo(h);
-                    }
-                } else {
-                    // Padding rows: freeze processed_count, deactivate.
-                    state[COL_IS_ACTIVE] = BaseElement::ZERO;
-                    // processed_count stays at sig_count - 1 (last active value).
-                    // current_sig_hash holds the last hash (informational, unconstrained).
-                }
+                Self::set_range_row(state, step + 1, &range_values);
             },
         );
 
         trace
     }
+
+    fn set_range_row(state: &mut [BaseElement], row: usize, values: &[BaseElement]) {
+        // A valid, unconstrained padding row keeps every boolean-bit
+        // transition polynomial at its declared degree, independent of the
+        // particular public inputs (which may leave high bits unused).
+        let value = values.get(row).copied().unwrap_or_else(|| {
+            if row == NUM_RANGE_LIMBS {
+                BaseElement::from(u64::from(u16::MAX))
+            } else {
+                BaseElement::ZERO
+            }
+        });
+        state[COL_RANGE_VALUE] = value;
+        let raw = value.as_int();
+        for bit in 0..16 {
+            state[COL_RANGE_BITS_START + bit] =
+                BaseElement::from(((raw >> bit) & 1) as u64);
+        }
+        debug_assert_eq!(COL_RANGE_BITS_START + 15, COL_RANGE_BITS_END);
+    }
+}
+
+fn next_power_of_two(value: usize) -> usize {
+    let mut power = 1usize;
+    while power < value {
+        power <<= 1;
+    }
+    power
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -480,8 +435,8 @@ pub fn compute_commitment_parallel(raw_signatures: &[Vec<u8>]) -> ([u8; 32], Vec
     compute_sig_commitment(raw_signatures)
 }
 
-/// `SHA3-256(b"bleep_sk_seed_hash_v1" || sk_seed)` — the private witness commitment
-/// written into the trace so the verifier can check the proposer knows the SK.
+/// `SHA3-256(b"bleep_sk_seed_hash_v1" || sk_seed)` — public metadata only.
+/// The AIR does not prove knowledge of the seed or bind it to a validator key.
 fn hash_sk_seed(sk_seed: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(b"bleep_sk_seed_hash_v1");
@@ -521,7 +476,7 @@ mod tests {
             smt_root: [0xDD; 32],
             sig_commitment_root: [0u8; 32], // filled in by prove_block
             sig_count: tx_count,
-            batch_seq_id: 1,
+            batch_seq_id: 42,
         }
     }
 
@@ -545,7 +500,7 @@ mod tests {
 
         let trace = prover.build_trace(&pi2, &hashes);
         assert_eq!(trace.width(), TRACE_WIDTH);
-        // trace_len = next_power_of_two(max(1, MIN_TRACE_LENGTH=8)) = 8
+        // The minimum trace length is 32, independent of the transaction count.
         assert!(trace.length() >= MIN_TRACE_LENGTH);
         assert!(trace.length().is_power_of_two());
     }
@@ -581,13 +536,15 @@ mod tests {
         let prover = ParallelBatchSigProver::new(100, fast_options.clone());
         let sigs = fake_sigs(4);
         let sk_seed = [0x42u8; 32];
-        let pi = test_pub_inputs(4);
+        let mut pi = test_pub_inputs(4);
+        pi.sig_count = 0;
 
         let result = prover
             .prove_block(pi, &sigs, &sk_seed)
             .expect("prove_block failed");
 
         assert_eq!(result.sig_hashes.len(), 4);
+        assert_eq!(result.pub_inputs.sig_count, 4);
         assert_ne!(result.sig_commitment_root, [0u8; 32]);
 
         // Verify the proof.
@@ -626,6 +583,22 @@ mod tests {
             verify_result.is_err(),
             "verification must fail with tampered public inputs"
         );
+    }
+
+    #[test]
+    fn inconsistent_public_inputs_are_rejected() {
+        let prover = ParallelBatchSigProver::new(100, bleep_proof_options());
+        let mut pi = test_pub_inputs(4);
+        pi.sig_count = 3;
+
+        let result = prover
+            .prove_block(pi, &fake_sigs(4), &[0x42u8; 32])
+            .expect_err("inconsistent public inputs should be rejected");
+
+        assert!(matches!(
+            result,
+            BatchProverError::SignatureCountMismatch { .. }
+        ));
     }
 
     #[test]

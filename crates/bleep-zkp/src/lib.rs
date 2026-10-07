@@ -1,30 +1,10 @@
 //! # BLEEP Zero-Knowledge Proofs
 //!
-//! ## Block validity circuit (STARK)
-//!
-//! Proves, in zero knowledge, that:
-//!   1. The block hash is the SHA3-256 of its fields (hash preimage knowledge).
-//!   2. The validator knows the secret key whose hash equals the public key
-//!      embedded in the `validator_signature` field.
-//!   3. The epoch-id is consistent with the block index and `blocks_per_epoch`.
-//!   4. The merkle-root commitment is non-zero (block has been committed).
-//!
-//! ## Public inputs (what the verifier knows)
-//!
-//! | Slot | Field |
-//! |------|-------|
-//! | `x[0]` | `block_index` as BaseElement |
-//! | `x[1]` | `epoch_id` as BaseElement |
-//! | `x[2]` | `tx_count` as BaseElement |
-//! | `x[3]` | `merkle_root_hash` (SHA3-256 of merkle root string, lower 31 bytes as BaseElement) |
-//! | `x[4]` | `validator_pk_hash` (SHA3-256 of pk bytes, lower 31 bytes as BaseElement) |
-//!
-//! ## Private witnesses (known only to prover)
-//! - `block_hash_witness` — the actual 32-byte block hash
-//! - `sk_seed_witness`    — the 32-byte validator secret key seed
-//!
-//! ## Devnet SRS
-//! STARKs require no trusted setup. Proofs are transparent and post-quantum secure.
+//! The extended block AIR proves bounded metadata relationships: epoch
+//! arithmetic, transaction/signature count equality and bounds, and batch
+//! sequence equality. Hash preimages, signature verification, commitment-root
+//! derivation, and state-transition execution are not constrained by that AIR;
+//! live validation must continue to perform those checks conventionally.
 
 use sha3::{Digest, Sha3_256};
 use tracing::info;
