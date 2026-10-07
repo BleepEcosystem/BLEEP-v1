@@ -17,10 +17,12 @@
 //!                    │  (EVM / WASM / ZK)         │
 //!                    │  StateManager (RocksDB)    │
 //!                    │  Sparse Merkle Trie root   │
-//!                    │  sign_block (correct 32b)  │
-//!                    │  Blockchain::add_block     │
-//!                    │  P2P gossip broadcast      │
+//!                    │  SPHINCS+ block signing   │
+//!                    │  PBFT prevote/precommit   │
+//!                    │  Blockchain commit        │
 //!                    └───────────────────────────┘
+//!                            │ PBFT quorum
+//!                    P2P block gossip
 //!                            │ FinalizedBlock
 //!                    Scheduler (20 tasks)
 //!                    RPC server (warp :8545)
@@ -517,6 +519,30 @@ async fn run() -> Result<(), Box<dyn Error>> {
         p2p_node.peer_count()
     );
 
+    let local_validator_id = hex::encode(&sphincs_pk[..8]);
+    let pbft_validator_keys = validator_registry
+        .lock()
+        .get_active_validators()
+        .into_iter()
+        .filter(|validator| validator.can_participate())
+        .map(|validator| {
+            hex::decode(&validator.signing_key_id)
+                .map(|public_key| (validator.id.clone(), public_key))
+                .map_err(|e| format!("Invalid active validator signing key {}: {e}", validator.id))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let live_pbft_finality = Arc::new(bleep_consensus::LivePbftFinality::new(
+        local_validator_id.clone(),
+        pbft_validator_keys,
+        sphincs_sk.clone(),
+        sphincs_pk.clone(),
+        Some(Arc::clone(&p2p_node)),
+    )?);
+    info!(
+        "  ✅ PBFT vote transport active for {} validator(s)",
+        live_pbft_finality.validator_count()
+    );
+
     let (sal_handler, sal_rx) = SigAvailabilityGossipHandler::new();
     let sal_bridge = Arc::new(SigAvailabilityBridge::new(
         sal_handler.clone(),
@@ -565,6 +591,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     );
     block_producer.set_chain_id(chain_id.clone());
     block_producer.set_validator_registry(Arc::clone(&validator_registry));
+    block_producer.set_pbft_finality(Arc::clone(&live_pbft_finality));
     let canonical_commit_lock = Arc::new(tokio::sync::Mutex::new(()));
     block_producer.set_canonical_commit_lock(Arc::clone(&canonical_commit_lock));
     let block_producer = Arc::new(block_producer);
@@ -723,6 +750,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let inbound_chain_id = chain_id.clone();
     let inbound_genesis_hash = genesis_hash.clone();
     let inbound_commit_lock = Arc::clone(&canonical_commit_lock);
+    let inbound_pbft_finality = Arc::clone(&live_pbft_finality);
 
     let inbound_handle = tokio::spawn(async move {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
@@ -735,20 +763,141 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    if msg.message_type != MessageType::Block {
-                        continue; // not a block message
+                    if matches!(
+                        &msg.message_type,
+                        MessageType::Custom(name) if name == bleep_consensus::PBFT_MESSAGE_TYPE
+                    ) {
+                        let committee_keys = inbound_validators
+                            .lock()
+                            .get_active_validators()
+                            .into_iter()
+                            .filter(|validator| validator.can_participate())
+                            .map(|validator| {
+                                hex::decode(&validator.signing_key_id)
+                                    .map(|key| (validator.id.clone(), key))
+                            })
+                            .collect::<Result<Vec<_>, _>>();
+                        let committee_keys = match committee_keys {
+                            Ok(keys) => keys,
+                            Err(e) => {
+                                warn!("[InboundBlockHandler] Invalid PBFT committee key: {}", e);
+                                continue;
+                            }
+                        };
+                        if !inbound_pbft_finality.matches_committee(&committee_keys) {
+                            warn!(
+                                "[InboundBlockHandler] Ignoring PBFT message for a stale committee"
+                            );
+                            continue;
+                        }
+
+                        let message: bleep_consensus::PbftMessage =
+                            match serde_json::from_slice(&msg.payload) {
+                                Ok(message) => message,
+                                Err(e) => {
+                                    warn!("[InboundBlockHandler] Bad PBFT payload: {}", e);
+                                    continue;
+                                }
+                            };
+
+                        if let bleep_consensus::PbftMessage::Proposal { block } = &message {
+                            let Some(signer_pk) = block
+                                .validator_signature
+                                .get(..bleep_core::block::SPHINCS_PK_LEN)
+                            else {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} has no proposer key",
+                                    block.index
+                                );
+                                continue;
+                            };
+                            let signer_key_id = hex::encode(signer_pk);
+                            let (proposer_id, validator_stakes) = {
+                                let registry = inbound_validators.lock();
+                                let active: Vec<_> = registry
+                                    .get_active_validators()
+                                    .into_iter()
+                                    .filter(|validator| validator.can_participate())
+                                    .collect();
+                                let proposer_id = active
+                                    .iter()
+                                    .find(|validator| {
+                                        validator
+                                            .signing_key_id
+                                            .eq_ignore_ascii_case(&signer_key_id)
+                                    })
+                                    .map(|validator| validator.id.clone());
+                                let stakes = active
+                                    .iter()
+                                    .map(|validator| bleep_consensus::pos_engine::ValidatorStake {
+                                        id: validator.id.clone(),
+                                        stake: u64::try_from(validator.effective_stake())
+                                            .unwrap_or(u64::MAX),
+                                        active: true,
+                                        slashing_count: validator
+                                            .double_sign_count
+                                            .saturating_add(validator.equivocation_count)
+                                            .saturating_add(validator.downtime_count),
+                                    })
+                                    .collect::<Vec<_>>();
+                                (proposer_id, stakes)
+                            };
+                            let Some(proposer_id) = proposer_id else {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} signer is not active",
+                                    block.index
+                                );
+                                continue;
+                            };
+                            let selected =
+                                bleep_consensus::pos_engine::PoSConsensusEngine::select_proposer(
+                                    block.index,
+                                    &validator_stakes,
+                                    &block.previous_hash,
+                                );
+                            if !selected.is_ok_and(|selected| selected == proposer_id) {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} is not from the selected proposer",
+                                    block.index
+                                );
+                                continue;
+                            }
+                            let proposal_valid = {
+                                let chain = inbound_blockchain.read().unwrap();
+                                let Some(tip) = chain.latest_block() else {
+                                    continue;
+                                };
+                                if block.index != tip.index.saturating_add(1)
+                                    || !BlockValidator::validate_full_block(&tip, block, signer_pk)
+                                {
+                                    false
+                                } else {
+                                    let mut staged_state = chain.state.read().unwrap().clone();
+                                    staged_state.apply_block(block).is_ok()
+                                }
+                            };
+                            if !proposal_valid
+                                || block
+                                    .transactions
+                                    .iter()
+                                    .any(|tx| tx.chain_id != inbound_chain_id)
+                            {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} failed block validation",
+                                    block.index
+                                );
+                                continue;
+                            }
+                        }
+
+                        if let Err(e) = inbound_pbft_finality.receive_message(message) {
+                            warn!("[InboundBlockHandler] PBFT message rejected: {}", e);
+                        }
+                        continue;
                     }
 
-                    let active_validator_count =
-                        inbound_validators.lock().get_active_validators().len();
-                    if let Err(e) =
-                        bleep_consensus::ensure_live_finality_mode_supported(active_validator_count)
-                    {
-                        warn!(
-                            "[InboundBlockHandler] Rejecting block without supported finality: {}",
-                            e
-                        );
-                        continue;
+                    if msg.message_type != MessageType::Block {
+                        continue; // not a block message
                     }
 
                     // Deserialise
@@ -760,6 +909,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             continue;
                         }
                     };
+
+                    if !inbound_pbft_finality.is_finalized(block.index, &block.compute_hash()) {
+                        warn!(
+                            "[InboundBlockHandler] Rejecting block {} without a verified PBFT commit quorum",
+                            block.index
+                        );
+                        continue;
+                    }
 
                     let Some(signer_pk) = block
                         .validator_signature
@@ -883,11 +1040,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     });
 
     info!("  ✅ BlockProducer online (active-set proposer selection, VM execution, P2P gossip).");
-    warn!("  ⚠️  Distributed quorum/finality voting is not wired; produced blocks are not BFT-finalized.");
+    info!("  ✅ Live PBFT prevote/precommit quorum gates canonical block commits.");
     info!("  ✅ Scheduler: 20 maintenance tasks registered.");
 
     // ── Step 15: Consensus status ─────────────────────────────────────────────
-    info!("🗂  [15/16] Consensus status checked; live PBFT quorum voting is unavailable.");
+    info!("🗂  [15/16] Live PBFT quorum voting and certificate verification active.");
 
     // ── Step 16: RPC server ───────────────────────────────────────────────────
     let rpc_listen_addr = std::env::var("BLEEP_RPC_LISTEN_ADDR")

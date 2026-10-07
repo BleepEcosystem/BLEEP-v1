@@ -14,10 +14,11 @@
 //!   │
 //!   ▼
 //! Block::with_consensus_and_sharding    ← build block with PoS fields
-//! block.sign_block(sk_32)              ← deterministic signing
+//! block.sign_block_with_pk()           ← SPHINCS+ signing + STARK
 //!   │
 //!   ▼
-//! Blockchain::add_block(block, pk_32)  ← validate + commit
+//! PBFT prevote → precommit              ← authenticated quorum finality
+//! Blockchain::add_block() + persist     ← validate + commit after quorum
 //!   │
 //!   ▼
 //! P2PNode::broadcast(Block, payload)   ← gossip to peers
@@ -53,6 +54,7 @@ use bleep_vm::intent::{Intent, IntentKind, TransferIntent};
 use bleep_vm::types::ChainId;
 
 // Live benchmark instrumentation
+use crate::pbft_engine::LivePbftFinality;
 use crate::performance_bench::{
     PerformanceBenchmark, BENCHMARK_DURATION_SECS, NUM_SHARDS, TARGET_TPS,
 };
@@ -82,15 +84,11 @@ const PROTOCOL_VERSION: u32 = 1;
 /// BLEEP native chain ID for intent routing
 const BLEEP_CHAIN_ID: ChainId = ChainId::Bleep;
 
-/// The live commit path has no PBFT vote transport or certificate verification.
-/// Until that is wired, only a one-validator committee can safely commit here.
 pub fn ensure_live_finality_mode_supported(active_validator_count: usize) -> Result<(), String> {
-    match active_validator_count {
-        1 => Ok(()),
-        0 => Err("Cannot commit without an active validator".to_string()),
-        _ => Err(format!(
-            "Cannot commit with {active_validator_count} active validators: authenticated PBFT quorum finality is not wired into the live node"
-        )),
+    if active_validator_count == 0 {
+        Err("Cannot commit without an active validator".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -138,6 +136,7 @@ pub struct BlockProducer {
     p2p: Option<Arc<P2PNode>>,
     sal_broadcaster: Option<Arc<dyn GossipBroadcaster>>,
     validator_registry: Option<Arc<PLMutex<ValidatorRegistry>>>,
+    pbft_finality: Option<Arc<LivePbftFinality>>,
     my_stake: u64,
     canonical_commit_lock: Arc<tokio::sync::Mutex<()>>,
     config: ProducerConfig,
@@ -156,6 +155,11 @@ impl BlockProducer {
     /// and signer authorization.
     pub fn set_validator_registry(&mut self, registry: Arc<PLMutex<ValidatorRegistry>>) {
         self.validator_registry = Some(registry);
+    }
+
+    /// Attach the PBFT committee and transport shared with inbound P2P handling.
+    pub fn set_pbft_finality(&mut self, finality: Arc<LivePbftFinality>) {
+        self.pbft_finality = Some(finality);
     }
 
     /// Share the canonical-state commit gate with inbound block processing.
@@ -212,6 +216,22 @@ impl BlockProducer {
             validator_pk: sphincs_pk_bytes,
             ..Default::default()
         };
+        let pbft_finality = match LivePbftFinality::new(
+            config.validator_id.clone(),
+            vec![(config.validator_id.clone(), config.validator_pk.clone())],
+            config.validator_sk.clone(),
+            config.validator_pk.clone(),
+            p2p.clone(),
+        ) {
+            Ok(finality) => Some(Arc::new(finality)),
+            Err(error) => {
+                error!(
+                    "[BlockProducer] PBFT finality initialization failed: {}",
+                    error
+                );
+                None
+            }
+        };
 
         let executor = Executor::production(ExecutorConfig::default());
         let (block_tx, block_rx) = tokio::sync::broadcast::channel(256);
@@ -230,6 +250,7 @@ impl BlockProducer {
                 p2p,
                 sal_broadcaster,
                 validator_registry: None,
+                pbft_finality,
                 my_stake,
                 canonical_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
                 config,
@@ -349,9 +370,13 @@ impl BlockProducer {
 
         if let Some(registry) = &self.validator_registry {
             let registry = registry.lock();
-            let active_validators: Vec<ValidatorStake> = registry
+            let active_identities: Vec<_> = registry
                 .get_active_validators()
                 .into_iter()
+                .filter(|validator| validator.can_participate())
+                .collect();
+            let active_validators: Vec<ValidatorStake> = active_identities
+                .iter()
                 .map(|validator| ValidatorStake {
                     id: validator.id.clone(),
                     stake: u64::try_from(validator.effective_stake()).unwrap_or(u64::MAX),
@@ -363,6 +388,28 @@ impl BlockProducer {
                 })
                 .collect();
             ensure_live_finality_mode_supported(active_validators.len())?;
+            let committee_keys: Vec<(String, Vec<u8>)> = active_identities
+                .iter()
+                .map(|validator| {
+                    hex::decode(&validator.signing_key_id)
+                        .map(|public_key| (validator.id.clone(), public_key))
+                        .map_err(|e| {
+                            format!(
+                                "Invalid signing key for active validator {}: {}",
+                                validator.id, e
+                            )
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            if !self
+                .pbft_finality
+                .as_ref()
+                .is_some_and(|finality| finality.matches_committee(&committee_keys))
+            {
+                return Err(
+                    "Live PBFT committee does not match the active validator registry".into(),
+                );
+            }
             let selected =
                 PoSConsensusEngine::select_proposer(next_height, &active_validators, &prev_hash)
                     .map_err(|e| {
@@ -599,7 +646,16 @@ impl BlockProducer {
         let gossip_payload = serde_json::to_vec(&block)
             .map_err(|e| format!("Block {} serialization failed: {}", next_height, e))?;
 
-        // ── 9: Commit to chain ────────────────────────────────────────────────
+        // ── 9: Authenticated PBFT prevote/prepare and precommit/commit ────────
+        let finality = self
+            .pbft_finality
+            .as_ref()
+            .ok_or_else(|| "PBFT finality is unavailable; refusing to commit".to_string())?;
+        let block_hash = block.compute_hash();
+        finality.propose(&block)?;
+        finality.wait_for_finality(next_height, &block_hash).await?;
+
+        // ── 10: Commit to chain only after the PBFT commit quorum ───────────────
         let accepted = {
             let mut chain = self
                 .blockchain
@@ -816,10 +872,11 @@ mod live_finality_policy_tests {
     use super::ensure_live_finality_mode_supported;
 
     #[test]
-    fn live_commit_requires_a_supported_committee_size() {
+    fn live_commit_requires_a_nonempty_committee() {
         assert!(ensure_live_finality_mode_supported(0).is_err());
         assert!(ensure_live_finality_mode_supported(1).is_ok());
-        assert!(ensure_live_finality_mode_supported(2).is_err());
+        assert!(ensure_live_finality_mode_supported(2).is_ok());
+        assert!(ensure_live_finality_mode_supported(100).is_ok());
     }
 }
 

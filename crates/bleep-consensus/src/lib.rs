@@ -60,6 +60,7 @@ pub use block_producer::{
     ensure_live_finality_mode_supported, start_block_producer, BlockProducer, FinalizedBlock,
     ProducerConfig, BLOCK_INTERVAL_MS, MAX_TXS_PER_BLOCK,
 };
+pub use pbft_engine::{LivePbftFinality, PbftMessage, PbftPhase, PBFT_MESSAGE_TYPE};
 
 pub mod gossip_bridge;
 pub use gossip_bridge::{decode_finalized_block, encode_finalized_block, GossipBridge};

@@ -72,13 +72,18 @@ Every block produced by `BlockProducer` follows this sequence:
 7c.  sign_block_with_pk()                     →  SPHINCS+ sig commits to sig_commitment_root
 8.   generate_extended_proof()                →  EXTSTARK1 | 232-byte pub_inputs | StarkProof
                                                  68-column trace, FRI backend, ~850–950 ms
-9.   verify_zkp()                             →  local check before chain commit
-10.  to_gossip() → P2P broadcast              →  ~320 KB (tx.signature bytes stripped)
-10b. broadcast_block_announcement()           →  SAL sig_hashes to bleep-p2p peers
-11.  drain committed txs from pool
+9.   verify_zkp()                             → local check before PBFT
+10.  PBFT proposal → signed prepare quorum    → authenticated prevote
+11.  signed commit quorum                    → authenticated precommit/finality
+12.  Blockchain::add_block() + persist state → only after PBFT finality
+13.  P2P block gossip                        → only the finalized block
+13b. broadcast_block_announcement()           → SAL sig_hashes to bleep-p2p peers
+14.  drain committed txs from pool
 ```
 
 The signing step (7c) follows `sig_commitment_root` being stamped on the block (7b), ensuring the SPHINCS+ signature cryptographically commits to the SAL root. Both the extended STARK proof and the SPHINCS+ block signature are required for a block to be accepted. Gossip-stripped blocks (empty `tx.signature`) are valid — receivers verify authenticity via the STARK-committed `sig_commitment_root`.
+
+The live producer does not append or publish a candidate until its active validator committee has supplied authenticated PBFT prepare and commit quorums. Inbound peers validate each vote against the candidate hash, phase, height, and registered SPHINCS+ key; blocks without locally verified commit quorum are rejected. If the quorum cannot be reached, production waits rather than committing an uncertified block.
 
 **Bandwidth:** `to_gossip()` zeroes all SPHINCS+ signatures before P2P broadcast. For a 512-tx block, gossip payload drops from ~24.3 MB to ~320 KB (~98.7% reduction).
 
