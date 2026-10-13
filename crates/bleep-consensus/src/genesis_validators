@@ -1,0 +1,362 @@
+//! bleep-consensus/src/genesis_validators.rs
+//! Shared genesis validator set.
+//!
+//! Live PBFT builds its committee once, at node start, from the validator
+//! registry. A node that registers only itself therefore forms a committee of
+//! one and can never agree on a block with any other node. To run more than one
+//! validator, every node must start from the *same* validator set. This module
+//! loads that set from a JSON file and validates it before anything is
+//! registered.
+//!
+//! The file holds public material only (no secret keys):
+//!
+//! ```json
+//! {
+//!   "chain_id": "bleep-devnet-1",
+//!   "validators": [
+//!     {
+//!       "signing_public_key": "<128 hex chars: SPHINCS+-SHAKE-256f public key>",
+//!       "kyber_public_key":   "<3136 hex chars: Kyber-1024 public key>",
+//!       "stake": 1000000
+//!     }
+//!   ]
+//! }
+//! ```
+//!
+//! The validator id is derived exactly as the node derives it for itself:
+//! the hex encoding of the first 8 bytes of the SPHINCS+ public key.
+//!
+//! Membership is fixed by this file. The committee does not change while the
+//! node runs.
+
+use serde::Deserialize;
+use std::collections::HashSet;
+use std::path::Path;
+
+/// SPHINCS+-SHAKE-256f public key length in bytes (FIPS 205, security level 5).
+pub const SIGNING_PUBLIC_KEY_LEN: usize = 64;
+/// Kyber-1024 public key length in bytes (FIPS 203).
+pub const KYBER_PUBLIC_KEY_LEN: usize = 1568;
+/// Number of public-key bytes used to derive a validator id.
+pub const VALIDATOR_ID_KEY_BYTES: usize = 8;
+/// Upper bound on the size of a genesis file; anything larger is rejected
+/// before parsing.
+pub const MAX_GENESIS_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Upper bound on the number of genesis validators.
+pub const MAX_GENESIS_VALIDATORS: usize = 256;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGenesisFile {
+    #[serde(default)]
+    chain_id: Option<String>,
+    validators: Vec<RawGenesisValidator>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGenesisValidator {
+    signing_public_key: String,
+    kyber_public_key: String,
+    stake: u64,
+}
+
+/// One validated genesis validator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenesisValidator {
+    /// Derived id: hex of the first 8 bytes of `signing_public_key`.
+    pub id: String,
+    pub signing_public_key: Vec<u8>,
+    pub kyber_public_key: Vec<u8>,
+    pub stake: u64,
+}
+
+/// A validated, non-empty, duplicate-free genesis validator set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenesisValidatorSet {
+    validators: Vec<GenesisValidator>,
+}
+
+impl GenesisValidatorSet {
+    /// Load and validate a genesis file.
+    ///
+    /// `expected_chain_id` is the chain id this node is running with. If the
+    /// file declares a `chain_id`, it must match; this stops a node from
+    /// joining a validator set that was written for a different network.
+    pub fn load(path: &Path, expected_chain_id: &str) -> Result<Self, String> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| format!("cannot read genesis validator file: {e}"))?;
+        if !metadata.is_file() {
+            return Err("genesis validator path is not a regular file".into());
+        }
+        if metadata.len() > MAX_GENESIS_FILE_BYTES {
+            return Err(format!(
+                "genesis validator file is {} bytes; the limit is {}",
+                metadata.len(),
+                MAX_GENESIS_FILE_BYTES
+            ));
+        }
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read genesis validator file: {e}"))?;
+        Self::parse(&text, expected_chain_id)
+    }
+
+    /// Parse and validate genesis JSON.
+    pub fn parse(json: &str, expected_chain_id: &str) -> Result<Self, String> {
+        let raw: RawGenesisFile =
+            serde_json::from_str(json).map_err(|e| format!("invalid genesis JSON: {e}"))?;
+
+        if let Some(declared) = raw.chain_id.as_deref() {
+            if declared != expected_chain_id {
+                return Err(format!(
+                    "genesis file is for chain '{declared}' but this node runs chain \
+                     '{expected_chain_id}'"
+                ));
+            }
+        }
+        if raw.validators.is_empty() {
+            return Err("genesis validator set is empty".into());
+        }
+        if raw.validators.len() > MAX_GENESIS_VALIDATORS {
+            return Err(format!(
+                "genesis validator set has {} entries; the limit is {}",
+                raw.validators.len(),
+                MAX_GENESIS_VALIDATORS
+            ));
+        }
+
+        let mut seen_ids = HashSet::new();
+        let mut seen_keys = HashSet::new();
+        let mut validators = Vec::with_capacity(raw.validators.len());
+
+        for (index, entry) in raw.validators.into_iter().enumerate() {
+            let signing_public_key = hex::decode(entry.signing_public_key.trim())
+                .map_err(|e| format!("validator #{index}: signing_public_key is not hex: {e}"))?;
+            if signing_public_key.len() != SIGNING_PUBLIC_KEY_LEN {
+                return Err(format!(
+                    "validator #{index}: signing_public_key is {} bytes; expected {}",
+                    signing_public_key.len(),
+                    SIGNING_PUBLIC_KEY_LEN
+                ));
+            }
+            let kyber_public_key = hex::decode(entry.kyber_public_key.trim())
+                .map_err(|e| format!("validator #{index}: kyber_public_key is not hex: {e}"))?;
+            if kyber_public_key.len() != KYBER_PUBLIC_KEY_LEN {
+                return Err(format!(
+                    "validator #{index}: kyber_public_key is {} bytes; expected {}",
+                    kyber_public_key.len(),
+                    KYBER_PUBLIC_KEY_LEN
+                ));
+            }
+            if entry.stake == 0 {
+                return Err(format!(
+                    "validator #{index}: stake must be greater than zero"
+                ));
+            }
+
+            let id = hex::encode(&signing_public_key[..VALIDATOR_ID_KEY_BYTES]);
+            if !seen_ids.insert(id.clone()) {
+                return Err(format!(
+                    "validator #{index}: id {id} collides with an earlier entry"
+                ));
+            }
+            if !seen_keys.insert(signing_public_key.clone()) {
+                return Err(format!(
+                    "validator #{index}: signing_public_key duplicates an earlier entry"
+                ));
+            }
+
+            validators.push(GenesisValidator {
+                id,
+                signing_public_key,
+                kyber_public_key,
+                stake: entry.stake,
+            });
+        }
+
+        Ok(Self { validators })
+    }
+
+    pub fn validators(&self) -> &[GenesisValidator] {
+        &self.validators
+    }
+
+    pub fn len(&self) -> usize {
+        self.validators.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.validators.is_empty()
+    }
+
+    /// The entry whose signing public key equals `signing_public_key`.
+    pub fn find_by_signing_key(&self, signing_public_key: &[u8]) -> Option<&GenesisValidator> {
+        self.validators
+            .iter()
+            .find(|v| v.signing_public_key == signing_public_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(byte: u8) -> String {
+        hex::encode(vec![byte; SIGNING_PUBLIC_KEY_LEN])
+    }
+
+    fn kyber(byte: u8) -> String {
+        hex::encode(vec![byte; KYBER_PUBLIC_KEY_LEN])
+    }
+
+    fn file(chain: Option<&str>, entries: &[(u8, u64)]) -> String {
+        let validators: Vec<String> = entries
+            .iter()
+            .map(|(b, stake)| {
+                format!(
+                    r#"{{"signing_public_key":"{}","kyber_public_key":"{}","stake":{}}}"#,
+                    key(*b),
+                    kyber(*b),
+                    stake
+                )
+            })
+            .collect();
+        let chain = chain
+            .map(|c| format!(r#""chain_id":"{c}","#))
+            .unwrap_or_default();
+        format!(r#"{{{chain}"validators":[{}]}}"#, validators.join(","))
+    }
+
+    #[test]
+    fn accepts_a_valid_multi_validator_set() {
+        let set = GenesisValidatorSet::parse(
+            &file(
+                Some("devnet"),
+                &[(1, 1_000_000), (2, 1_000_000), (3, 1_000_000)],
+            ),
+            "devnet",
+        )
+        .expect("valid set");
+        assert_eq!(set.len(), 3);
+        assert_eq!(set.validators()[0].id, hex::encode([1u8; 8]));
+        assert_eq!(set.validators()[2].stake, 1_000_000);
+    }
+
+    #[test]
+    fn chain_id_is_optional_but_must_match_when_present() {
+        assert!(GenesisValidatorSet::parse(&file(None, &[(1, 1)]), "devnet").is_ok());
+        let err =
+            GenesisValidatorSet::parse(&file(Some("other"), &[(1, 1)]), "devnet").unwrap_err();
+        assert!(err.contains("other") && err.contains("devnet"), "{err}");
+    }
+
+    #[test]
+    fn rejects_empty_set() {
+        let err = GenesisValidatorSet::parse(r#"{"validators":[]}"#, "devnet").unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn rejects_zero_stake() {
+        let err = GenesisValidatorSet::parse(&file(None, &[(1, 0)]), "devnet").unwrap_err();
+        assert!(err.contains("stake"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_signing_keys() {
+        let err = GenesisValidatorSet::parse(&file(None, &[(7, 1), (7, 1)]), "devnet").unwrap_err();
+        assert!(
+            err.contains("collides") || err.contains("duplicates"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_id_collision_between_distinct_keys() {
+        // Same first 8 bytes, different tail: distinct keys, same derived id.
+        let mut a = vec![9u8; SIGNING_PUBLIC_KEY_LEN];
+        let mut b = vec![9u8; SIGNING_PUBLIC_KEY_LEN];
+        a[SIGNING_PUBLIC_KEY_LEN - 1] = 1;
+        b[SIGNING_PUBLIC_KEY_LEN - 1] = 2;
+        let json = format!(
+            r#"{{"validators":[
+                {{"signing_public_key":"{}","kyber_public_key":"{}","stake":1}},
+                {{"signing_public_key":"{}","kyber_public_key":"{}","stake":1}}
+            ]}}"#,
+            hex::encode(a),
+            kyber(1),
+            hex::encode(b),
+            kyber(2)
+        );
+        let err = GenesisValidatorSet::parse(&json, "devnet").unwrap_err();
+        assert!(err.contains("collides"), "{err}");
+    }
+
+    #[test]
+    fn rejects_wrong_key_lengths_and_bad_hex() {
+        let short_key = format!(
+            r#"{{"validators":[{{"signing_public_key":"{}","kyber_public_key":"{}","stake":1}}]}}"#,
+            hex::encode([1u8; 63]),
+            kyber(1)
+        );
+        assert!(GenesisValidatorSet::parse(&short_key, "devnet")
+            .unwrap_err()
+            .contains("expected 64"));
+
+        let short_kyber = format!(
+            r#"{{"validators":[{{"signing_public_key":"{}","kyber_public_key":"{}","stake":1}}]}}"#,
+            key(1),
+            hex::encode([1u8; 100])
+        );
+        assert!(GenesisValidatorSet::parse(&short_kyber, "devnet")
+            .unwrap_err()
+            .contains("expected 1568"));
+
+        let bad_hex = format!(
+            r#"{{"validators":[{{"signing_public_key":"zz","kyber_public_key":"{}","stake":1}}]}}"#,
+            kyber(1)
+        );
+        assert!(GenesisValidatorSet::parse(&bad_hex, "devnet")
+            .unwrap_err()
+            .contains("not hex"));
+    }
+
+    #[test]
+    fn rejects_unknown_fields_so_secret_material_is_never_silently_accepted() {
+        let json = format!(
+            r#"{{"validators":[{{"signing_public_key":"{}","kyber_public_key":"{}","stake":1,"secret":"x"}}]}}"#,
+            key(1),
+            kyber(1)
+        );
+        assert!(GenesisValidatorSet::parse(&json, "devnet")
+            .unwrap_err()
+            .contains("invalid genesis JSON"));
+    }
+
+    #[test]
+    fn finds_local_validator_by_signing_key() {
+        let set = GenesisValidatorSet::parse(&file(None, &[(1, 5), (2, 6)]), "devnet").unwrap();
+        let found = set
+            .find_by_signing_key(&vec![2u8; SIGNING_PUBLIC_KEY_LEN])
+            .expect("present");
+        assert_eq!(found.stake, 6);
+        assert!(set
+            .find_by_signing_key(&vec![3u8; SIGNING_PUBLIC_KEY_LEN])
+            .is_none());
+    }
+
+    #[test]
+    fn enforces_validator_count_limit() {
+        let entries: Vec<(u8, u64)> = (0..=255u8).map(|b| (b, 1)).collect();
+        // 256 entries is the maximum and must be accepted.
+        assert!(GenesisValidatorSet::parse(&file(None, &entries), "devnet").is_ok());
+    }
+
+    #[test]
+    fn load_rejects_missing_file_and_directories() {
+        assert!(GenesisValidatorSet::load(Path::new("/nonexistent/genesis.json"), "x").is_err());
+        assert!(GenesisValidatorSet::load(Path::new("/tmp"), "x")
+            .unwrap_err()
+            .contains("not a regular file"));
+    }
+}
