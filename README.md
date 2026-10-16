@@ -78,8 +78,19 @@ source "$HOME/.cargo/env"
 ```bash
 git clone https://github.com/BleepEcosystem/BLEEP-v1.git
 cd BLEEP-v1
+
+# Generate a high-entropy JWT signing secret (32 random bytes, Base64-encoded).
+# Keep this secret private and reuse it when restarting this node.
+export BLEEP_JWT_SECRET="$(openssl rand -base64 32)"
+
 cargo run --release
 ```
+
+The node will refuse to start unless `BLEEP_JWT_SECRET` is set to valid standard
+Base64 that decodes to at least 32 bytes of high-entropy material. Configure the
+same secret on every node that needs to accept the same JWTs. Store it in your
+deployment's secret manager in production; do not commit it to the repository
+or share it publicly.
 
 **16-step startup sequence (Protocol Version 5):**
 

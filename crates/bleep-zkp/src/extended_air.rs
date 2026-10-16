@@ -45,8 +45,11 @@ pub const COL_RANGE_VALUE: usize = 38;
 pub const COL_RESERVED_START: usize = 39;
 pub const COL_RESERVED_END: usize = 47;
 
+#[cfg(test)]
 const EPOCH_REMAINDER_LIMB: usize = 20;
+#[cfg(test)]
 const EPOCH_REMAINDER_GAP_LIMB: usize = 21;
+#[cfg(test)]
 const TX_COUNT_GAP_LIMB: usize = 22;
 pub(crate) const NUM_RANGE_LIMBS: usize = 23;
 
