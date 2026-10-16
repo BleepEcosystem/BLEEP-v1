@@ -1741,6 +1741,7 @@ dependencies = [
  "bip39",
  "blake2",
  "blake3",
+ "bleep-crypto",
  "hex",
  "log",
  "pqcrypto-kyber",

@@ -36,7 +36,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
 
-use bleep_auth::{AuthError, AuthService, SessionClaims};
+use bleep_auth::{AccessDecision, AuthError, AuthService, Permission, SessionClaims};
 use bleep_core::{transaction_pool::TransactionPool, Blockchain};
 use bleep_crypto::{tx_payload, verify_tx_signature};
 
@@ -508,17 +508,27 @@ pub fn rpc_routes_with_state(
         .and(auth_filter(Arc::clone(&state_inner)))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
-            |req: MintReq, _claims: SessionClaims, st: RpcState| async move {
+            |req: MintReq, claims: SessionClaims, st: RpcState| async move {
+                if let Err(reason) = authorize_rpc(&st, &claims, Permission::AdministerSystem).await
+                {
+                    return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                        warp::reply::json(&ErrResp { error: reason }),
+                        warp::http::StatusCode::FORBIDDEN,
+                    ));
+                }
+
                 // Check if StateManager is attached
                 let state_mgr = match st.state_mgr {
                     Some(sm) => sm,
                     None => {
-                        let resp = warp::reply::json(&MintResp {
-                            address: req.address.clone(),
-                            new_balance: "0".to_string(),
-                            status: "StateManager not attached to RPC state".to_string(),
-                        });
-                        return Ok::<_, warp::Rejection>(resp);
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&MintResp {
+                                address: req.address.clone(),
+                                new_balance: "0".to_string(),
+                                status: "StateManager not attached to RPC state".to_string(),
+                            }),
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
                     }
                 };
 
@@ -527,22 +537,22 @@ pub fn rpc_routes_with_state(
                 let mint_result = state_mgr.lock().mint(&req.address, amount_u128);
 
                 match mint_result {
-                    Ok(new_balance) => {
-                        let resp = warp::reply::json(&MintResp {
+                    Ok(new_balance) => Ok(warp::reply::with_status(
+                        warp::reply::json(&MintResp {
                             address: req.address,
                             new_balance: new_balance.to_string(),
                             status: "minted".to_string(),
-                        });
-                        Ok(resp)
-                    }
-                    Err(err) => {
-                        let resp = warp::reply::json(&MintResp {
+                        }),
+                        warp::http::StatusCode::OK,
+                    )),
+                    Err(err) => Ok(warp::reply::with_status(
+                        warp::reply::json(&MintResp {
                             address: req.address,
                             new_balance: "0".to_string(),
                             status: err,
-                        });
-                        Ok(resp)
-                    }
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    )),
                 }
             },
         );
@@ -1173,6 +1183,22 @@ fn auth_filter(
                 .map_err(|e| warp::reject::custom(AuthRejection(e)))?;
             Ok(claims)
         })
+}
+
+async fn authorize_rpc(
+    state: &RpcState,
+    claims: &SessionClaims,
+    permission: Permission,
+) -> Result<(), String> {
+    let auth_service = state
+        .auth_service
+        .as_ref()
+        .ok_or_else(|| "Auth service not available".to_string())?;
+
+    match auth_service.authorize(claims, permission).await {
+        AccessDecision::Granted => Ok(()),
+        AccessDecision::Denied(reason) => Err(reason),
+    }
 }
 
 // ── GET /rpc/economics/supply ─────────────────────────────────────────────────
@@ -2604,9 +2630,18 @@ fn auth_register_operator(
     warp::path!("rpc" / "auth" / "register" / "operator")
         .and(warp::post())
         .and(warp::body::json::<AuthRegisterOperatorReq>())
+        .and(auth_filter(Arc::clone(&state)))
         .and(with_arc_state(state))
         .and_then(
-            |req: AuthRegisterOperatorReq, st: Arc<RpcState>| async move {
+            |req: AuthRegisterOperatorReq, claims: SessionClaims, st: Arc<RpcState>| async move {
+                if let Err(reason) = authorize_rpc(&st, &claims, Permission::AdministerSystem).await
+                {
+                    return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                        warp::reply::json(&ErrResp { error: reason }),
+                        warp::http::StatusCode::FORBIDDEN,
+                    ));
+                }
+
                 let auth_service = match &st.auth_service {
                     Some(svc) => Arc::clone(svc),
                     None => {
@@ -2788,7 +2823,16 @@ fn auth_rotate_secret(
         .and(warp::body::json::<AuthRotateReq>())
         .and(auth_filter(Arc::clone(&state)))
         .and(with_arc_state(state))
-        .and_then(|req: AuthRotateReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+        .and_then(|req: AuthRotateReq, claims: SessionClaims, st: Arc<RpcState>| async move {
+            if let Err(reason) =
+                authorize_rpc(&st, &claims, Permission::RotateJwtSecret).await
+            {
+                return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                    warp::reply::json(&ErrResp { error: reason }),
+                    warp::http::StatusCode::FORBIDDEN,
+                ));
+            }
+
             let auth_service = match &st.auth_service {
                 Some(svc) => Arc::clone(svc),
                 None => {
@@ -3101,7 +3145,7 @@ mod tests {
         let pool = TransactionPool::new(10);
 
         let (public_key, secret_key) = generate_tx_keypair();
-        let sender = "BLEEP1sender".to_string();
+        let sender = bleep_crypto::tx_signer::derive_address(&public_key);
         let receiver = "BLEEP1receiver".to_string();
         let amount = 123u64;
         let timestamp = 1_700_000_000u64;
@@ -3148,6 +3192,60 @@ mod tests {
 
         assert!(!proof.is_empty());
         assert!(verify_tx_signature(&payload, &proof, &public_key));
+    }
+
+    #[tokio::test]
+    async fn dapp_token_cannot_mint_rotate_or_register_operators() {
+        use bleep_auth::Role;
+
+        let auth_service = Arc::new(AuthService::new(vec![0x42; 32]).expect("auth service"));
+        let token = auth_service
+            .sessions
+            .issue(
+                "test-dapp",
+                &[Role::DappDeveloper],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .expect("dapp token");
+        let bearer = format!("Bearer {}", token.token);
+        let routes =
+            rpc_routes_with_state(RpcState::new().with_auth_service(Arc::clone(&auth_service)));
+
+        let mint = request()
+            .method("POST")
+            .path("/rpc/mint")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({"address": "BLEEP1target", "amount": 1}))
+            .reply(&routes)
+            .await;
+        assert_eq!(mint.status(), warp::http::StatusCode::FORBIDDEN);
+
+        let rotate = request()
+            .method("POST")
+            .path("/rpc/auth/rotate")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({"new_secret_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}))
+            .reply(&routes)
+            .await;
+        assert_eq!(rotate.status(), warp::http::StatusCode::FORBIDDEN);
+
+        let register_operator = request()
+            .method("POST")
+            .path("/rpc/auth/register/operator")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({
+                "operator_handle": "attacker",
+                "display_name": "attacker",
+                "password": "long-enough-password",
+                "kyber_public_key_b64": "AA=="
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(
+            register_operator.status(),
+            warp::http::StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

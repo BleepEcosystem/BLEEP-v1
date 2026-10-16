@@ -102,8 +102,6 @@ use bleep_telemetry::{
 use base64::{engine::general_purpose, Engine as _};
 use bleep_rpc::{rpc_routes_with_state, RpcState};
 
-const DEFAULT_BLEEP_JWT_SECRET_B64: &str = "UtQcXNbNejElXUMcGocAuRh+YLiIgR9onZ1+PUJtJiU="; // Local dev fallback; set BLEEP_JWT_SECRET in production.
-
 struct ValidatorRegistryAdapter {
     inner: Arc<Mutex<ValidatorRegistry>>,
 }
@@ -161,6 +159,28 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
+    let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "BLEEP_JWT_SECRET is required and must contain base64-encoded random key material",
+        )
+    })?;
+    let jwt_secret = general_purpose::STANDARD
+        .decode(&jwt_secret_b64)
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("BLEEP_JWT_SECRET is not valid base64: {e}"),
+            )
+        })?;
+    if jwt_secret.len() < 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "BLEEP_JWT_SECRET must decode to at least 32 bytes",
+        )
+        .into());
+    }
+
     // ── Step 1: Post-quantum keypair generation ───────────────────────────────
     info!("🔐 [1/16] Generating post-quantum keypairs…");
     let _qs = QuantumSecure::keygen();
@@ -520,34 +540,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (interval_handle, block_sched_handle) = scheduler.start();
 
     // Build live AuthService for the RPC auth subsystem.
-    let jwt_secret = match std::env::var("BLEEP_JWT_SECRET") {
-        Ok(jwt_secret_b64) => match general_purpose::STANDARD.decode(&jwt_secret_b64) {
-            Ok(secret) if secret.len() >= 32 => secret,
-            Ok(_) => {
-                warn!(
-                    "BLEEP_JWT_SECRET decoded to fewer than 32 bytes; falling back to default dev secret."
-                );
-                general_purpose::STANDARD
-                    .decode(DEFAULT_BLEEP_JWT_SECRET_B64)
-                    .expect("default JWT secret is valid base64")
-            }
-            Err(e) => {
-                warn!(
-                    "BLEEP_JWT_SECRET is not valid base64: {}; falling back to default dev secret.",
-                    e
-                );
-                general_purpose::STANDARD
-                    .decode(DEFAULT_BLEEP_JWT_SECRET_B64)
-                    .expect("default JWT secret is valid base64")
-            }
-        },
-        Err(_) => {
-            warn!("BLEEP_JWT_SECRET not set. Using default dev secret for this runtime.");
-            general_purpose::STANDARD
-                .decode(DEFAULT_BLEEP_JWT_SECRET_B64)
-                .expect("default JWT secret is valid base64")
-        }
-    };
     let auth_service = Arc::new(AuthService::new(jwt_secret).unwrap_or_else(|e| {
         error!("Failed to initialize AuthService: {}", e);
         std::process::exit(1);

@@ -24,6 +24,7 @@ bincode = { version = "2.0.1", features = ["serde"] }
 pqcrypto-traits      = "0.3.5"
 pqcrypto-kyber = "0.8.1"
 pqcrypto-sphincsplus = "0.7.1"
+bleep-crypto = { path = "../bleep-crypto" }
 
 # Classical crypto
 aes-gcm      = { version = "0.10", features = ["aes"] }

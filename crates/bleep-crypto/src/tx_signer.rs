@@ -18,7 +18,15 @@
 
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
-use sha3::{Digest, Sha3_256};
+use sha2::{Digest as Sha2Digest, Sha256};
+use sha3::Sha3_256;
+
+/// Derive the canonical BLEEP account address from a SPHINCS+ public key.
+pub fn derive_address(public_key: &[u8]) -> String {
+    let first = Sha256::digest(public_key);
+    let second = Sha256::digest(first);
+    format!("BLEEP1{}", hex::encode(&second[..20]))
+}
 
 /// Sign a transaction payload using SPHINCS+-SHAKE-256.
 ///
@@ -121,5 +129,12 @@ mod tests {
         let p1 = tx_payload("alice", "bob", 1000, 99999);
         let p2 = tx_payload("alice", "bob", 2000, 99999);
         assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn test_address_derivation_is_stable() {
+        let (pk, _) = generate_tx_keypair();
+        assert_eq!(derive_address(&pk), derive_address(&pk));
+        assert!(derive_address(&pk).starts_with("BLEEP1"));
     }
 }

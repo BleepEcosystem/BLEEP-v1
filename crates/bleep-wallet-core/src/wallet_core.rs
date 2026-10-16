@@ -428,10 +428,7 @@ impl Wallet {
 ///
 /// `address = "BLEEP1" || hex( SHA256²(pk)[..20] )`
 fn derive_address(pk: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let first  = Sha256::digest(pk);
-    let second = Sha256::digest(&first);
-    format!("BLEEP1{}", hex::encode(&second[..20]))
+    tx_signer::derive_address(pk)
 }
 
 /// Current UNIX time in milliseconds.

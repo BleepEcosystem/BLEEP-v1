@@ -7,13 +7,11 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Minimum signature length: 64-byte pk + at least 100 bytes of sig material.
-const MIN_SIG_LEN: usize = 164;
-
 /// Expected SPHINCS+ public key length for sphincsshake256fsimple: 64 bytes
 const SPHINCS_PK_LEN: usize = 64;
-
-// ── TransactionPool ───────────────────────────────────────────────────────────
+/// SPHINCS+-SHAKE-256f-simple detached signature length.
+const SPHINCS_SIG_LEN: usize = 49_088;
+const FULL_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 
 /// FIFO transaction pool with SPHINCS+ signature verification on admission.
 pub struct TransactionPool {
@@ -37,16 +35,11 @@ impl TransactionPool {
 
     /// Validate and admit a transaction into the pool.
     ///
-    /// Checks (in order):
-    /// 1. Pool capacity
-    /// 2. Required fields (sender, receiver non-empty; amount > 0; sender ≠ receiver)
-    /// 3. Signature present and structurally valid length
-    /// 4. **S-07**: SPHINCS+ cryptographic signature verification
-    /// 5. **S-09**: Duplicate detection via SHA-256 payload hash
+    /// Checks capacity, required fields, signature format and sender ownership,
+    /// cryptographic signature validity, and duplicate payloads.
     ///
     /// Returns `true` if the transaction was admitted, `false` otherwise.
     pub async fn add_transaction(&self, transaction: ZKTransaction) -> bool {
-        // ── Step 1: Capacity check ────────────────────────────────────────────
         {
             let pool = self.pool.lock().await;
             if pool.len() >= self.max_size {
@@ -60,7 +53,6 @@ impl TransactionPool {
             }
         }
 
-        // ── Step 2: Structural field validation ───────────────────────────────
         if transaction.sender.is_empty() {
             log::error!("[TxPool] Rejected: sender is empty");
             return false;
@@ -91,54 +83,24 @@ impl TransactionPool {
             return false;
         }
 
-        // ── Step 3: Signature length check ────────────────────────────────────
-        // Reject obviously truncated SPHINCS+ key/signature blobs before verification.
-        if transaction.signature.len() < SPHINCS_PK_LEN + 100 {
-            // At least 64 bytes for PK + some sig
+        if transaction.signature.len() != FULL_SIG_LEN {
             log::error!(
-                "[TxPool] Rejected: signature too short ({} bytes, need ≥ {}) from {}",
-                transaction.signature.len(),
-                SPHINCS_PK_LEN + 100,
-                transaction.sender
-            );
-            return false;
-        }
-
-        // ── Step 4: S-07 — SPHINCS+ cryptographic verification ───────────────
-        //
-        // Wire format: signature = pk_bytes(64) || sphincs_detached_sig(49088)
-        // Canonical payload: SHA3-256(sender || receiver || amount_le8 || timestamp_le8)
-        //
-        // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes.
-        // We split the signature blob into (pk, sig) and verify using the same
-        // tx_payload() function used at signing time.
-
-        if transaction.signature.len() < MIN_SIG_LEN {
-            log::error!(
-                "[TxPool] Rejected: signature too short for SPHINCS+ key (need ≥{} bytes, got {})",
-                MIN_SIG_LEN,
+                "[TxPool] Rejected: invalid SPHINCS+ signature length (need {}, got {})",
+                FULL_SIG_LEN,
                 transaction.signature.len()
             );
             return false;
         }
 
-        let pk_bytes = &transaction.signature[..SPHINCS_PK_LEN]; // SPHINCS+ PK is 64 bytes
+        let pk_bytes = &transaction.signature[..SPHINCS_PK_LEN];
         let sig_bytes = &transaction.signature[SPHINCS_PK_LEN..];
-
-        eprintln!(
-            "[DEBUG TxPool] Total signature length: {} bytes",
-            transaction.signature.len()
-        );
-        eprintln!("[DEBUG TxPool] PK bytes length: {} bytes", pk_bytes.len());
-        eprintln!("[DEBUG TxPool] Sig bytes length: {} bytes", sig_bytes.len());
-        eprintln!(
-            "[DEBUG TxPool] PK (hex): {}",
-            hex::encode(&pk_bytes[..pk_bytes.len().min(32)])
-        );
-        eprintln!(
-            "[DEBUG TxPool] Payload: sender='{}' receiver='{}' amount={} timestamp={}",
-            transaction.sender, transaction.receiver, transaction.amount, transaction.timestamp
-        );
+        if bleep_crypto::tx_signer::derive_address(pk_bytes) != transaction.sender {
+            log::error!(
+                "[TxPool] Rejected: signer public key does not own sender address {}",
+                transaction.sender
+            );
+            return false;
+        }
 
         let payload = bleep_crypto::tx_signer::tx_payload(
             &transaction.sender,
@@ -146,12 +108,6 @@ impl TransactionPool {
             transaction.amount,
             transaction.timestamp,
         );
-
-        eprintln!(
-            "[DEBUG TxPool] Payload hash (32 bytes): {}",
-            hex::encode(payload)
-        );
-
         if !bleep_crypto::tx_signer::verify_tx_signature(&payload, sig_bytes, pk_bytes) {
             log::error!(
                 "[TxPool] S-07: SPHINCS+ verification FAILED — tx from {} to {} amount {} rejected",
@@ -159,25 +115,10 @@ impl TransactionPool {
                 transaction.receiver,
                 transaction.amount
             );
-            eprintln!(
-                "[DEBUG TxPool] Verification failed for: {} -> {} amount {}",
-                transaction.sender, transaction.receiver, transaction.amount
-            );
             return false;
         }
 
-        // ── Step 5: S-09 — Duplicate detection via payload hash ──────────────
-        //
-        // Hash the canonical payload (same bytes that were signed).
-        // This catches exact replays (same sender/receiver/amount/timestamp).
-        let payload = bleep_crypto::tx_signer::tx_payload(
-            &transaction.sender,
-            &transaction.receiver,
-            transaction.amount,
-            transaction.timestamp,
-        );
         let tx_hash: [u8; 32] = Sha256::digest(payload).into();
-
         {
             let mut seen = self.seen_hashes.lock().await;
             if seen.contains(&tx_hash) {
@@ -191,7 +132,6 @@ impl TransactionPool {
             seen.insert(tx_hash);
         }
 
-        // ── Admit ─────────────────────────────────────────────────────────────
         let mut pool = self.pool.lock().await;
         pool.push_back(transaction);
         log::debug!(
@@ -212,8 +152,7 @@ impl TransactionPool {
     pub async fn clear_pool(&self) {
         let mut pool = self.pool.lock().await;
         pool.clear();
-        // Note: seen_hashes is NOT cleared — previously seen hashes must remain
-        // invalid to prevent cross-block replay attacks.
+        // Seen hashes remain to prevent cross-block replay attacks.
     }
 
     /// Current pool depth.
@@ -222,9 +161,6 @@ impl TransactionPool {
     }
 
     /// Remove a confirmed transaction by its canonical ID.
-    ///
-    /// The canonical ID string is `"sender:receiver:amount:timestamp"`.
-    /// This is called after a block containing the transaction is finalised.
     pub async fn remove_confirmed(&self, tx_id: &str) {
         let mut pool = self.pool.lock().await;
         let before = pool.len();
@@ -243,38 +179,35 @@ impl TransactionPool {
     }
 
     /// Peek at up to `limit` transactions for block production.
-    ///
-    /// Transactions remain in the pool until `remove_confirmed` is called
-    /// after the block is accepted by consensus.
     pub async fn peek_for_block(&self, limit: usize) -> Vec<ZKTransaction> {
         let pool = self.pool.lock().await;
         pool.iter().take(limit).cloned().collect()
     }
 }
 
-// ── Unit tests ────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
 
-    /// Build a properly-signed ZKTransaction.
     fn make_signed_tx(sender: &str, receiver: &str, amount: u64, timestamp: u64) -> ZKTransaction {
         let (pk, sk) = generate_tx_keypair();
-        let payload = tx_payload(sender, receiver, amount, timestamp);
+        let sender = if sender.is_empty() || sender == receiver {
+            sender.to_string()
+        } else {
+            bleep_crypto::tx_signer::derive_address(&pk)
+        };
+        let payload = tx_payload(&sender, receiver, amount, timestamp);
         let sig = sign_tx_payload(&payload, &sk).expect("sign");
-        // Wire format: pk(64) || sphincs_sig
-        // SPHINCS+ public keys are 64 bytes for sphincsshake256fsimple.
-        let mut full_sig = Vec::with_capacity(pk.len() + sig.len());
-        full_sig.extend_from_slice(&pk);
-        full_sig.extend_from_slice(&sig);
+        let mut signature = Vec::with_capacity(pk.len() + sig.len());
+        signature.extend_from_slice(&pk);
+        signature.extend_from_slice(&sig);
         ZKTransaction {
-            sender: sender.to_string(),
+            sender,
             receiver: receiver.to_string(),
             amount,
             timestamp,
-            signature: full_sig,
+            signature,
         }
     }
 
@@ -282,14 +215,9 @@ mod tests {
     async fn test_valid_tx_admitted() {
         let pool = TransactionPool::new(100);
         let tx = make_signed_tx("alice", "bob", 500, 1_700_000_000);
-        assert!(
-            pool.add_transaction(tx).await,
-            "Valid signed tx must be admitted"
-        );
+        assert!(pool.add_transaction(tx).await);
         assert_eq!(pool.pool_size().await, 1);
     }
-
-    // ── S-07: signature verification ─────────────────────────────────────────
 
     #[tokio::test]
     async fn test_s07_empty_signature_rejected() {
@@ -301,10 +229,7 @@ mod tests {
             timestamp: 1_700_000_001,
             signature: vec![],
         };
-        assert!(
-            !pool.add_transaction(tx).await,
-            "S-07: empty sig must be rejected"
-        );
+        assert!(!pool.add_transaction(tx).await);
     }
 
     #[tokio::test]
@@ -315,91 +240,74 @@ mod tests {
             receiver: "bob".into(),
             amount: 100,
             timestamp: 1_700_000_002,
-            signature: vec![0u8; 10], // too short
+            signature: vec![0u8; 10],
         };
-        assert!(
-            !pool.add_transaction(tx).await,
-            "S-07: short sig must be rejected"
-        );
+        assert!(!pool.add_transaction(tx).await);
     }
 
     #[tokio::test]
     async fn test_s07_invalid_sphincs_signature_rejected() {
         let pool = TransactionPool::new(100);
-        // Correct length but all zeros — will fail SPHINCS+ verification
         let tx = ZKTransaction {
             sender: "alice".into(),
             receiver: "bob".into(),
             amount: 100,
             timestamp: 1_700_000_003,
-            signature: vec![0u8; SPHINCS_PK_LEN + 49088],
+            signature: vec![0u8; FULL_SIG_LEN],
         };
-        assert!(
-            !pool.add_transaction(tx).await,
-            "S-07: forged sig must fail SPHINCS+ verify"
-        );
+        assert!(!pool.add_transaction(tx).await);
     }
 
     #[tokio::test]
     async fn test_s07_tampered_signature_rejected() {
         let pool = TransactionPool::new(100);
         let mut tx = make_signed_tx("alice", "bob", 200, 1_700_000_004);
-        tx.signature[50] ^= 0xFF; // flip a byte in the sig portion
-        assert!(
-            !pool.add_transaction(tx).await,
-            "S-07: tampered sig must be rejected"
-        );
+        tx.signature[SPHINCS_PK_LEN] ^= 0xFF;
+        assert!(!pool.add_transaction(tx).await);
     }
 
     #[tokio::test]
     async fn test_s07_wrong_amount_rejected() {
-        // Sign for amount=200 but submit with amount=999
         let pool = TransactionPool::new(100);
         let mut tx = make_signed_tx("alice", "bob", 200, 1_700_000_005);
-        tx.amount = 999; // mismatch with signed payload
-        assert!(
-            !pool.add_transaction(tx).await,
-            "S-07: mutated amount must fail SPHINCS+ verify"
-        );
+        tx.amount = 999;
+        assert!(!pool.add_transaction(tx).await);
     }
 
-    // ── S-09: duplicate detection ─────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_sender_must_match_signing_key_address() {
+        let pool = TransactionPool::new(100);
+        let mut tx = make_signed_tx("ignored", "receiver", 500, 1_700_000_006);
+        tx.sender = "BLEEP1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        assert!(!pool.add_transaction(tx).await);
+    }
 
     #[tokio::test]
     async fn test_s09_exact_duplicate_rejected() {
         let pool = TransactionPool::new(100);
-        let tx1 = make_signed_tx("alice", "bob", 300, 1_700_000_010);
-        // Build an identical tx with the same payload (same sender/receiver/amount/timestamp)
-        // by re-signing with a different key — same payload hash, so should be caught
-        let tx2 = make_signed_tx("alice", "bob", 300, 1_700_000_010);
-        assert!(pool.add_transaction(tx1).await, "First tx admitted");
-        assert!(
-            !pool.add_transaction(tx2).await,
-            "S-09: exact duplicate rejected"
-        );
+        let tx = make_signed_tx("alice", "bob", 300, 1_700_000_010);
+        assert!(pool.add_transaction(tx.clone()).await);
+        assert!(!pool.add_transaction(tx).await);
     }
 
     #[tokio::test]
     async fn test_s09_different_timestamp_admitted() {
-        // Different timestamps → different payload → different hash → both admitted
         let pool = TransactionPool::new(100);
         let tx1 = make_signed_tx("alice", "bob", 300, 1_700_000_020);
         let tx2 = make_signed_tx("alice", "bob", 300, 1_700_000_021);
         assert!(pool.add_transaction(tx1).await);
-        assert!(
-            pool.add_transaction(tx2).await,
-            "S-09: different timestamp must be admitted"
-        );
+        assert!(pool.add_transaction(tx2).await);
         assert_eq!(pool.pool_size().await, 2);
     }
-
-    // ── Field validation ──────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_empty_sender_rejected() {
         let pool = TransactionPool::new(100);
-        let tx = make_signed_tx("", "bob", 100, 1_700_000_030);
-        assert!(!pool.add_transaction(tx).await);
+        assert!(
+            !pool
+                .add_transaction(make_signed_tx("", "bob", 100, 1_700_000_030))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -410,7 +318,7 @@ mod tests {
             receiver: "bob".into(),
             amount: 0,
             timestamp: 1_700_000_031,
-            signature: vec![1u8; MIN_SIG_LEN + 10],
+            signature: vec![1u8; FULL_SIG_LEN],
         };
         assert!(!pool.add_transaction(tx).await);
     }
@@ -418,35 +326,41 @@ mod tests {
     #[tokio::test]
     async fn test_self_transfer_rejected() {
         let pool = TransactionPool::new(100);
-        let tx = make_signed_tx("alice", "alice", 100, 1_700_000_032);
-        assert!(!pool.add_transaction(tx).await);
+        assert!(
+            !pool
+                .add_transaction(make_signed_tx("alice", "alice", 100, 1_700_000_032))
+                .await
+        );
     }
 
     #[tokio::test]
     async fn test_capacity_limit() {
         let pool = TransactionPool::new(2);
-        let tx1 = make_signed_tx("a", "b", 1, 1_700_100_001);
-        let tx2 = make_signed_tx("a", "b", 2, 1_700_100_002);
-        let tx3 = make_signed_tx("a", "b", 3, 1_700_100_003);
-        assert!(pool.add_transaction(tx1).await);
-        assert!(pool.add_transaction(tx2).await);
         assert!(
-            !pool.add_transaction(tx3).await,
-            "Pool at capacity must reject"
+            pool.add_transaction(make_signed_tx("a", "b", 1, 1_700_100_001))
+                .await
+        );
+        assert!(
+            pool.add_transaction(make_signed_tx("a", "b", 2, 1_700_100_002))
+                .await
+        );
+        assert!(
+            !pool
+                .add_transaction(make_signed_tx("a", "b", 3, 1_700_100_003))
+                .await
         );
     }
 
     #[tokio::test]
     async fn test_peek_for_block() {
         let pool = TransactionPool::new(100);
-        let tx1 = make_signed_tx("a", "b", 1, 1_700_200_001);
-        let tx2 = make_signed_tx("a", "b", 2, 1_700_200_002);
-        let tx3 = make_signed_tx("a", "b", 3, 1_700_200_003);
-        pool.add_transaction(tx1).await;
-        pool.add_transaction(tx2).await;
-        pool.add_transaction(tx3).await;
-        let peeked = pool.peek_for_block(2).await;
-        assert_eq!(peeked.len(), 2, "peek_for_block must respect limit");
-        assert_eq!(pool.pool_size().await, 3, "peek must not remove txs");
+        for (amount, timestamp) in [(1, 1_700_200_001), (2, 1_700_200_002), (3, 1_700_200_003)] {
+            assert!(
+                pool.add_transaction(make_signed_tx("a", "b", amount, timestamp))
+                    .await
+            );
+        }
+        assert_eq!(pool.peek_for_block(2).await.len(), 2);
+        assert_eq!(pool.pool_size().await, 3);
     }
 }

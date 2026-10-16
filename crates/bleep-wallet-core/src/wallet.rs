@@ -21,10 +21,10 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
+use bleep_crypto::tx_signer::derive_address as derive_tx_address;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as Sha2Digest, Sha256};
-use sha3::Sha3_256;
+use sha3::{Digest, Sha3_256};
 
 // ─── EncryptedWallet ──────────────────────────────────────────────────────────
 
@@ -131,9 +131,7 @@ impl EncryptedWallet {
 
     /// `BLEEP1<hex40>` — SHA256²(pk) truncated to 20 bytes.
     pub fn derive_address(public_key: &[u8]) -> String {
-        let first = Sha256::digest(public_key);
-        let second = Sha256::digest(first);
-        format!("BLEEP1{}", hex::encode(&second[..20]))
+        derive_tx_address(public_key)
     }
 
     pub fn address(&self) -> &str {

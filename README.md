@@ -78,8 +78,12 @@ source "$HOME/.cargo/env"
 ```bash
 git clone https://github.com/BleepEcosystem/BLEEP-v1.git
 cd BLEEP-v1
+# Generate once per node and store securely for subsequent restarts.
+export BLEEP_JWT_SECRET="$(openssl rand -base64 32)"
 cargo run --release
 ```
+
+The node refuses to start without a unique `BLEEP_JWT_SECRET` containing at least 32 decoded random bytes. Persist the generated value in your deployment secret manager and reuse it on restarts; do not commit it or reuse a shared development secret.
 
 **16-step startup sequence (Protocol Version 5):**
 
