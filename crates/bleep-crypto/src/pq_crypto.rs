@@ -309,7 +309,7 @@ impl DigitalSignature {
     /// SPHINCS+-SHAKE-256f-simple detached signature length.
     pub const SIG_LEN: usize = 49_856;
 
-    /// Serialise to `message_hash(32) || sig_bytes(49088)`.
+    /// Serialise to `message_hash(32) || sig_bytes(49_856)`.
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + Self::SIG_LEN);
         out.extend_from_slice(&self.message_hash);
@@ -317,7 +317,7 @@ impl DigitalSignature {
         out
     }
 
-    /// Deserialise from `message_hash(32) || sig_bytes(49088)`.
+    /// Deserialise from `message_hash(32) || sig_bytes(49_856)`.
     pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
         if bytes.len() != 32 + Self::SIG_LEN {
             return Err(CryptoError::InvalidSignatureFormat(format!(
@@ -729,7 +729,7 @@ mod tests {
         let message = b"test message for signing - BLEEP Protocol v3";
         let sig = SignatureScheme::sign(message, &sk).expect("sign");
 
-        // Signature size must be 49088 bytes (SPHINCS+-SHAKE-256f-simple)
+        // Signature size must be 49_856 bytes (SPHINCS+-SHAKE-256f-simple)
         assert_eq!(
             sig.sig_bytes().len(),
             DigitalSignature::SIG_LEN,

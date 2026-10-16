@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 /// Expected SPHINCS+ public key length for sphincsshake256fsimple: 64 bytes
 const SPHINCS_PK_LEN: usize = 64;
 /// SPHINCS+-SHAKE-256f-simple detached signature length.
-const SPHINCS_SIG_LEN: usize = 49_088;
+const SPHINCS_SIG_LEN: usize = 49_856;
 const FULL_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 
 /// FIFO transaction pool with SPHINCS+ signature verification on admission.
