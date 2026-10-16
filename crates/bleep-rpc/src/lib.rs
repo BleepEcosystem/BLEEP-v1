@@ -227,6 +227,7 @@ struct HealthResp {
     peers: usize,
     uptime_secs: u64,
     version: &'static str,
+    chain_id: String,
 }
 
 #[derive(Serialize)]
@@ -460,6 +461,8 @@ pub fn rpc_routes_with_state(
                 peers: st.peer_count.load(std::sync::atomic::Ordering::Relaxed),
                 uptime_secs: st.uptime_secs(),
                 version: env!("CARGO_PKG_VERSION"),
+                chain_id: std::env::var("BLEEP_CHAIN_ID")
+                    .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string()),
             })
         });
 
@@ -1121,6 +1124,10 @@ pub fn rpc_routes_with_state(
         .or(auth_audit_export(Arc::clone(&state_inner)))
         .or(explorer_ui())
         .or(explorer_api_blocks(Arc::clone(&state_inner)))
+        .or(explorer_api_block(Arc::clone(&state_inner)))
+        .or(explorer_api_transactions(Arc::clone(&state_inner)))
+        .or(explorer_api_transaction(Arc::clone(&state_inner)))
+        .or(explorer_api_address(Arc::clone(&state_inner)))
         .or(explorer_api_validators(Arc::clone(&state_inner)))
         .or(metrics_prometheus(Arc::clone(&state_inner)))
         // ── Sprint 9 ──────────────────────────────────────────────────────
@@ -3290,17 +3297,29 @@ fn auth_audit_export(
 
 // ── GET /explorer ─────────────────────────────────────────────────────────────
 //
-// Read-only block explorer web UI. Fetches live data from the node's own RPC
-// endpoints (/rpc/block/latest, /rpc/health, /rpc/validator/list).
-// Served as inline HTML + vanilla JS — no build step required.
+// Explorer UI and client assets are bundled into the node; no separate build
+// or third-party script host is required.
 fn explorer_ui() -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("explorer").and(warp::get()).map(|| {
         warp::http::Response::builder()
             .status(200)
             .header("content-type", "text/html; charset=utf-8")
-            .body(EXPLORER_HTML)
+            .header("x-content-type-options", "nosniff")
+            .header("x-frame-options", "DENY")
+            .header("referrer-policy", "no-referrer")
+            .header(
+                "content-security-policy",
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            )
+            .body(include_str!("explorer.html"))
             .unwrap()
     })
+}
+
+#[derive(Deserialize, Default)]
+struct ExplorerBlocksQuery {
+    limit: Option<usize>,
+    before: Option<u64>,
 }
 
 // ── GET /rpc/explorer/blocks ──────────────────────────────────────────────────
@@ -3309,25 +3328,251 @@ fn explorer_api_blocks(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "explorer" / "blocks")
         .and(warp::get())
+        .and(warp::query::<ExplorerBlocksQuery>())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            let blocks: Vec<serde_json::Value> = (0..10u64)
-                .filter_map(|i| height.checked_sub(i).map(|h| (i, h)))
-                .map(|(i, h)| {
-                    serde_json::json!({
-                        "height":    h,
-                        "hash":      format!("{:064x}", h ^ 0xb1ee_b1ee_b1ee_b1ee),
-                        "tx_count":  (h % 64) as u32,
-                        "epoch":     h / 100,
-                        "timestamp": now_secs().saturating_sub(i * 3),
-                        "proposer":  format!("validator-{}", h % 7),
-                        "size_bytes": 1024 + (h % 3072) as u32,
+        .map(
+            |query: ExplorerBlocksQuery, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable; explorer data cannot be served.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let latest_height = chain.height();
+                let limit = query.limit.unwrap_or(10).clamp(1, 100);
+                let blocks: Vec<_> = chain
+                    .chain
+                    .iter()
+                    .rev()
+                    .filter(|block| query.before.map_or(true, |before| block.index < before))
+                    .take(limit)
+                    .map(explorer_block_summary)
+                    .collect();
+                Box::new(warp::reply::json(
+                    &serde_json::json!({ "blocks": blocks, "latest_height": latest_height }),
+                ))
+            },
+        )
+}
+
+fn explorer_block_summary(block: &bleep_core::block::Block) -> serde_json::Value {
+    let proposer = block
+        .validator_signature
+        .get(..bleep_core::block::SPHINCS_PK_LEN)
+        .map(hex::encode);
+    serde_json::json!({
+        "height": block.index,
+        "hash": block.compute_hash(),
+        "previous_hash": block.previous_hash,
+        "tx_count": block.transactions.len(),
+        "epoch": block.epoch_id,
+        "timestamp": block.timestamp,
+        "proposer": proposer,
+        "merkle_root": block.merkle_root,
+        "consensus_mode": format!("{:?}", block.consensus_mode),
+        "protocol_version": block.protocol_version,
+        "shard_id": block.shard_id,
+    })
+}
+
+fn explorer_transaction(tx: &bleep_core::block::Transaction, height: u64) -> serde_json::Value {
+    serde_json::json!({
+        "hash": hex::encode(tx.tx_hash()),
+        "block_height": height,
+        "chain_id": tx.chain_id,
+        "sender": tx.sender,
+        "receiver": tx.receiver,
+        "amount": tx.amount.to_string(),
+        "timestamp": tx.timestamp,
+        "nonce": tx.nonce,
+    })
+}
+
+fn explorer_api_block(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "block" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |id: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let block = id
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|height| chain.get_block_by_index(height))
+                    .or_else(|| chain.get_block_by_hash(&id));
+                match block {
+                    Some(block) => {
+                        let transactions: Vec<_> = block
+                            .transactions
+                            .iter()
+                            .map(|tx| explorer_transaction(tx, block.index))
+                            .collect();
+                        Box::new(warp::reply::json(&serde_json::json!({
+                            "block": explorer_block_summary(&block),
+                            "transactions": transactions,
+                        })))
+                    }
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Block '{id}' not found."),
+                        }),
+                        warp::http::StatusCode::NOT_FOUND,
+                    )),
+                }
+            },
+        )
+}
+
+fn explorer_api_transactions(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "transactions")
+        .and(warp::get())
+        .and(warp::query::<HashMap<String, String>>())
+        .and(with_arc_state(state))
+        .map(
+            |query: HashMap<String, String>, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let address = query.get("address").map(String::as_str);
+                let limit = query
+                    .get("limit")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                let transactions: Vec<_> = chain
+                    .chain
+                    .iter()
+                    .rev()
+                    .flat_map(|block| {
+                        block.transactions.iter().filter_map(move |tx| {
+                            if address.is_some_and(|address| {
+                                tx.sender != address && tx.receiver != address
+                            }) {
+                                return None;
+                            }
+                            Some(explorer_transaction(tx, block.index))
+                        })
                     })
-                })
-                .collect();
-            warp::reply::json(&serde_json::json!({ "blocks": blocks, "latest_height": height }))
-        })
+                    .take(limit)
+                    .collect();
+                Box::new(warp::reply::json(
+                    &serde_json::json!({ "transactions": transactions }),
+                ))
+            },
+        )
+}
+
+fn explorer_api_transaction(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "transaction" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |hash: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let found = chain.chain.iter().rev().find_map(|block| {
+                    block
+                        .transactions
+                        .iter()
+                        .find(|tx| hex::encode(tx.tx_hash()) == hash)
+                        .map(|tx| explorer_transaction(tx, block.index))
+                });
+                match found {
+                    Some(transaction) => Box::new(warp::reply::json(&transaction)),
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Transaction '{hash}' not found."),
+                        }),
+                        warp::http::StatusCode::NOT_FOUND,
+                    )),
+                }
+            },
+        )
+}
+
+fn explorer_api_address(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "address" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |address: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(state_mgr) = &st.state_mgr else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Account state unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let state = state_mgr.lock();
+                Box::new(warp::reply::json(&serde_json::json!({
+                    "address": address,
+                    "balance": state.get_balance(&address).to_string(),
+                    "nonce": state.get_nonce(&address),
+                    "block_height": state.block_height(),
+                })))
+            },
+        )
 }
 
 // ── GET /rpc/explorer/validators ─────────────────────────────────────────────
@@ -3337,32 +3582,37 @@ fn explorer_api_validators(
     warp::path!("rpc" / "explorer" / "validators")
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            // Return the 7-validator testnet set
-            let regions = [
-                "us-east-1",
-                "eu-west-1",
-                "ap-southeast-1",
-                "us-west-2",
-                "sa-east-1",
-                "af-south-1",
-                "ap-northeast-1",
-            ];
-            let validators: Vec<serde_json::Value> = (0..7usize)
-                .map(|i| {
-                    let region = regions[i];
+        .map(|st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+            let Some(registry) = &st.validator_registry else {
+                return Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "ValidatorRegistry unavailable.".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                ));
+            };
+            let registry = registry.lock();
+            let validators: Vec<_> = registry
+                .get_active_validators()
+                .iter()
+                .map(|validator| {
                     serde_json::json!({
-                        "id":            format!("validator-{}", i),
-                        "stake":         10_000_000u64,
-                        "status":        "active",
-                        "blocks_signed": height.saturating_sub((i as u64) * 3),
-                        "uptime_pct":    99.5 - (i as f64) * 0.1,
-                        "region":        region,
+                        "id": validator.id,
+                        "stake": validator.stake.to_string(),
+                        "status": format!("{:?}", validator.state),
+                        "reputation": validator.reputation,
+                        "joined_epoch": validator.joined_epoch,
+                        "total_slashed": validator.total_slashed.to_string(),
+                        "can_participate": validator.can_participate(),
                     })
                 })
                 .collect();
-            warp::reply::json(&serde_json::json!({ "validators": validators, "count": 7 }))
+            let count = validators.len();
+            Box::new(warp::reply::json(&serde_json::json!({
+                "validators": validators,
+                "count": count,
+                "total_stake": registry.total_active_stake().to_string(),
+            })))
         })
 }
 
@@ -3686,180 +3936,65 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(core_bal, RpcState::FAUCET_DRIP_AMOUNT);
     }
-}
 
-// ── Block explorer HTML ───────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn explorer_routes_read_live_canonical_chain_data() {
+        let address = "BLEEP1explorer-address".to_string();
+        let tx = bleep_core::block::Transaction {
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+            sender: address.clone(),
+            receiver: "BLEEP1recipient".to_string(),
+            amount: 123,
+            timestamp: 1_700_000_000,
+            nonce: 4,
+            signature: vec![],
+        };
+        let block = Block::new(1, vec![tx], "genesis-hash".to_string());
+        let expected_block_hash = block.compute_hash();
+        let expected_tx_hash = hex::encode(block.transactions[0].tx_hash());
 
-static EXPLORER_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>BLEEP Testnet Explorer</title>
-  <style>
-    :root {
-      --bg: #0d0f14; --card: #151820; --border: #252a35;
-      --accent: #00e5c3; --accent2: #7b5ea7; --text: #e2e8f0;
-      --muted: #6b7280; --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
+        let tx_pool = TransactionPool::new(10);
+        let mut chain = Blockchain::new(Block::genesis(), CoreBlockchainState::default(), tx_pool);
+        chain.chain.push_back(block);
+        let blockchain = Arc::new(RwLock::new(chain));
+        let state_manager = Arc::new(Mutex::new(StateManager::new()));
+        state_manager.lock().set_balance(&address, 123);
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_blockchain(Arc::clone(&blockchain))
+                .with_state_manager(state_manager),
+        );
+
+        let blocks = request()
+            .method("GET")
+            .path("/rpc/explorer/blocks?limit=2")
+            .reply(&routes)
+            .await;
+        assert_eq!(blocks.status(), 200);
+        let blocks: serde_json::Value = serde_json::from_slice(blocks.body()).unwrap();
+        assert_eq!(blocks["blocks"][0]["height"], 1);
+        assert_eq!(blocks["blocks"][0]["hash"], expected_block_hash);
+
+        let transaction = request()
+            .method("GET")
+            .path(&format!("/rpc/explorer/transaction/{expected_tx_hash}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(transaction.status(), 200);
+        let transaction: serde_json::Value = serde_json::from_slice(transaction.body()).unwrap();
+        assert_eq!(transaction["sender"], address);
+        assert_eq!(transaction["amount"], "123");
+
+        let account = request()
+            .method("GET")
+            .path(&format!("/rpc/explorer/address/{address}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(account.status(), 200);
+        let account: serde_json::Value = serde_json::from_slice(account.body()).unwrap();
+        assert_eq!(account["balance"], "123");
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; }
-    header {
-      display: flex; align-items: center; gap: 14px;
-      padding: 18px 32px; border-bottom: 1px solid var(--border);
-      background: linear-gradient(90deg, #0d0f14 0%, #12151f 100%);
-    }
-    .logo { font-size: 1.5rem; font-weight: 700; color: var(--accent); letter-spacing: 2px; }
-    .tag { font-size: 0.7rem; background: var(--accent2); color: #fff; padding: 2px 8px; border-radius: 10px; }
-    .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); margin-left: auto; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
-    main { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
-    .stat-card {
-      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-      padding: 20px; transition: border-color .2s;
-    }
-    .stat-card:hover { border-color: var(--accent); }
-    .stat-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-    .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
-    .stat-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
-    section { margin-bottom: 36px; }
-    h2 { font-size: 1rem; color: var(--text); margin-bottom: 14px; letter-spacing: 1px; text-transform: uppercase; }
-    table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
-    th { text-align: left; font-size: 0.72rem; color: var(--muted); text-transform: uppercase; padding: 12px 16px; border-bottom: 1px solid var(--border); }
-    td { padding: 11px 16px; font-size: 0.82rem; border-bottom: 1px solid var(--border); }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: rgba(0,229,195,0.04); }
-    .hash { color: var(--accent); font-size: 0.75rem; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 0.7rem; }
-    .badge-green { background: rgba(16,185,129,.15); color: var(--green); }
-    .badge-yellow { background: rgba(245,158,11,.15); color: var(--yellow); }
-    .refresh-btn {
-      float: right; background: transparent; border: 1px solid var(--accent);
-      color: var(--accent); padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 0.78rem;
-    }
-    .refresh-btn:hover { background: var(--accent); color: #000; }
-    footer { text-align: center; color: var(--muted); font-size: 0.72rem; padding: 24px; border-top: 1px solid var(--border); }
-    .err { color: var(--red); font-size: 0.8rem; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-<header>
-  <span class="logo">BLEEP</span>
-  <span class="tag">testnet-1</span>
-  <span style="color:var(--muted);font-size:.8rem">Block Explorer</span>
-  <span class="status-dot" id="statusDot" title="Chain live"></span>
-</header>
-<main>
-  <div class="stats-grid" id="statsGrid">
-    <div class="stat-card"><div class="stat-label">Chain Height</div><div class="stat-value" id="sHeight"><span class="spinner"></span></div><div class="stat-sub">Latest block</div></div>
-    <div class="stat-card"><div class="stat-label">Connected Peers</div><div class="stat-value" id="sPeers">—</div><div class="stat-sub">P2P network</div></div>
-    <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value" id="sUptime">—</div><div class="stat-sub">Node runtime</div></div>
-    <div class="stat-card"><div class="stat-label">Validators</div><div class="stat-value" id="sVals">7</div><div class="stat-sub">Active testnet set</div></div>
-    <div class="stat-card"><div class="stat-label">Faucet Balance</div><div class="stat-value" id="sFaucet">—</div><div class="stat-sub">BLEEP remaining</div></div>
-    <div class="stat-card"><div class="stat-label">Epoch</div><div class="stat-value" id="sEpoch">—</div><div class="stat-sub">100 blocks/epoch</div></div>
-  </div>
-
-  <section>
-    <h2>Latest Blocks <button class="refresh-btn" onclick="loadBlocks()">↻ Refresh</button></h2>
-    <table>
-      <thead><tr><th>Height</th><th>Hash</th><th>Proposer</th><th>Txs</th><th>Size</th><th>Epoch</th><th>Age</th></tr></thead>
-      <tbody id="blocksBody"><tr><td colspan="7" style="text-align:center;color:var(--muted)"><span class="spinner"></span> Loading…</td></tr></tbody>
-    </table>
-  </section>
-
-  <section>
-    <h2>Validator Set <button class="refresh-btn" onclick="loadValidators()">↻ Refresh</button></h2>
-    <table>
-      <thead><tr><th>ID</th><th>Region</th><th>Stake</th><th>Blocks Signed</th><th>Uptime</th><th>Status</th></tr></thead>
-      <tbody id="valsBody"><tr><td colspan="6" style="text-align:center;color:var(--muted)"><span class="spinner"></span> Loading…</td></tr></tbody>
-    </table>
-  </section>
-</main>
-<footer>BLEEP Testnet Explorer &mdash; Sprint 8 &mdash; Data refreshes every 6 s &mdash; All times UTC</footer>
-
-<script>
-const BASE = '';
-const BLOCK_TIME = 3000;
-let lastBlock = 0;
-
-async function loadHealth() {
-  try {
-    const r = await fetch(BASE + '/rpc/health');
-    const d = await r.json();
-    document.getElementById('sHeight').textContent = d.height.toLocaleString();
-    document.getElementById('sPeers').textContent  = d.peers;
-    const u = d.uptime_secs;
-    const h = Math.floor(u/3600), m = Math.floor((u%3600)/60), s = u%60;
-    document.getElementById('sUptime').textContent = h + 'h ' + m + 'm';
-    document.getElementById('sEpoch').textContent  = Math.floor(d.height / 100).toLocaleString();
-    lastBlock = d.height;
-    document.getElementById('statusDot').title = 'Live — height ' + d.height;
-  } catch(e) {
-    document.getElementById('sHeight').innerHTML = '<span class="err">RPC err</span>';
-  }
 }
-
-async function loadFaucet() {
-  try {
-    const r = await fetch(BASE + '/faucet/status');
-    const d = await r.json();
-    document.getElementById('sFaucet').textContent = d.balance_bleep.toLocaleString() + ' BLEEP';
-  } catch(e) {}
-}
-
-async function loadBlocks() {
-  try {
-    const r = await fetch(BASE + '/rpc/explorer/blocks');
-    const d = await r.json();
-    const now = Math.floor(Date.now()/1000);
-    const rows = d.blocks.map(b => {
-      const age = now - b.timestamp;
-      const ageStr = age < 60 ? age + 's' : Math.floor(age/60) + 'm ' + (age%60) + 's';
-      return `<tr>
-        <td><strong>${b.height.toLocaleString()}</strong></td>
-        <td class="hash">${b.hash.slice(0,16)}…</td>
-        <td>${b.proposer}</td>
-        <td>${b.tx_count}</td>
-        <td>${(b.size_bytes/1024).toFixed(1)} KB</td>
-        <td>${b.epoch}</td>
-        <td>${ageStr} ago</td>
-      </tr>`;
-    }).join('');
-    document.getElementById('blocksBody').innerHTML = rows || '<tr><td colspan="7" style="color:var(--muted)">No blocks yet</td></tr>';
-  } catch(e) {
-    document.getElementById('blocksBody').innerHTML = '<tr><td colspan="7" class="err">Failed to load blocks</td></tr>';
-  }
-}
-
-async function loadValidators() {
-  try {
-    const r = await fetch(BASE + '/rpc/explorer/validators');
-    const d = await r.json();
-    const rows = d.validators.map(v => `<tr>
-      <td><strong>${v.id}</strong></td>
-      <td>${v.region}</td>
-      <td>${v.stake.toLocaleString()} BLEEP</td>
-      <td>${v.blocks_signed.toLocaleString()}</td>
-      <td>${v.uptime_pct.toFixed(1)}%</td>
-      <td><span class="badge badge-green">${v.status}</span></td>
-    </tr>`).join('');
-    document.getElementById('valsBody').innerHTML = rows;
-    document.getElementById('sVals').textContent  = d.count;
-  } catch(e) {
-    document.getElementById('valsBody').innerHTML = '<tr><td colspan="6" class="err">Failed to load validators</td></tr>';
-  }
-}
-
-function refresh() { loadHealth(); loadFaucet(); loadBlocks(); loadValidators(); }
-refresh();
-setInterval(refresh, 6000);
-</script>
-</body>
-</html>
-"#;
 
 // ── base64 shim (use the base64 crate already in scope via bleep-crypto) ──────
 mod base64 {
