@@ -85,6 +85,10 @@ use bleep_pat::launch_asset_token_logic;
 use bleep_wallet_core::init_wallet_services;
 
 // ── Economics ─────────────────────────────────────────────────────────────────
+use bleep_economics::distribution::{
+    INITIAL_CIRCULATING_SUPPLY, LAUNCH_COMMUNITY_UNLOCK, LAUNCH_ECOSYSTEM_UNLOCK,
+    LAUNCH_FOUNDATION_UNLOCK, LAUNCH_VALIDATOR_UNLOCK,
+};
 use bleep_economics::oracle_bridge::{OracleSource, PriceUpdate};
 use bleep_economics::{BleepEconomicsRuntime, EpochInput};
 
@@ -256,28 +260,42 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // Mint genesis allocations only at height 0 (first start).
-    // mint() now returns Result — cap violations are logged and abort startup.
+    // Mint the canonical launch unlocks only into a fresh genesis state.
+    // Existing height-0 state with a different supply must be migrated or reset,
+    // never silently topped up with a second allocation.
     if state.block_height() == 0 {
-        state
-            .mint("bleep:genesis:foundation", 500_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint foundation failed: {}", e);
-                std::process::exit(1);
-            });
-        state
-            .mint("bleep:genesis:rewards", 100_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint rewards failed: {}", e);
-                std::process::exit(1);
-            });
-        state
-            .mint("bleep:genesis:validators", 50_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint validators failed: {}", e);
-                std::process::exit(1);
-            });
-        info!("  ✅ Genesis allocations minted (650T µBLEEP).");
+        let existing_supply = state.total_supply();
+        if existing_supply == 0 {
+            for (address, amount) in [
+                ("bleep:genesis:foundation", LAUNCH_FOUNDATION_UNLOCK),
+                ("bleep:genesis:rewards", LAUNCH_VALIDATOR_UNLOCK),
+                ("bleep:genesis:community", LAUNCH_COMMUNITY_UNLOCK),
+                ("bleep:genesis:ecosystem", LAUNCH_ECOSYSTEM_UNLOCK),
+            ] {
+                state.mint(address, amount).unwrap_or_else(|e| {
+                    error!("Genesis mint for {address} failed: {e}");
+                    std::process::exit(1);
+                });
+            }
+        } else if existing_supply != INITIAL_CIRCULATING_SUPPLY {
+            error!(
+                "Height-0 state has {} microBLP; expected 0 (fresh genesis) or {} (already allocated). Reset or explicitly migrate this state before starting the updated testnet.",
+                existing_supply, INITIAL_CIRCULATING_SUPPLY
+            );
+            std::process::exit(1);
+        }
+        if state.total_supply() != INITIAL_CIRCULATING_SUPPLY {
+            error!(
+                "Genesis supply invariant failed: expected {} microBLP, got {}.",
+                INITIAL_CIRCULATING_SUPPLY,
+                state.total_supply()
+            );
+            std::process::exit(1);
+        }
+        info!(
+            "  ✅ Genesis allocations verified ({} BLP circulating; 200,000,000 BLP hard cap).",
+            INITIAL_CIRCULATING_SUPPLY / 100_000_000
+        );
     }
 
     // Rebuild the Sparse Merkle Trie from the persisted DB state
@@ -406,6 +424,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("💰 [9/16] Initialising BleepEconomicsRuntime (tokenomics + fee market + oracle)…");
     let economics_runtime = {
         let mut rt = BleepEconomicsRuntime::genesis();
+        let current_supply = state.lock().total_supply();
+        rt.initialize_genesis_supply(current_supply)
+            .map_err(|e| format!("Economics supply initialization failed: {e}"))?;
+        info!(
+            "  ✅ Economics supply initialized from persisted account balances ({} microBLP).",
+            current_supply
+        );
 
         // Register genesis validator with economics engine
         let genesis_val_id = hex::encode(&sphincs_pk[..8]);

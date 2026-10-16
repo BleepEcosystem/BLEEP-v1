@@ -333,6 +333,29 @@ impl CanonicalTokenomicsEngine {
         engine
     }
 
+    /// Set the initial circulating allocation before any epoch has run.
+    pub fn initialize_genesis_supply(
+        &mut self,
+        initial_supply: u128,
+    ) -> Result<(), TokenomicsError> {
+        if self.supply_state.epoch != 0
+            || self.supply_state.total_minted != GENESIS_SUPPLY
+            || self.supply_state.total_burned != 0
+        {
+            return Err(TokenomicsError::InvalidSupplyState(
+                "genesis supply can only be initialized before any mint or burn".into(),
+            ));
+        }
+        if initial_supply > MAX_SUPPLY {
+            return Err(TokenomicsError::SupplyCapExceeded);
+        }
+
+        self.supply_state.circulating_supply = initial_supply;
+        self.supply_state.total_minted = initial_supply;
+        self.supply_state.state_hash = self.supply_state.compute_hash();
+        self.supply_state.verify()
+    }
+
     /// Record emission for an epoch
     pub fn record_emission(
         &mut self,
@@ -492,6 +515,40 @@ pub enum TokenomicsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_initialize_genesis_supply_updates_hash_and_minted_total() {
+        let mut engine = CanonicalTokenomicsEngine::genesis();
+        let initial_supply = 25_000_000 * 100_000_000;
+
+        engine.initialize_genesis_supply(initial_supply).unwrap();
+
+        assert_eq!(engine.supply_state.circulating_supply, initial_supply);
+        assert_eq!(engine.supply_state.total_minted, initial_supply);
+        assert_eq!(engine.supply_state.total_burned, 0);
+        assert!(engine.supply_state.verify().is_ok());
+    }
+
+    #[test]
+    fn test_initialize_genesis_supply_rejects_supply_over_cap() {
+        let mut engine = CanonicalTokenomicsEngine::genesis();
+
+        assert_eq!(
+            engine.initialize_genesis_supply(MAX_SUPPLY + 1),
+            Err(TokenomicsError::SupplyCapExceeded)
+        );
+    }
+
+    #[test]
+    fn test_initialize_genesis_supply_cannot_be_repeated() {
+        let mut engine = CanonicalTokenomicsEngine::genesis();
+        engine.initialize_genesis_supply(1).unwrap();
+
+        assert!(matches!(
+            engine.initialize_genesis_supply(2),
+            Err(TokenomicsError::InvalidSupplyState(_))
+        ));
+    }
 
     #[test]
     fn test_supply_state_verification() {

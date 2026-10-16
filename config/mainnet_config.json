@@ -92,7 +92,9 @@
   },
   "tokenomics": {
     "native_token": "BLP",
-    "decimals": 18,
+    "decimals": 8,
+    "total_supply": 200000000,
+    "initial_circulating_supply": 25000000,
     "supply_model": "Hybrid",
     "staking_rewards": true,
     "burn_mint_mechanism": true,
@@ -100,10 +102,20 @@
     "liquidity_management": "AI-Powered",
     "nft_staking_rewards": true,
     "distribution": {
-      "foundation": 50000000,
-      "developers": 30000000,
-      "community": 70000000,
-      "staking_rewards": 50000000
+      "validator_rewards": 60000000,
+      "ecosystem_fund": 50000000,
+      "community_incentives": 30000000,
+      "foundation_treasury": 30000000,
+      "core_contributors": 20000000,
+      "strategic_reserve": 10000000
+    },
+    "launch_unlocks": {
+      "validator_rewards": 10000000,
+      "ecosystem_fund": 5000000,
+      "community_incentives": 5000000,
+      "foundation_treasury": 5000000,
+      "core_contributors": 0,
+      "strategic_reserve": 0
     }
   },
   "programmable_asset_tokens": {
