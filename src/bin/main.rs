@@ -601,8 +601,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 11: Scheduler + BlockProducer ───────────────────────────────────
     info!("⚖  [14/16] Wiring BlockProducer and task Scheduler…");
 
-    // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx
-    // GossipBridge subscribes to block_tx and handles P2P broadcast externally
+    // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx.
+    // It gossips complete serialized blocks directly through the P2P node.
     let (mut block_producer, block_rx) = BlockProducer::new_with_sig_availability(
         hex::encode(&sphincs_pk[..8]), // validator_id (first 8 bytes of SPHINCS+ PK)
         1_000_000u64,                  // stake weight
@@ -621,8 +621,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     block_producer.set_canonical_commit_lock(Arc::clone(&canonical_commit_lock));
     let block_producer = Arc::new(block_producer);
 
-    // Subscribe a second receiver for GossipBridge BEFORE the producer starts
-    let block_rx_gossip = block_producer.subscribe();
     let mut block_rx_sched = block_rx;
 
     // Build scheduler
@@ -664,6 +662,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_connect_orchestrator(Arc::clone(&connect_orchestrator))
         .with_pat_registry(Arc::clone(&pat_registry))
         .with_transaction_pool(Arc::clone(&tx_pool))
+        .with_p2p_node(Arc::clone(&p2p_node))
         .with_blockchain(Arc::clone(&blockchain))
         .with_auth_service(Arc::clone(&auth_service));
 
@@ -759,17 +758,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         BlockProducer::run_arc(producer_for_task).await;
     });
 
-    // GossipBridge: fan out FinalizedBlock events to connected P2P peers
-    let gossip_bridge = bleep_consensus::GossipBridge::new(Arc::clone(&p2p_node));
-    let gossip_handle = tokio::spawn(async move {
-        gossip_bridge.run(block_rx_gossip).await;
-    });
-
     // ── Inbound block handler ────────────────────────────────────────────────
     // Listens for gossip blocks from peers, validates them, and inserts
     // valid blocks into the local chain (sync-mode / light node path).
     let inbound_blockchain = Arc::clone(&blockchain);
     let inbound_p2p_node = Arc::clone(&p2p_node);
+    let inbound_tx_pool = Arc::clone(&tx_pool);
     let inbound_state = Arc::clone(&state);
     let inbound_validators = Arc::clone(&validator_registry);
     let inbound_chain_id = chain_id.clone();
@@ -781,8 +775,33 @@ async fn run() -> Result<(), Box<dyn Error>> {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
         loop {
             match inbound_p2p_node.recv_with_payload().await {
-                Some((_peer_id, mut msg, plaintext)) => {
+                Some((peer_id, mut msg, plaintext)) => {
                     msg.payload = plaintext;
+                    if msg.message_type == MessageType::Transaction {
+                        let transaction: bleep_core::transaction::ZKTransaction =
+                            match serde_json::from_slice(&msg.payload) {
+                                Ok(transaction) => transaction,
+                                Err(error) => {
+                                    warn!(
+                                        "[InboundBlockHandler] Bad transaction gossip payload: {}",
+                                        error
+                                    );
+                                    continue;
+                                }
+                            };
+                        if transaction.chain_id != inbound_chain_id {
+                            warn!(
+                                "[InboundBlockHandler] Rejecting transaction for chain {}",
+                                transaction.chain_id
+                            );
+                            continue;
+                        }
+                        if inbound_tx_pool.add_transaction(transaction).await {
+                            inbound_p2p_node.gossip.enqueue(msg, Some(peer_id));
+                        }
+                        continue;
+                    }
+
                     if msg.message_type == MessageType::SigAvailability {
                         sal_bridge.handle_inbound_message(msg);
                         continue;
@@ -1204,7 +1223,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Abort background tasks
     producer_handle.abort();
     relay_handle.abort();
-    gossip_handle.abort();
     bridge_handle.abort();
     interval_handle.abort();
     block_sched_handle.abort();

@@ -1583,6 +1583,7 @@ dependencies = [
  "bleep-economics",
  "bleep-governance",
  "bleep-interop",
+ "bleep-p2p",
  "bleep-pat",
  "bleep-state",
  "bleep-telemetry",

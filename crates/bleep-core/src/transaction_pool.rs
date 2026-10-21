@@ -3,7 +3,7 @@
 use crate::transaction::ZKTransaction;
 use hex;
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -184,6 +184,22 @@ impl TransactionPool {
     /// Current pool depth.
     pub async fn pool_size(&self) -> usize {
         self.pool.lock().await.len()
+    }
+
+    /// Return the next contiguous nonce for a sender, including pending transactions.
+    pub async fn next_nonce(&self, sender: &str, committed_nonce: u64) -> Option<u64> {
+        let pool = self.pool.lock().await;
+        let pending_nonces: BTreeSet<u64> = pool
+            .iter()
+            .filter(|tx| tx.sender == sender && tx.nonce >= committed_nonce)
+            .map(|tx| tx.nonce)
+            .collect();
+
+        let mut next_nonce = committed_nonce;
+        while pending_nonces.contains(&next_nonce) {
+            next_nonce = next_nonce.checked_add(1)?;
+        }
+        Some(next_nonce)
     }
 
     /// Remove a confirmed transaction by its canonical ID.

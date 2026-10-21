@@ -26,7 +26,6 @@ use bleep_cli::{
 };
 
 // Real crate imports
-use base64::Engine;
 use bleep_ai::{
     ai_assistant::{AIRequest, BLEEPAIAssistant},
     analytics::BLEEPAnalytics,
@@ -39,8 +38,6 @@ use bleep_ai::{
     smart_contracts::SmartContractOptimizer,
     wallet::BLEEPWallet,
 };
-use bleep_auth::session::SessionManager;
-use bleep_auth::Role;
 use bleep_core::transaction::ZKTransaction;
 use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
 use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
@@ -245,14 +242,14 @@ async fn run(cmd: Commands) -> Result<()> {
                 let chain_id = std::env::var("BLEEP_CHAIN_ID")
                     .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
                 let nonce = http_client
-                    .get(format!("{}/rpc/state/{}", rpc, sender))
+                    .get(format!("{}/rpc/tx/nonce/{}", rpc, sender))
                     .send()
                     .await?
                     .error_for_status()?
                     .json::<serde_json::Value>()
                     .await?["nonce"]
                     .as_u64()
-                    .ok_or_else(|| anyhow!("RPC state response is missing account nonce"))?;
+                    .ok_or_else(|| anyhow!("RPC transaction nonce response is missing nonce"))?;
 
                 // Sprint 5: unlock AES-GCM encrypted SK, sign with SPHINCS+
                 let sig = {
@@ -274,17 +271,11 @@ async fn run(cmd: Commands) -> Result<()> {
 
                             // Wire format: pk_bytes(64) || sphincs_detached_sig(49_856)
                             // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes
-                            eprintln!(
-                                "[DEBUG] Wallet falcon_keys size: {} bytes",
-                                w.falcon_keys.len()
-                            );
-                            eprintln!("[DEBUG] Signature size: {} bytes", detached_sig.len());
-
                             if w.falcon_keys.len() != 64 {
-                                eprintln!(
-                                    "[WARN] Expected 64-byte SPHINCS+ public key, got {} bytes",
+                                return Err(anyhow!(
+                                    "Expected a 64-byte SPHINCS+ public key, got {} bytes",
                                     w.falcon_keys.len()
-                                );
+                                ));
                             }
 
                             let mut full_sig =
@@ -312,31 +303,13 @@ async fn run(cmd: Commands) -> Result<()> {
                     signature: sig.clone(), // Wire format: pk(64) || SPHINCS+ detached sig
                 };
 
-                eprintln!("[DEBUG CLI] Final transaction:");
-                eprintln!("[DEBUG CLI]   Sender: {}", tx.sender);
-                eprintln!("[DEBUG CLI]   Receiver: {}", tx.receiver);
-                eprintln!("[DEBUG CLI]   Amount: {}", tx.amount);
-                eprintln!("[DEBUG CLI]   Timestamp: {}", tx.timestamp);
-                eprintln!("[DEBUG CLI]   Signature size: {} bytes", tx.signature.len());
-                eprintln!(
-                    "[DEBUG CLI]   PK (first 32 bytes hex): {}",
-                    hex::encode(&tx.signature[..tx.signature.len().min(32)])
-                );
-
                 // POST to RPC
-                match post_transaction(&rpc, &tx).await {
-                    Ok(tx_id) => {
-                        println!("✅ Transaction submitted");
-                        println!("   From:    {}", sender);
-                        println!("   To:      {}", to);
-                        println!("   Amount:  {} BLEEP", amount);
-                        println!("   Tx ID:   {}", tx_id);
-                    }
-                    Err(e) => {
-                        println!("⚠️  Could not reach node RPC ({}): {}", rpc, e);
-                        println!("   Is the node running? Try: ./bleep");
-                    }
-                }
+                let tx_id = post_transaction(&rpc, &tx).await?;
+                println!("✅ Transaction submitted");
+                println!("   From:    {}", sender);
+                println!("   To:      {}", to);
+                println!("   Amount:  {} BLEEP", amount);
+                println!("   Tx ID:   {}", tx_id);
             }
             TxCommand::History => match get_tx_history(&rpc).await {
                 Ok(history) => {
@@ -1125,34 +1098,17 @@ async fn get_block_by_id(rpc: &str, id: &str) -> Result<String> {
     Ok(resp)
 }
 
-/// Generate JWT token for RPC authentication
+/// Read the server-issued session token used for RPC authentication.
 async fn get_jwt_token_sync() -> Result<String> {
-    let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET")
-        .map_err(|_| anyhow!("BLEEP_JWT_SECRET must be set on every node"))?;
-
-    let base64_engine = base64::engine::general_purpose::STANDARD;
-    let jwt_secret = match base64_engine.decode(&jwt_secret_b64) {
-        Ok(secret) if secret.len() >= 32 => secret,
-        Ok(_) => return Err(anyhow!("BLEEP_JWT_SECRET must decode to at least 32 bytes")),
-        Err(e) => return Err(anyhow!("Failed to decode BLEEP_JWT_SECRET: {}", e)),
-    };
-
-    let session_mgr = SessionManager::new(jwt_secret)
-        .map_err(|e| anyhow!("Failed to create SessionManager: {}", e))?;
-
-    // Issue a session token valid for 1 hour
-    let token = session_mgr
-        .issue(
-            "bleep-cli",
-            &[Role::DappDeveloper],
-            chrono::Duration::hours(1),
+    let token = std::env::var("BLEEP_JWT_TOKEN").map_err(|_| {
+        anyhow!(
+            "BLEEP_JWT_TOKEN must contain a server-issued session token; register or log in through /rpc/auth"
         )
-        .await
-        .map_err(|e| anyhow!("Failed to issue session token: {}", e))?;
-
-    eprintln!("[DEBUG] JWT Token: {}", token.token);
-
-    Ok(token.token)
+    })?;
+    if token.trim().is_empty() {
+        return Err(anyhow!("BLEEP_JWT_TOKEN must not be empty"));
+    }
+    Ok(token)
 }
 
 /// Get JWT token from async context
@@ -1173,11 +1129,38 @@ async fn post_transaction(rpc: &str, tx: &ZKTransaction) -> Result<String> {
         .header("authorization", format!("Bearer {}", jwt_token))
         .json(tx)
         .send()
-        .await?
-        .text()
         .await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    parse_tx_response(status, &body)
+}
 
-    Ok(resp)
+fn parse_tx_response(status: reqwest::StatusCode, body: &str) -> Result<String> {
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Transaction submission failed (HTTP {status}): {body}"
+        ));
+    }
+
+    let response: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| anyhow!("Invalid transaction response from RPC: {e}"))?;
+    if response.get("status").and_then(serde_json::Value::as_str) != Some("accepted") {
+        return Err(anyhow!(
+            "Transaction was rejected by RPC: {}",
+            response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| response.get("status").and_then(serde_json::Value::as_str))
+                .unwrap_or("unexpected response")
+        ));
+    }
+
+    response
+        .get("tx_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|tx_id| !tx_id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("Accepted transaction response is missing tx_id"))
 }
 
 /// GET /rpc/tx/history
@@ -1202,6 +1185,41 @@ async fn get_account_state(rpc: &str, address: &str) -> Result<(String, u64, Str
     let url = format!("{}/rpc/state/{}", rpc, address);
     let resp = reqwest::get(&url).await?.json::<AccountStateResp>().await?;
     Ok((resp.balance, resp.nonce, resp.state_root))
+}
+
+#[cfg(test)]
+mod tx_response_tests {
+    use super::parse_tx_response;
+
+    #[test]
+    fn accepts_only_accepted_transaction_responses() {
+        let response = r#"{"tx_id":"tx-123","status":"accepted"}"#;
+        assert_eq!(
+            parse_tx_response(reqwest::StatusCode::OK, response).unwrap(),
+            "tx-123"
+        );
+    }
+
+    #[test]
+    fn reports_rpc_rejections_as_errors() {
+        let response = r#"{"tx_id":"rejected","status":"validation_failed"}"#;
+        let error = parse_tx_response(reqwest::StatusCode::OK, response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validation_failed"));
+    }
+
+    #[test]
+    fn reports_http_failures_as_errors() {
+        let error = parse_tx_response(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":"invalid session"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("HTTP 401"));
+        assert!(error.contains("invalid session"));
+    }
 }
 
 // ── Local state query (no running node required) ───────────────────────────

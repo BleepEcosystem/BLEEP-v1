@@ -39,6 +39,7 @@ use warp::Filter;
 use bleep_auth::{AuthError, AuthService, Permission, SessionClaims};
 use bleep_core::{transaction_pool::TransactionPool, Blockchain};
 use bleep_crypto::{tx_payload, verify_tx_signature};
+use bleep_p2p::{p2p_node::P2PNode, types::MessageType};
 
 // ─── Auth rejection ──────────────────────────────────────────────────────────
 
@@ -95,6 +96,8 @@ pub struct RpcState {
     pub block_producer: Option<Arc<BlockProducer>>,
     /// Live TransactionPool — attach at node startup so POST /rpc/tx can enqueue transactions.
     pub transaction_pool: Option<Arc<TransactionPool>>,
+    /// P2P node used to gossip newly accepted transactions to connected peers.
+    pub p2p_node: Option<Arc<P2PNode>>,
     /// Live Blockchain state — attach so faucet credits update the consensus state.
     pub blockchain: Option<Arc<RwLock<Blockchain>>>,
 }
@@ -129,6 +132,7 @@ impl RpcState {
             audit_export_enabled: true,
             block_producer: None,
             transaction_pool: None,
+            p2p_node: None,
             blockchain: None,
         }
     }
@@ -185,6 +189,12 @@ impl RpcState {
     /// Attach the live `TransactionPool` so POST /rpc/tx can enqueue transactions.
     pub fn with_transaction_pool(mut self, pool: Arc<TransactionPool>) -> Self {
         self.transaction_pool = Some(pool);
+        self
+    }
+
+    /// Attach the P2P node for transaction gossip after local pool admission.
+    pub fn with_p2p_node(mut self, node: Arc<P2PNode>) -> Self {
+        self.p2p_node = Some(node);
         self
     }
 
@@ -505,6 +515,8 @@ pub fn rpc_routes_with_state(
         .and(with_rpc_state(rpc.clone()))
         .and_then(
             |req: TxReq, _claims: SessionClaims, st: RpcState| async move {
+                let p2p_node = st.p2p_node.clone();
+
                 // Check if TransactionPool is attached
                 let pool = match st.transaction_pool {
                     Some(p) => p,
@@ -528,14 +540,28 @@ pub fn rpc_routes_with_state(
                     signature: req.signature,
                 };
 
+                let gossip_payload = match serde_json::to_vec(&tx) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        log::error!("Failed to serialize accepted transaction for gossip: {error}");
+                        return Ok::<_, warp::Rejection>(warp::reply::json(&TxResp {
+                            tx_id: "error".to_string(),
+                            status: "serialization_failed",
+                        }));
+                    }
+                };
+                let tx_id = format!(
+                    "{}:{}:{}:{}",
+                    tx.sender, tx.receiver, tx.amount, tx.timestamp
+                );
+
                 // Try to add transaction to pool
                 let admitted = pool.add_transaction(tx).await;
 
                 if admitted {
-                    let tx_id = format!(
-                        "{}:{}:{}:{}",
-                        req.sender, req.receiver, req.amount, req.timestamp
-                    );
+                    if let Some(node) = p2p_node {
+                        node.broadcast(MessageType::Transaction, gossip_payload);
+                    }
                     let resp = warp::reply::json(&TxResp {
                         tx_id,
                         status: "accepted",
@@ -550,6 +576,43 @@ pub fn rpc_routes_with_state(
                 }
             },
         );
+
+    // GET /rpc/tx/nonce/{address}
+    let tx_nonce = warp::path!("rpc" / "tx" / "nonce" / String)
+        .and(warp::get())
+        .and(with_rpc_state(rpc.clone()))
+        .and_then(|address: String, st: RpcState| async move {
+            let response: Box<dyn warp::Reply + Send> = match (st.state_mgr, st.transaction_pool) {
+                (Some(state_mgr), Some(pool)) => {
+                    let committed_nonce = state_mgr.lock().get_nonce(&address);
+                    match pool.next_nonce(&address, committed_nonce).await {
+                        Some(nonce) => Box::new(warp::reply::json(&serde_json::json!({
+                            "address": address,
+                            "nonce": nonce,
+                        }))),
+                        None => Box::new(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Account nonce is exhausted".into(),
+                            }),
+                            warp::http::StatusCode::CONFLICT,
+                        )),
+                    }
+                }
+                (None, _) => Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "StateManager unavailable (stub mode)".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                )),
+                (_, None) => Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "TransactionPool unavailable".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                )),
+            };
+            Ok::<_, warp::Rejection>(response)
+        });
 
     // POST /rpc/mint — disabled by default. A non-mainnet dev/test network can
     // opt in with BLEEP_ENABLE_PUBLIC_MINT=true, but production mainnet never
@@ -1082,6 +1145,7 @@ pub fn rpc_routes_with_state(
         .or(wallet)
         .or(ai)
         .or(tx_submit)
+        .or(tx_nonce)
         .or(mint)
         .or(tx_history)
         .or(block_latest)
@@ -3875,6 +3939,47 @@ mod tests {
             tx_ids[0],
             format!("{}:{}:{}:{}", sender, receiver, amount, timestamp)
         );
+    }
+
+    #[tokio::test]
+    async fn rpc_tx_nonce_includes_contiguous_pending_transactions() {
+        let pool = TransactionPool::new(10);
+        let (public_key, secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&public_key);
+        let receiver = "BLEEP1nonce-recipient".to_string();
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
+        let timestamp = 1_700_000_000;
+        let nonce = 0;
+        let payload = tx_payload(&chain_id, &sender, &receiver, 1, timestamp, nonce);
+        let mut signature = public_key.clone();
+        signature.extend_from_slice(&sign_tx_payload(&payload, &secret_key).expect("sign payload"));
+        let tx = ZKTransaction {
+            chain_id,
+            sender: sender.clone(),
+            receiver,
+            amount: 1,
+            timestamp,
+            nonce,
+            signature,
+        };
+        assert!(pool.add_transaction(tx).await);
+
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_state_manager(state_mgr)
+                .with_transaction_pool(pool),
+        );
+        let response = request()
+            .method("GET")
+            .path(&format!("/rpc/tx/nonce/{sender}"))
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value =
+            serde_json::from_slice(response.body()).expect("valid nonce JSON");
+        assert_eq!(body["nonce"], 1);
     }
 
     #[tokio::test]

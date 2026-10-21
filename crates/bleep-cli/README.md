@@ -77,6 +77,11 @@ bleep-cli tx send --to BLEEP1f4d2c8e... --amount 100
 BLEEP_WALLET_PASSWORD="passphrase" bleep-cli tx send --to BLEEP1... --amount 50
 ```
 
+Write commands require `BLEEP_JWT_TOKEN` to contain a session token issued by
+the target node. Obtain one from `/rpc/auth/register/dapp` or `/rpc/auth/login`.
+Do not use `BLEEP_JWT_SECRET` in the CLI: that secret configures the node and
+does not create a session recognized by its RPC server.
+
 ---
 
 ### `validator`

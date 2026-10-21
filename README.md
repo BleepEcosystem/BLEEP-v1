@@ -138,6 +138,24 @@ bash ./demo_interchain.sh
 bash ./test_tps.sh
 ```
 
+For a multi-node run, point `BLEEP_TPS_PEERS` at every additional node RPC.
+The harness records peer counts, active validators, and each node's processed
+transaction delta. To require the full workload to be processed on every
+monitored node:
+
+```bash
+BLEEP_RPC=http://127.0.0.1:18540 \
+BLEEP_TPS_PEERS=http://127.0.0.1:18541,http://127.0.0.1:18542 \
+BLEEP_TPS_MIN_PEERS=2 \
+BLEEP_TPS_REQUIRE_ALL_PEERS=1 \
+BLEEP_TPS_COUNT=10000 \
+bash ./test_tps.sh
+```
+
+The benchmark obtains a temporary session through the RPC authentication
+registration endpoint. The CLI itself requires a server-issued
+`BLEEP_JWT_TOKEN`; never pass a node's `BLEEP_JWT_SECRET` to clients.
+
 ---
 
 ## Architecture
