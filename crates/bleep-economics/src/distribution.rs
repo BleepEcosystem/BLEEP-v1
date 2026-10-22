@@ -815,6 +815,109 @@ mod tests {
     }
 
     #[test]
+    fn network_configs_match_canonical_supply_and_distribution() {
+        let configs = [
+            (
+                "genesis",
+                include_str!("../../../config/genesis.json"),
+                "/tokenomics/initial_distribution",
+                "/tokenomics/total_supply",
+            ),
+            (
+                "testnet",
+                include_str!("../../../config/testnet_config.json"),
+                "/tokenomics/distribution",
+                "/tokenomics/total_supply",
+            ),
+            (
+                "mainnet",
+                include_str!("../../../config/mainnet_config.json"),
+                "/tokenomics/distribution",
+                "/tokenomics/total_supply",
+            ),
+        ];
+        let expected_allocations = [
+            ("validator_rewards", 60_000_000u64),
+            ("ecosystem_fund", 50_000_000),
+            ("community_incentives", 30_000_000),
+            ("foundation_treasury", 30_000_000),
+            ("core_contributors", 20_000_000),
+            ("strategic_reserve", 10_000_000),
+        ];
+        let expected_unlocks = [
+            ("validator_rewards", 10_000_000u64),
+            ("ecosystem_fund", 5_000_000),
+            ("community_incentives", 5_000_000),
+            ("foundation_treasury", 5_000_000),
+            ("core_contributors", 0),
+            ("strategic_reserve", 0),
+        ];
+
+        for (network, raw, distribution_path, supply_path) in configs {
+            let config: serde_json::Value = serde_json::from_str(raw)
+                .unwrap_or_else(|error| panic!("{network} token config is invalid JSON: {error}"));
+            let tokenomics = &config["tokenomics"];
+            assert_eq!(
+                tokenomics["decimals"].as_u64(),
+                Some(8),
+                "{network} BLP decimals must match microBLEEP"
+            );
+            assert_eq!(
+                config
+                    .pointer(supply_path)
+                    .and_then(serde_json::Value::as_u64),
+                Some(200_000_000),
+                "{network} BLP maximum supply must be 200 million"
+            );
+            assert_eq!(
+                tokenomics["initial_circulating_supply"].as_u64(),
+                Some(25_000_000),
+                "{network} launch circulation must be 25 million"
+            );
+
+            let distribution = config
+                .pointer(distribution_path)
+                .unwrap_or_else(|| panic!("{network} BLP allocation table is missing"));
+            let allocated: u64 = expected_allocations
+                .iter()
+                .map(|(bucket, expected)| {
+                    let amount = distribution[*bucket].as_u64();
+                    assert_eq!(
+                        amount,
+                        Some(*expected),
+                        "{network} allocation for {bucket} differs from the canonical schedule"
+                    );
+                    amount.unwrap()
+                })
+                .sum();
+            assert_eq!(
+                allocated, 200_000_000,
+                "{network} allocations must sum to 200 million"
+            );
+
+            let launch_unlocks = config
+                .pointer("/tokenomics/launch_unlocks")
+                .unwrap_or_else(|| panic!("{network} launch unlock table is missing"));
+            let unlocked: u64 = expected_unlocks
+                .iter()
+                .map(|(bucket, expected)| {
+                    let amount = launch_unlocks[*bucket].as_u64();
+                    assert_eq!(
+                        amount,
+                        Some(*expected),
+                        "{network} launch unlock for {bucket} differs from the canonical schedule"
+                    );
+                    amount.unwrap()
+                })
+                .sum();
+            assert_eq!(
+                unlocked, 25_000_000,
+                "{network} launch unlocks must sum to 25 million"
+            );
+        }
+    }
+
+    #[test]
     fn fee_splits_sum_to_10000_bps() {
         assert_eq!(
             FEE_BURN_BPS + FEE_VALIDATOR_REWARD_BPS + FEE_TREASURY_BPS,

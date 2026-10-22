@@ -24,7 +24,7 @@ pub struct ValidatorIdentity {
     /// Kyber-1024 public key for key encapsulation (post-quantum security)
     pub kyber_public_key: Vec<u8>,
 
-    /// Ed25519-style deterministic signing key for protocol messages
+    /// Hex-encoded SPHINCS+ public key used to verify validator signatures.
     pub signing_key_id: String,
 
     /// Stake amount in microBLEEP
@@ -439,6 +439,15 @@ impl ValidatorRegistry {
             .iter()
             .filter_map(|id| self.validators.get(id))
             .collect()
+    }
+
+    /// Check whether `signing_key_id` belongs to an active validator.
+    pub fn has_active_signing_key(&self, signing_key_id: &str) -> bool {
+        self.get_active_validators().iter().any(|validator| {
+            validator
+                .signing_key_id
+                .eq_ignore_ascii_case(signing_key_id)
+        })
     }
 
     /// Get total stake of all active validators.

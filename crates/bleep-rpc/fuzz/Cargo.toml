@@ -1,0 +1,21 @@
+[package]
+name = "bleep-rpc-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bleep-rpc = { path = ".." }
+serde_json = "1.0"
+
+[[bin]]
+name = "fuzz_rpc_parsers"
+path = "fuzz_targets/fuzz_rpc_parsers.rs"
+test = false
+doc = false

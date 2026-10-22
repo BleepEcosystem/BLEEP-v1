@@ -104,7 +104,12 @@ impl PoSConsensusEngine {
         }
 
         // Compute total stake
-        let total_stake: u64 = active.iter().map(|v| v.stake).sum();
+        let total_stake = active
+            .iter()
+            .try_fold(0u64, |total, validator| total.checked_add(validator.stake))
+            .ok_or_else(|| ConsensusError::ProposalRejected {
+                reason: "Total validator stake overflow".to_string(),
+            })?;
         if total_stake == 0 {
             return Err(ConsensusError::ProposalRejected {
                 reason: "Total validator stake is zero".to_string(),

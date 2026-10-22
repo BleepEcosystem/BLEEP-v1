@@ -65,8 +65,19 @@ pub struct SessionManager {
     previous_key: tokio::sync::RwLock<Option<DecodingKey>>,
     /// JTI → revoked-at timestamp. Key TTL = token max TTL (24h).
     revoked: Arc<DashMap<String, chrono::DateTime<chrono::Utc>>>,
+    /// JTI → exact claims for sessions issued by this manager. Prevents forged
+    /// claims, including role changes that reuse a real JTI, from being accepted.
+    issued: Arc<DashMap<String, SessionClaims>>,
+    /// One-time administrator-confirmed rotation staged for at most five minutes.
+    pending_rotation: tokio::sync::Mutex<Option<PendingRotation>>,
     /// Rotation counter — incremented on each `rotate_secret` call.
     rotation_count: std::sync::atomic::AtomicU64,
+}
+
+struct PendingRotation {
+    secret: Vec<u8>,
+    challenge: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl SessionManager {
@@ -74,9 +85,9 @@ impl SessionManager {
     ///
     /// The secret **must** be ≥32 bytes of cryptographically random material.
     pub fn new(secret: Vec<u8>) -> AuthResult<Self> {
-        if secret.len() < 32 {
+        if !has_minimum_secret_entropy(&secret) {
             return Err(AuthError::ConfigError(
-                "JWT secret must be ≥32 bytes".into(),
+                "JWT secret must contain at least 32 bytes of high-entropy material".into(),
             ));
         }
         Ok(Self {
@@ -86,25 +97,56 @@ impl SessionManager {
             )),
             previous_key: tokio::sync::RwLock::new(None),
             revoked: Arc::new(DashMap::new()),
+            issued: Arc::new(DashMap::new()),
+            pending_rotation: tokio::sync::Mutex::new(None),
             rotation_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    /// Rotate the JWT signing secret.
-    ///
-    /// The previous key is retained as a grace-period verifier so tokens
-    /// issued before the rotation continue to validate until they expire.
-    /// Tokens issued with the old key are NOT proactively revoked — operators
-    /// should set short TTLs (≤1h) before triggering rotation.
-    ///
-    /// # Safety
-    /// The new secret must be ≥32 bytes of fresh CSPRNG material.
-    pub async fn rotate_secret(&self, new_secret: Vec<u8>) -> AuthResult<u64> {
-        if new_secret.len() < 32 {
-            return Err(AuthError::ConfigError(
-                "New JWT secret must be ≥32 bytes".into(),
-            ));
-        }
+    /// Stage a CSPRNG-generated replacement secret pending explicit admin confirmation.
+    pub async fn prepare_secret_rotation(
+        &self,
+    ) -> AuthResult<(Vec<u8>, String, chrono::DateTime<chrono::Utc>)> {
+        let mut secret = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut secret);
+        let mut challenge_raw = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut challenge_raw);
+        let challenge = hex::encode(challenge_raw);
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+
+        *self.pending_rotation.lock().await = Some(PendingRotation {
+            secret: secret.clone(),
+            challenge: challenge.clone(),
+            expires_at,
+        });
+
+        Ok((secret, challenge, expires_at))
+    }
+
+    /// Commit a staged key rotation only when the matching one-time challenge
+    /// is confirmed before its five-minute expiry.
+    pub async fn confirm_secret_rotation(&self, challenge: &str) -> AuthResult<u64> {
+        let pending = {
+            let mut guard = self.pending_rotation.lock().await;
+            let Some(pending) = guard.as_ref() else {
+                return Err(AuthError::ConfigError(
+                    "No pending JWT secret rotation".into(),
+                ));
+            };
+            if pending.expires_at <= chrono::Utc::now() {
+                *guard = None;
+                return Err(AuthError::ExpiredSession);
+            }
+            if pending.challenge != challenge {
+                return Err(AuthError::InvalidSession);
+            }
+            guard.take().expect("pending rotation exists")
+        };
+
+        self.apply_secret_rotation(pending.secret).await
+    }
+
+    async fn apply_secret_rotation(&self, new_secret: Vec<u8>) -> AuthResult<u64> {
         let new_enc = EncodingKey::from_secret(&new_secret);
         let new_dec = DecodingKey::from_secret(&new_secret);
 
@@ -121,6 +163,8 @@ impl SessionManager {
 
         *self.previous_key.write().await = old_dec;
         *self.active_key.write().await = (new_enc, new_dec);
+        self.issued.clear();
+        self.revoked.clear();
 
         let count = self
             .rotation_count
@@ -174,6 +218,8 @@ impl SessionManager {
         let token = encode(&Header::new(Algorithm::HS256), &claims, &enc_key.0)
             .map_err(|e| AuthError::CryptoError(format!("JWT encode: {e}")))?;
 
+        self.issued.insert(jti.clone(), claims.clone());
+
         Ok(SessionToken {
             token,
             jti,
@@ -202,6 +248,11 @@ impl SessionManager {
         })?;
 
         let claims = data.claims;
+
+        match self.issued.get(&claims.jti) {
+            Some(issued) if *issued == claims => {}
+            _ => return Err(AuthError::InvalidSession),
+        }
 
         if self.revoked.contains_key(&claims.jti) {
             return Err(AuthError::RevokedSession);
@@ -232,11 +283,28 @@ impl SessionManager {
     pub fn purge_expired_revocations(&self, max_ttl: chrono::Duration) {
         let cutoff = chrono::Utc::now() - max_ttl;
         self.revoked.retain(|_, revoked_at| *revoked_at > cutoff);
+        let now = chrono::Utc::now().timestamp();
+        self.issued.retain(|_, claims| claims.exp > now);
     }
 
     pub fn revoked_count(&self) -> usize {
         self.revoked.len()
     }
+}
+
+fn has_minimum_secret_entropy(secret: &[u8]) -> bool {
+    if secret.len() < 32 {
+        return false;
+    }
+
+    let mut frequencies = [0u8; 256];
+    for byte in &secret[..32] {
+        frequencies[*byte as usize] = frequencies[*byte as usize].saturating_add(1);
+    }
+
+    let distinct = frequencies.iter().filter(|count| **count > 0).count();
+    let max_frequency = frequencies.iter().copied().max().unwrap_or(0);
+    distinct >= 20 && max_frequency <= 4
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +316,9 @@ mod tests {
     use crate::rbac::Role;
 
     fn mgr() -> SessionManager {
-        SessionManager::new(b"a-32-byte-test-secret-for-bleep!".to_vec()).unwrap()
+        let mut secret = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut secret);
+        SessionManager::new(secret).unwrap()
     }
 
     #[tokio::test]
@@ -285,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_secret_rejected() {
         let m1 = mgr();
-        let m2 = SessionManager::new(b"completely-different-secret-here".to_vec()).unwrap();
+        let m2 = mgr();
         let tok = m1
             .issue("u", &[], chrono::Duration::hours(1))
             .await
@@ -294,5 +364,91 @@ mod tests {
             m2.validate(&tok.token).await,
             Err(AuthError::InvalidSession)
         );
+    }
+
+    #[tokio::test]
+    async fn correctly_signed_but_unissued_token_is_rejected() {
+        let secret: Vec<u8> = (0..32).collect();
+        let manager = SessionManager::new(secret.clone()).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let claims = SessionClaims {
+            sub: "forged".into(),
+            jti: "attacker-selected-jti".into(),
+            iat: now,
+            exp: now + 3600,
+            roles: vec![Role::SystemAdmin],
+            nonce: "attacker-selected-nonce".into(),
+        };
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(&secret),
+        )
+        .unwrap();
+
+        assert_eq!(
+            manager.validate(&token).await,
+            Err(AuthError::InvalidSession)
+        );
+    }
+
+    #[tokio::test]
+    async fn issued_jti_cannot_be_reused_with_escalated_claims() {
+        let secret: Vec<u8> = (0..32).collect();
+        let manager = SessionManager::new(secret.clone()).unwrap();
+        let issued = manager
+            .issue(
+                "developer",
+                &[Role::DappDeveloper],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        let mut forged = manager.validate(&issued.token).await.unwrap();
+        forged.roles = vec![Role::SystemAdmin];
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &forged,
+            &EncodingKey::from_secret(&secret),
+        )
+        .unwrap();
+
+        assert_eq!(
+            manager.validate(&token).await,
+            Err(AuthError::InvalidSession)
+        );
+    }
+
+    #[tokio::test]
+    async fn rotation_requires_confirmation_and_invalidates_sessions() {
+        let manager = mgr();
+        let old = manager
+            .issue("admin", &[Role::SystemAdmin], chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        let (_, challenge, _) = manager.prepare_secret_rotation().await.unwrap();
+
+        assert!(manager.validate(&old.token).await.is_ok());
+        assert_eq!(
+            manager.confirm_secret_rotation("incorrect-challenge").await,
+            Err(AuthError::InvalidSession)
+        );
+        assert_eq!(manager.validate(&old.token).await.unwrap().sub, "admin");
+
+        assert_eq!(manager.confirm_secret_rotation(&challenge).await, Ok(1));
+        assert_eq!(
+            manager.validate(&old.token).await,
+            Err(AuthError::InvalidSession)
+        );
+        let fresh = manager
+            .issue("admin", &[Role::SystemAdmin], chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(manager.validate(&fresh.token).await.is_ok());
+    }
+
+    #[test]
+    fn predictable_secret_is_rejected() {
+        assert!(SessionManager::new(vec![b'x'; 32]).is_err());
     }
 }

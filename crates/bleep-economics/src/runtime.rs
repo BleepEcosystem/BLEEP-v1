@@ -72,6 +72,13 @@ impl BleepEconomicsRuntime {
         runtime
     }
 
+    pub fn initialize_genesis_supply(&mut self, initial_supply: u128) -> Result<(), RuntimeError> {
+        self.state
+            .tokenomics
+            .initialize_genesis_supply(initial_supply)?;
+        Ok(())
+    }
+
     pub fn register_validator(
         &mut self,
         validator_id: Vec<u8>,

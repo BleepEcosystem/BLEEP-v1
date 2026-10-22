@@ -347,14 +347,20 @@ mod tests {
         P2PNode::start(config).await.unwrap()
     }
 
-    async fn start_bootstrap_test_node(port: u16, seed_port: u16) -> (Arc<P2PNode>, NodeHandle) {
+    async fn start_bootstrap_test_node(
+        port: u16,
+        seed_ports: &[u16],
+    ) -> (Arc<P2PNode>, NodeHandle) {
         let config = P2PNodeConfig {
             listen_addr: format!("127.0.0.1:{port}").parse().unwrap(),
-            bootstrap_peers: vec![BootstrapPeer {
-                addr: format!("127.0.0.1:{seed_port}").parse().unwrap(),
-                identity_public_key: vec![],
-                sphincs_pubkey: vec![],
-            }],
+            bootstrap_peers: seed_ports
+                .iter()
+                .map(|seed_port| BootstrapPeer {
+                    addr: format!("127.0.0.1:{seed_port}").parse().unwrap(),
+                    identity_public_key: vec![],
+                    sphincs_pubkey: vec![],
+                })
+                .collect(),
             peer_manager_config: PeerManagerConfig::default(),
         };
         P2PNode::start(config).await.unwrap()
@@ -459,18 +465,21 @@ mod tests {
     async fn test_three_nodes_exchange_authenticated_gossip() {
         let node1_port = 17710;
         let (node1, handle1) = start_test_node(node1_port).await;
-        let (node2, handle2) = start_bootstrap_test_node(17711, node1_port).await;
-        let (node3, handle3) = start_bootstrap_test_node(17712, node1_port).await;
+        let node2_port = 17711;
+        let (node2, handle2) = start_bootstrap_test_node(node2_port, &[node1_port]).await;
+        let (node3, handle3) = start_bootstrap_test_node(17712, &[node1_port, node2_port]).await;
 
         timeout(Duration::from_secs(10), async {
             loop {
                 let connected = node1.peer_count() == 2
-                    && node2.peer_count() == 1
-                    && node3.peer_count() == 1
+                    && node2.peer_count() == 2
+                    && node3.peer_count() == 2
                     && node1.message_protocol.has_session(&node2.node_id)
                     && node1.message_protocol.has_session(&node3.node_id)
                     && node2.message_protocol.has_session(&node1.node_id)
-                    && node3.message_protocol.has_session(&node1.node_id);
+                    && node2.message_protocol.has_session(&node3.node_id)
+                    && node3.message_protocol.has_session(&node1.node_id)
+                    && node3.message_protocol.has_session(&node2.node_id);
                 if connected {
                     break;
                 }
@@ -488,20 +497,27 @@ mod tests {
                 b"signature availability payload".as_slice(),
             ),
         ];
-        for (message_type, payload) in messages {
-            node1.broadcast(message_type.clone(), payload.to_vec());
+        let nodes = [&node1, &node2, &node3];
+        for (source_index, source) in nodes.iter().enumerate() {
+            for (message_type, payload) in &messages {
+                source.broadcast(message_type.clone(), payload.to_vec());
 
-            for node in [&node2, &node3] {
-                let (sender_id, message, plaintext) =
-                    timeout(Duration::from_secs(10), node.recv_with_payload())
-                        .await
-                        .expect("node should receive gossip")
-                        .expect("inbound channel should remain open");
+                for (receiver_index, receiver) in nodes.iter().enumerate() {
+                    if source_index == receiver_index {
+                        continue;
+                    }
 
-                assert_eq!(sender_id, node1.node_id);
-                assert_eq!(message.sender_id, node1.node_id);
-                assert_eq!(message.message_type, message_type);
-                assert_eq!(plaintext, payload);
+                    let (sender_id, message, plaintext) =
+                        timeout(Duration::from_secs(10), receiver.recv_with_payload())
+                            .await
+                            .expect("peer should receive authenticated gossip")
+                            .expect("inbound channel should remain open");
+
+                    assert_eq!(sender_id, source.node_id);
+                    assert_eq!(message.sender_id, source.node_id);
+                    assert_eq!(message.message_type, *message_type);
+                    assert_eq!(plaintext, *payload);
+                }
             }
         }
 

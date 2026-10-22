@@ -155,7 +155,7 @@ The in-memory pool of pending transactions awaiting inclusion in a block. Manage
 A sparse Merkle tree structure in `bleep-state` used to represent and prove account state. State roots are signed with SPHINCS+ for quantum-safe immutability.
 
 **MicroBLEEP**
-The smallest denomination of BLP. 1 BLP = 1,000,000 microBLEEP.
+The smallest denomination of BLP. 1 BLP = 100,000,000 microBLEEP (8 decimals).
 
 ---
 
@@ -303,4 +303,3 @@ The crate providing STARK proofs (`stark_proofs.rs`) and post-quantum ZKP constr
 ---
 
 *Last updated: April 2026 — BLEEP V1 / Sprint 9*
-

@@ -10,14 +10,15 @@
 //!   │  StateDiff (gas charged, state changes)
 //!   ▼
 //! StateManager.apply_transfer           ← native balance accounting
-//! StateManager.advance_block()          ← flush to RocksDB
+//! StateManager.persist_canonical_block  ← atomically persist state + history
 //!   │
 //!   ▼
 //! Block::with_consensus_and_sharding    ← build block with PoS fields
-//! block.sign_block(sk_32)              ← deterministic signing
+//! block.sign_block_with_pk()           ← SPHINCS+ signing + STARK
 //!   │
 //!   ▼
-//! Blockchain::add_block(block, pk_32)  ← validate + commit
+//! PBFT prevote → precommit              ← authenticated quorum finality
+//! Blockchain::add_block() + persist     ← validate + commit after quorum
 //!   │
 //!   ▼
 //! P2PNode::broadcast(Block, payload)   ← gossip to peers
@@ -53,9 +54,12 @@ use bleep_vm::intent::{Intent, IntentKind, TransferIntent};
 use bleep_vm::types::ChainId;
 
 // Live benchmark instrumentation
+use crate::pbft_engine::LivePbftFinality;
 use crate::performance_bench::{
     PerformanceBenchmark, BENCHMARK_DURATION_SECS, NUM_SHARDS, TARGET_TPS,
 };
+use crate::pos_engine::{PoSConsensusEngine, ValidatorStake};
+use crate::validator_identity::ValidatorRegistry;
 
 // ── FinalizedBlock ─────────────────────────────────────────────────────────────
 
@@ -80,12 +84,21 @@ const PROTOCOL_VERSION: u32 = 1;
 /// BLEEP native chain ID for intent routing
 const BLEEP_CHAIN_ID: ChainId = ChainId::Bleep;
 
+pub fn ensure_live_finality_mode_supported(active_validator_count: usize) -> Result<(), String> {
+    if active_validator_count == 0 {
+        Err("Cannot commit without an active validator".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 // ── ProducerConfig ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct ProducerConfig {
     pub block_interval_secs: u64,
     pub max_txs_per_block: usize,
+    pub chain_id: String,
     pub validator_id: String,
     /// Full SPHINCS+-SHAKE-256f-simple secret key bytes (128 bytes).
     /// Stored as Vec<u8> because SPHINCS+ SK is 128 bytes, not 32.
@@ -102,6 +115,7 @@ impl Default for ProducerConfig {
         Self {
             block_interval_secs: 3,
             max_txs_per_block: MAX_TXS_PER_BLOCK,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             validator_id: "genesis-validator".to_string(),
             validator_sk: vec![0u8; 128],
             validator_pk: vec![0u8; 64],
@@ -121,6 +135,10 @@ pub struct BlockProducer {
     executor: Executor,
     p2p: Option<Arc<P2PNode>>,
     sal_broadcaster: Option<Arc<dyn GossipBroadcaster>>,
+    validator_registry: Option<Arc<PLMutex<ValidatorRegistry>>>,
+    pbft_finality: Option<Arc<LivePbftFinality>>,
+    my_stake: u64,
+    canonical_commit_lock: Arc<tokio::sync::Mutex<()>>,
     config: ProducerConfig,
     block_tx: tokio::sync::broadcast::Sender<FinalizedBlock>,
     /// Live TPS benchmark — records wall-clock throughput from real block production.
@@ -128,6 +146,27 @@ pub struct BlockProducer {
 }
 
 impl BlockProducer {
+    /// Pin transaction execution to the node's configured network chain ID.
+    pub fn set_chain_id(&mut self, chain_id: impl Into<String>) {
+        self.config.chain_id = chain_id.into();
+    }
+
+    /// Attach the active validator set used for deterministic proposer choice
+    /// and signer authorization.
+    pub fn set_validator_registry(&mut self, registry: Arc<PLMutex<ValidatorRegistry>>) {
+        self.validator_registry = Some(registry);
+    }
+
+    /// Attach the PBFT committee and transport shared with inbound P2P handling.
+    pub fn set_pbft_finality(&mut self, finality: Arc<LivePbftFinality>) {
+        self.pbft_finality = Some(finality);
+    }
+
+    /// Share the canonical-state commit gate with inbound block processing.
+    pub fn set_canonical_commit_lock(&mut self, lock: Arc<tokio::sync::Mutex<()>>) {
+        self.canonical_commit_lock = lock;
+    }
+
     /// Build a new block producer with a real SPHINCS+-SHAKE-256f-simple keypair.
     ///
     /// `sphincs_sk_bytes` — full SPHINCS+ secret key bytes (128 bytes, from `generate_tx_keypair()`).
@@ -138,7 +177,7 @@ impl BlockProducer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         validator_id: String,
-        _my_stake: u64,
+        my_stake: u64,
         tx_pool: Arc<TransactionPool>,
         blockchain: Arc<RwLock<Blockchain>>,
         state: Arc<PLMutex<StateManager>>,
@@ -148,7 +187,7 @@ impl BlockProducer {
     ) -> (Self, tokio::sync::broadcast::Receiver<FinalizedBlock>) {
         Self::new_with_sig_availability(
             validator_id,
-            _my_stake,
+            my_stake,
             tx_pool,
             blockchain,
             state,
@@ -162,7 +201,7 @@ impl BlockProducer {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_sig_availability(
         validator_id: String,
-        _my_stake: u64,
+        my_stake: u64,
         tx_pool: Arc<TransactionPool>,
         blockchain: Arc<RwLock<Blockchain>>,
         state: Arc<PLMutex<StateManager>>,
@@ -176,6 +215,22 @@ impl BlockProducer {
             validator_sk: sphincs_sk_bytes,
             validator_pk: sphincs_pk_bytes,
             ..Default::default()
+        };
+        let pbft_finality = match LivePbftFinality::new(
+            config.validator_id.clone(),
+            vec![(config.validator_id.clone(), config.validator_pk.clone())],
+            config.validator_sk.clone(),
+            config.validator_pk.clone(),
+            p2p.clone(),
+        ) {
+            Ok(finality) => Some(Arc::new(finality)),
+            Err(error) => {
+                error!(
+                    "[BlockProducer] PBFT finality initialization failed: {}",
+                    error
+                );
+                None
+            }
         };
 
         let executor = Executor::production(ExecutorConfig::default());
@@ -194,6 +249,10 @@ impl BlockProducer {
                 executor,
                 p2p,
                 sal_broadcaster,
+                validator_registry: None,
+                pbft_finality,
+                my_stake,
+                canonical_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
                 config,
                 block_tx,
                 bench,
@@ -274,6 +333,16 @@ impl BlockProducer {
     }
 
     async fn produce_one(&self) -> Result<Option<FinalizedBlock>, String> {
+        let _canonical_guard = self.canonical_commit_lock.lock().await;
+        let checkpoint = self.state.lock().checkpoint();
+        let result = self.produce_one_inner().await;
+        if result.is_err() {
+            self.state.lock().restore_checkpoint(checkpoint);
+        }
+        result
+    }
+
+    async fn produce_one_inner(&self) -> Result<Option<FinalizedBlock>, String> {
         // Wall-clock start — used for live benchmark instrumentation
         let block_start = Instant::now();
 
@@ -298,6 +367,76 @@ impl BlockProducer {
                 None => return Err("Blockchain empty — genesis missing".into()),
             }
         };
+
+        if let Some(registry) = &self.validator_registry {
+            let registry = registry.lock();
+            let active_identities: Vec<_> = registry
+                .get_active_validators()
+                .into_iter()
+                .filter(|validator| validator.can_participate())
+                .collect();
+            let active_validators: Vec<ValidatorStake> = active_identities
+                .iter()
+                .map(|validator| ValidatorStake {
+                    id: validator.id.clone(),
+                    stake: u64::try_from(validator.effective_stake()).unwrap_or(u64::MAX),
+                    active: true,
+                    slashing_count: validator
+                        .double_sign_count
+                        .saturating_add(validator.equivocation_count)
+                        .saturating_add(validator.downtime_count),
+                })
+                .collect();
+            ensure_live_finality_mode_supported(active_validators.len())?;
+            let committee_keys: Vec<(String, Vec<u8>)> = active_identities
+                .iter()
+                .map(|validator| {
+                    hex::decode(&validator.signing_key_id)
+                        .map(|public_key| (validator.id.clone(), public_key))
+                        .map_err(|e| {
+                            format!(
+                                "Invalid signing key for active validator {}: {}",
+                                validator.id, e
+                            )
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            if !self
+                .pbft_finality
+                .as_ref()
+                .is_some_and(|finality| finality.matches_committee(&committee_keys))
+            {
+                return Err(
+                    "Live PBFT committee does not match the active validator registry".into(),
+                );
+            }
+            let selected =
+                PoSConsensusEngine::select_proposer(next_height, &active_validators, &prev_hash)
+                    .map_err(|e| {
+                        format!("Proposer selection failed at height {next_height}: {e}")
+                    })?;
+            if selected != self.config.validator_id {
+                debug!(
+                    height = next_height,
+                    selected,
+                    local = %self.config.validator_id,
+                    "Skipping block slot assigned to another validator"
+                );
+                return Ok(None);
+            }
+            if !registry.get(&selected).is_some_and(|validator| {
+                validator.can_participate()
+                    && validator.stake == u128::from(self.my_stake)
+                    && validator
+                        .signing_key_id
+                        .eq_ignore_ascii_case(&hex::encode(&self.config.validator_pk))
+            }) {
+                return Err(format!(
+                    "Selected proposer {} does not match the configured key and stake",
+                    selected
+                ));
+            }
+        }
 
         // ── 3: Epoch ──────────────────────────────────────────────────────────
         let epoch_id = next_height / BLOCKS_PER_EPOCH;
@@ -363,9 +502,13 @@ impl BlockProducer {
             let mut state = self.state.lock();
             for (idx, gas, vm_ok, diff) in &vm_results {
                 let zt = &pending[*idx];
-                if !vm_ok {
+                if !vm_ok
+                    || zt.chain_id != self.config.chain_id
+                    || !zt.verify_account_authorization()
+                    || state.get_nonce(&zt.sender) != zt.nonce
+                {
                     warn!(
-                        "[BlockProducer] VM reverted tx {}→{}",
+                        "[BlockProducer] invalid VM result, authorization, chain ID, or nonce for tx {}→{}",
                         zt.sender, zt.receiver
                     );
                     // Track this failed tx for removal from pool
@@ -423,14 +566,15 @@ impl BlockProducer {
 
                 total_gas += gas;
                 block_txs.push(Transaction {
+                    chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
                     timestamp: zt.timestamp,
+                    nonce: zt.nonce,
                     signature: zt.signature.clone(),
                 });
             }
-            state.advance_block();
         }
 
         // Remove all failed transactions from pool to prevent recurring failures
@@ -497,13 +641,44 @@ impl BlockProducer {
             return Err(format!("Block {} STARK verification failed", next_height));
         }
 
-        // ── 9: Commit to chain ────────────────────────────────────────────────
+        // Prepare the authenticated gossip payload before committing state so
+        // serialization failure cannot leave an unbroadcast committed block.
+        let gossip_payload = serde_json::to_vec(&block)
+            .map_err(|e| format!("Block {} serialization failed: {}", next_height, e))?;
+
+        // ── 9: Authenticated PBFT prevote/prepare and precommit/commit ────────
+        let finality = self
+            .pbft_finality
+            .as_ref()
+            .ok_or_else(|| "PBFT finality is unavailable; refusing to commit".to_string())?;
+        let block_hash = block.compute_hash();
+        finality.propose(&block)?;
+        finality.wait_for_finality(next_height, &block_hash).await?;
+
+        // ── 10: Commit to chain only after the PBFT commit quorum ───────────────
         let accepted = {
             let mut chain = self
                 .blockchain
                 .write()
                 .map_err(|e| format!("blockchain write lock: {}", e))?;
-            chain.add_block(block.clone(), &self.config.validator_pk)
+            let accepted = chain.add_block(block.clone(), &self.config.validator_pk);
+            if accepted {
+                if let Err(e) = self.state.lock().persist_canonical_block(
+                    &block,
+                    block.index,
+                    &block.compute_hash(),
+                    &block.previous_hash,
+                    &self.config.chain_id,
+                    &Block::genesis().compute_hash(),
+                ) {
+                    chain.rollback();
+                    return Err(format!(
+                        "Block {} durable commit failed: {}",
+                        next_height, e
+                    ));
+                }
+            }
+            accepted
         };
 
         if !accepted {
@@ -514,13 +689,10 @@ impl BlockProducer {
             return Err(format!("Block {} validation failed", next_height));
         }
 
-        // ── 10: Gossip stripped block to peers ────────────────────────────────
-        // Signatures are stripped — receivers verify authenticity via
-        // sig_commitment_root (bound in SPHINCS+ sig + extended STARK proof).
-        // Bandwidth: ~200-400 KB instead of ~204 MB for a full 512-tx block.
+        // Inbound validators require each transaction's full signature. Until
+        // SAL recovery supplies them before execution, gossip the full block.
         if let Some(ref node) = self.p2p {
-            let payload = serde_json::to_vec(&block.to_gossip()).unwrap_or_default();
-            node.broadcast(MessageType::Block, payload);
+            node.broadcast(MessageType::Block, gossip_payload);
         }
 
         // ── 10b: SAL announcement (sig_hashes computed in step 7a) ───────────
@@ -557,10 +729,12 @@ impl BlockProducer {
         // ── 11: Drain committed txs from pool ─────────────────────────────────
         for tx in &block_txs {
             let tx_id = Self::canonical_tx_id(&ZKTransaction {
+                chain_id: tx.chain_id.clone(),
                 sender: tx.sender.clone(),
                 receiver: tx.receiver.clone(),
                 amount: tx.amount,
                 timestamp: tx.timestamp,
+                nonce: tx.nonce,
                 signature: tx.signature.clone(),
             });
             self.tx_pool.remove_confirmed(&tx_id).await;
@@ -693,7 +867,40 @@ impl BlockProducer {
     }
 }
 
+#[cfg(test)]
+mod live_finality_policy_tests {
+    use super::ensure_live_finality_mode_supported;
+
+    #[test]
+    fn live_commit_requires_a_nonempty_committee() {
+        assert!(ensure_live_finality_mode_supported(0).is_err());
+        assert!(ensure_live_finality_mode_supported(1).is_ok());
+        assert!(ensure_live_finality_mode_supported(2).is_ok());
+        assert!(ensure_live_finality_mode_supported(100).is_ok());
+    }
+}
+
 // ── Legacy shim ───────────────────────────────────────────────────────────────
+
+fn sign_and_add_legacy_block(
+    blockchain: &Arc<RwLock<Blockchain>>,
+    mut block: Block,
+    config: &ProducerConfig,
+) -> bool {
+    if let Err(e) = block.sign_block(&config.validator_sk) {
+        warn!("Legacy sign_block: {}", e);
+        return false;
+    }
+
+    let accepted = blockchain
+        .write()
+        .unwrap()
+        .add_block(block.clone(), &config.validator_pk);
+    if !accepted {
+        warn!("Legacy block {} failed validation", block.index);
+    }
+    accepted
+}
 
 pub fn start_block_producer(
     blockchain: Arc<RwLock<Blockchain>>,
@@ -709,10 +916,12 @@ pub fn start_block_producer(
             let txs: Vec<Transaction> = pending
                 .iter()
                 .map(|zt| Transaction {
+                    chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
                     timestamp: zt.timestamp,
+                    nonce: zt.nonce,
                     signature: zt.signature.clone(),
                 })
                 .collect();
@@ -726,7 +935,7 @@ pub fn start_block_producer(
                     None => continue,
                 }
             };
-            let mut block = Block::with_consensus_and_sharding(
+            let block = Block::with_consensus_and_sharding(
                 next_height,
                 txs.clone(),
                 prev_hash,
@@ -737,14 +946,7 @@ pub fn start_block_producer(
                 0,
                 String::new(),
             );
-            if let Err(e) = block.sign_block(&config.validator_sk) {
-                block.validator_signature = config.validator_id.as_bytes().to_vec();
-                warn!("Legacy sign_block: {}", e);
-            }
-            let accepted = blockchain
-                .write()
-                .unwrap()
-                .add_block(block.clone(), &config.validator_pk);
+            let accepted = sign_and_add_legacy_block(&blockchain, block.clone(), &config);
             if accepted {
                 let n = blocks_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 info!(
@@ -754,7 +956,7 @@ pub fn start_block_producer(
                     n
                 );
             } else {
-                blockchain.write().unwrap().chain.push_back(block.clone());
+                continue;
             }
             for tx in &txs {
                 tx_pool
@@ -774,6 +976,28 @@ mod real_transaction_benchmark {
     use bleep_core::blockchain::{Blockchain, BlockchainState};
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
 
+    #[test]
+    fn legacy_signing_failure_does_not_append_block() {
+        let tx_pool = TransactionPool::new(1);
+        let genesis = Block::new(0, vec![], "0".to_string());
+        let blockchain = Arc::new(RwLock::new(Blockchain::new(
+            genesis,
+            BlockchainState::new(),
+            tx_pool,
+        )));
+        let config = ProducerConfig {
+            validator_sk: vec![0; 1],
+            ..ProducerConfig::default()
+        };
+        let block = Block::new(1, vec![], "previous".to_string());
+
+        assert!(!sign_and_add_legacy_block(&blockchain, block, &config));
+
+        let chain = blockchain.read().unwrap();
+        assert_eq!(chain.chain.len(), 1);
+        assert_eq!(chain.latest_block().unwrap().index, 0);
+    }
+
     #[tokio::test]
     #[ignore = "explicit 1000-real-transaction benchmark"]
     async fn benchmark_1000_real_transactions_end_to_end() {
@@ -782,23 +1006,33 @@ mod real_transaction_benchmark {
 
         let (sender_pk, sender_sk) = generate_tx_keypair();
         let (validator_pk, validator_sk) = generate_tx_keypair();
-        let sender = "bleep1realbenchmarksender";
+        let sender = bleep_crypto::derive_account_address(&sender_pk);
         let receiver = "bleep1realbenchmarkreceiver";
 
         let signing_start = Instant::now();
         let mut transactions = Vec::with_capacity(TRANSACTION_COUNT);
         for index in 0..TRANSACTION_COUNT {
             let timestamp = 1_700_000_000 + index as u64;
-            let payload = tx_payload(sender, receiver, 1, timestamp);
+            let nonce = index as u64;
+            let payload = tx_payload(
+                bleep_crypto::DEFAULT_CHAIN_ID,
+                &sender,
+                receiver,
+                1,
+                timestamp,
+                nonce,
+            );
             let detached = sign_tx_payload(&payload, &sender_sk).expect("transaction signing");
             let mut signature = Vec::with_capacity(sender_pk.len() + detached.len());
             signature.extend_from_slice(&sender_pk);
             signature.extend_from_slice(&detached);
             transactions.push(ZKTransaction {
-                sender: sender.to_string(),
+                chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+                sender: sender.clone(),
                 receiver: receiver.to_string(),
                 amount: 1,
                 timestamp,
+                nonce,
                 signature,
             });
         }

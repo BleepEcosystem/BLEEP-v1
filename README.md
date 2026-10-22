@@ -15,7 +15,7 @@
 ## What is BLEEP?
 
 BLEEP is a distributed execution protocol built on three invariants: every block ships with a cryptographic proof of its own correctness, every instruction is expressed as intent rather than bytecode, and the entire cryptographic foundation survives a quantum computer — by construction, from genesis.
-Every block produced by BLEEP includes a Winterfell STARK proof of its own validity — generated before broadcast, verified independently by every validator, requiring no trusted setup and no privileged operator. Transaction signing, peer authentication, key encapsulation, and zero-knowledge proof verification are each secured exclusively by NIST-finalised post-quantum standards — FIPS 205 (SPHINCS+) and FIPS 203 (Kyber-1024/ML-KEM-1024) — at Security Level 5.
+Every block produced by BLEEP includes a Winterfell STARK proof of its own validity — generated before broadcast, verified independently by every validator, requiring no trusted setup and no privileged operator. Transaction signing, block and finality-certificate signing, peer authentication, key encapsulation, and zero-knowledge proof verification are each secured exclusively by NIST-finalised post-quantum standards — FIPS 205 (SPHINCS+) and FIPS 203 (Kyber-1024/ML-KEM-1024) — at Security Level 5.
 
 
 BLEEP is post-quantum from genesis. There is no classical fallback. There is no migration path needed — because the problem was solved before the protocol accumulated economic value and ecosystem dependencies.
@@ -78,12 +78,19 @@ source "$HOME/.cargo/env"
 ```bash
 git clone https://github.com/BleepEcosystem/BLEEP-v1.git
 cd BLEEP-v1
-# Generate once per node and store securely for subsequent restarts.
+
+# Generate a high-entropy JWT signing secret (32 random bytes, Base64-encoded).
+# Keep this secret private and reuse it when restarting this node.
 export BLEEP_JWT_SECRET="$(openssl rand -base64 32)"
+
 cargo run --release
 ```
 
-The node refuses to start without a unique `BLEEP_JWT_SECRET` containing at least 32 decoded random bytes. Persist the generated value in your deployment secret manager and reuse it on restarts; do not commit it or reuse a shared development secret.
+The node will refuse to start unless `BLEEP_JWT_SECRET` is set to valid standard
+Base64 that decodes to at least 32 bytes of high-entropy material. Configure the
+same secret on every node that needs to accept the same JWTs. Store it in your
+deployment's secret manager in production; do not commit it to the repository
+or share it publicly.
 
 **16-step startup sequence (Protocol Version 5):**
 
@@ -130,6 +137,24 @@ bash ./demo_interchain.sh
 ```bash
 bash ./test_tps.sh
 ```
+
+For a multi-node run, point `BLEEP_TPS_PEERS` at every additional node RPC.
+The harness records peer counts, active validators, and each node's processed
+transaction delta. To require the full workload to be processed on every
+monitored node:
+
+```bash
+BLEEP_RPC=http://127.0.0.1:18540 \
+BLEEP_TPS_PEERS=http://127.0.0.1:18541,http://127.0.0.1:18542 \
+BLEEP_TPS_MIN_PEERS=2 \
+BLEEP_TPS_REQUIRE_ALL_PEERS=1 \
+BLEEP_TPS_COUNT=10000 \
+bash ./test_tps.sh
+```
+
+The benchmark obtains a temporary session through the RPC authentication
+registration endpoint. The CLI itself requires a server-issued
+`BLEEP_JWT_TOKEN`; never pass a node's `BLEEP_JWT_SECRET` to clients.
 
 ---
 

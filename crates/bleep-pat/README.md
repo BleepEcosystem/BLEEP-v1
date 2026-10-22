@@ -143,11 +143,49 @@ PATs are managed via the BLEEP RPC layer:
 |---|---|---|
 | `/rpc/pat/create` | POST | Deploy a new PAT |
 | `/rpc/pat/mint` | POST | Mint new supply |
+| `/rpc/pat/burn` | POST | Burn caller balance |
 | `/rpc/pat/transfer` | POST | Transfer PAT balance |
-| `/rpc/pat/balance/{token}/{address}` | GET | Query balance |
-| `/rpc/pat/token/{token_id}` | GET | Query token metadata and ruleset |
+| `/rpc/pat/approve` | POST | Set a spender allowance |
+| `/rpc/pat/freeze` | POST | Freeze or unfreeze transfers |
+| `/rpc/pat/set-burn-rate` | POST | Update a token burn rate |
+| `/rpc/pat/set-owner` | POST | Transfer token ownership |
+| `/rpc/pat/balance/{symbol}/{address}` | GET | Query balance |
+| `/rpc/pat/info/{symbol}` | GET | Query token information |
+| `/rpc/pat/list` | GET | List tokens |
 
-See [`docs/specs/rpc_api_spec.md`](../../docs/specs/rpc_api_spec.md) for full specification.
+### Signed mutation requests
+
+Every PAT mutation request must include `public_key`, `signature`, `chain_id`,
+and a non-zero `nonce`. The wallet signature must be the SPHINCS+ detached
+signature over the compact JSON bytes of this object:
+
+```json
+{
+  "domain": "BLEEP:PAT:INTENT:V1",
+  "endpoint": "/rpc/pat/transfer",
+  "chain_id": "BLEEP-PreTestnet-001",
+  "nonce": 1,
+  "request": {
+    "amount": "100",
+    "chain_id": "BLEEP-PreTestnet-001",
+    "from": "BLEEP1...",
+    "nonce": 1,
+    "public_key": "<hex public key>",
+    "symbol": "USDB",
+    "to": "BLEEP1..."
+  }
+}
+```
+
+The wire request includes a `signature` field; the `request` object being
+signed is that full request after deserialization (including applied defaults)
+with only `signature` removed. Object keys are serialized in sorted order.
+The endpoint, chain, and nonce are therefore bound to the signature. The
+request's `owner`, `caller`, or `from` address must be the address derived from
+`public_key`. The nonce is tracked per wallet by the running registry and
+cannot be reused for a different successful mutation.
+Mutation routes also continue to require an authenticated session with the
+applicable RBAC permission.
 
 ---
 

@@ -100,10 +100,12 @@ pub enum P2PMessage {
 /// Represents a Zero-Knowledge Proof (ZKP)-based transaction
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ZKTransaction {
+    pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
     pub timestamp: u64,
+    pub nonce: u64,
     pub signature: Vec<u8>,
 }
 
@@ -114,10 +116,12 @@ impl ZKTransaction {
         let data = format!("{}{}{}{}", sender, receiver, amount, timestamp);
         let signature = quantum_secure.sign(data.as_bytes());
         Self {
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             sender: sender.to_string(),
             receiver: receiver.to_string(),
             amount,
             timestamp,
+            nonce: 0,
             signature,
         }
     }
@@ -129,6 +133,27 @@ impl ZKTransaction {
             self.sender, self.receiver, self.amount, self.timestamp
         );
         quantum_secure.verify(data.as_bytes(), &self.signature)
+    }
+
+    /// Verify the SPHINCS+ transaction signature and bind its key to `sender`.
+    pub fn verify_account_authorization(&self) -> bool {
+        const SPHINCS_PK_LEN: usize = 64;
+        if self.chain_id.is_empty() || self.signature.len() <= SPHINCS_PK_LEN {
+            return false;
+        }
+        let (pk_bytes, sig_bytes) = self.signature.split_at(SPHINCS_PK_LEN);
+        if bleep_crypto::derive_account_address(pk_bytes) != self.sender {
+            return false;
+        }
+        let payload = bleep_crypto::tx_payload(
+            &self.chain_id,
+            &self.sender,
+            &self.receiver,
+            self.amount,
+            self.timestamp,
+            self.nonce,
+        );
+        bleep_crypto::verify_tx_signature(&payload, sig_bytes, pk_bytes)
     }
 }
 

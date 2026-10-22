@@ -130,8 +130,9 @@ pub enum PATIntentKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PATIntent {
     /// The authenticated caller address.
-    /// In production this is verified against the transaction signature
-    /// before the intent reaches the PAT engine.
+    /// RPC callers must derive this from the signing wallet and verify the
+    /// domain-separated request signature before passing the intent to the
+    /// engine.
     pub caller: Address,
 
     /// The operation to perform.
@@ -143,7 +144,7 @@ pub struct PATIntent {
     /// Block number at submission (used for replay-protection window).
     pub block: u64,
 
-    /// Unique nonce for this caller (prevents replay within same block).
+    /// Unique wallet nonce for signed RPC calls.
     pub nonce: u64,
 }
 

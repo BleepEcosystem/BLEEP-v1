@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a0d12">
+  <meta name="description" content="Explore live BLEEP blocks, transactions, validators and account state.">
+  <title>BLEEP Explorer</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0a0d12;--panel:#111720;--panel2:#151e29;--line:#25313d;--text:#e6edf3;--muted:#8795a5;--lime:#c9fa59;--cyan:#55d9ce;--red:#ff7b72;--green:#72e2a6;--blue:#8fb8ff;font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 12% -12%,#17332d 0,transparent 38%),var(--bg);color:var(--text);min-height:100vh}button,input{font:inherit}button{cursor:pointer}a{color:var(--lime);text-decoration:none}a:hover{text-decoration:underline}.shell{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:100vh}.side{padding:25px 16px;border-right:1px solid var(--line);background:#0d1218;display:flex;flex-direction:column;gap:32px}.brand{display:flex;align-items:center;gap:11px;padding:0 10px}.brand-mark{display:grid;place-items:center;width:34px;height:34px;color:#0a0d12;background:var(--lime);border-radius:10px;font-weight:900;letter-spacing:-2px}.brand-name{font-weight:750;font-size:15px;letter-spacing:.12em}.brand-sub{font-size:10px;color:var(--muted);letter-spacing:.12em}.nav-label{font-size:10px;text-transform:uppercase;color:#647282;letter-spacing:.14em;padding:0 11px 8px}.nav{display:grid;gap:5px}.nav button{border:0;text-align:left;color:var(--muted);background:transparent;padding:10px 12px;border-radius:8px;display:flex;gap:12px;align-items:center}.nav button:hover,.nav button.active{background:#18212a;color:var(--lime)}.nav-icon{width:17px;text-align:center;font-size:15px}.side-bottom{margin-top:auto}.network-card{padding:13px;border:1px solid var(--line);background:var(--panel);border-radius:10px}.network-title{font-size:11px;color:var(--muted)}.network-row{display:flex;align-items:center;gap:8px;margin-top:7px;font-size:12px}.dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 10px #72e2a655}.dot.off{background:var(--red);box-shadow:none}.main{min-width:0}.topbar{height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:20px;padding:0 34px;background:#0a0d12d9;position:sticky;top:0;z-index:5;backdrop-filter:blur(14px)}.search{max-width:630px;flex:1;position:relative}.search input{width:100%;height:42px;background:#111720;border:1px solid var(--line);border-radius:9px;color:var(--text);padding:0 42px 0 15px;outline:none}.search input:focus,.field input:focus{border-color:#91bd48;box-shadow:0 0 0 3px #c9fa591a}.search-hint{position:absolute;right:12px;top:11px;color:#637181;font-size:11px}.wallet-button,.primary,.secondary{border-radius:8px;padding:10px 15px;font-weight:650}.wallet-button,.primary{border:1px solid var(--lime);background:var(--lime);color:#11170b}.wallet-button:hover,.primary:hover{background:#d9ff83}.secondary{color:var(--text);background:#18212a;border:1px solid var(--line)}.wallet-button{margin-left:auto;white-space:nowrap}.content{max-width:1440px;margin:auto;padding:34px}.page-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:25px}.eyebrow{color:var(--cyan);font-size:10px;letter-spacing:.17em;text-transform:uppercase}.page-head h1{font-size:27px;letter-spacing:-.04em;margin:4px 0}.page-head p{margin:0;color:var(--muted);font-size:13px}.refresh{color:var(--muted);border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:9px 12px}.refresh:hover{border-color:#516170;color:var(--text)}.status{font-size:11px;color:var(--muted);margin-top:10px}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:19px}.stat,.panel{background:linear-gradient(145deg,#121a23,#10161e);border:1px solid var(--line);border-radius:11px}.stat{padding:17px 18px}.stat-label{font-size:11px;color:var(--muted);display:flex;justify-content:space-between}.stat-value{font-size:23px;font-weight:720;letter-spacing:-.035em;margin-top:9px}.stat-note{color:#6d7a88;font-size:11px;margin-top:1px}.layout{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,.8fr);gap:14px}.panel{overflow:hidden;margin-bottom:14px}.panel-head{display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid var(--line)}.panel-head h2{font-size:13px;margin:0;font-weight:680}.panel-head span{font-size:11px;color:var(--muted)}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#7e8c9b;text-align:left;font-weight:600;padding:11px 16px;border-bottom:1px solid #202b35}td{padding:12px 16px;border-bottom:1px solid #1d2731;font-size:12px;color:#c9d3dc}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#ffffff06}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}.muted{color:var(--muted)}.amount{color:var(--lime);font-variant-numeric:tabular-nums}.chip{display:inline-block;padding:3px 7px;border-radius:99px;background:#1c3029;color:var(--green);font-size:10px}.empty,.error{padding:25px;text-align:center;color:var(--muted);font-size:12px}.error{color:var(--red)}.load{padding:25px;text-align:center;color:var(--muted)}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}.detail-grid{display:grid;grid-template-columns:170px minmax(0,1fr);gap:0}.detail-grid div{padding:12px 15px;border-bottom:1px solid #202b35;overflow-wrap:anywhere}.detail-grid div:nth-child(odd){color:var(--muted);font-size:12px}.detail-grid div:nth-child(even){font-size:12px}.form{padding:19px;display:grid;gap:14px}.field{display:grid;gap:6px}.field label{font-size:11px;color:#a5b0bb}.field input{border:1px solid var(--line);border-radius:8px;background:#0c1218;color:var(--text);height:40px;padding:0 11px;outline:none}.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.hint{font-size:11px;color:var(--muted);margin:0}.form-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.notice{padding:12px;border:1px solid #32402b;border-radius:8px;background:#c9fa5909;color:#aabb90;font-size:11px}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.hidden{display:none!important}.overlay{position:fixed;inset:0;background:#000a;display:grid;place-items:center;padding:18px;z-index:10}.dialog{width:min(420px,100%);background:#111720;border:1px solid var(--line);border-radius:13px;padding:20px}.dialog-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px}.dialog-head h2{font-size:16px;margin:0}.close{border:0;background:transparent;color:var(--muted);font-size:20px}.toast{position:fixed;bottom:22px;right:22px;max-width:min(420px,calc(100vw - 44px));padding:13px 16px;background:#17232d;border:1px solid #40505d;border-radius:9px;box-shadow:0 8px 30px #0008;z-index:20}.toast.bad{border-color:#7b3535;color:#ffaaa4}.footer{padding:18px 0;color:#667483;font-size:10px;display:flex;justify-content:space-between}.mobile-menu{display:none}
+    @media(max-width:1000px){.shell{grid-template-columns:190px minmax(0,1fr)}.content{padding:25px 22px}.topbar{padding:0 22px}.layout{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:700px){.shell{display:block}.side{display:none}.topbar{height:auto;min-height:68px;padding:12px 15px;gap:10px}.content{padding:22px 14px}.page-head h1{font-size:23px}.page-head{align-items:center}.wallet-button{padding:9px 10px;font-size:12px}.stats{gap:8px}.stat{padding:13px}.stat-value{font-size:20px}.layout{display:block}.two-col{grid-template-columns:1fr}.search input{height:40px;font-size:12px}.search-hint{display:none}.form-row{grid-template-columns:1fr}.detail-grid{grid-template-columns:115px minmax(0,1fr)}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand"><div class="brand-mark">B</div><div><div class="brand-name">BLEEP</div><div class="brand-sub">NETWORK EXPLORER</div></div></div>
+      <div><div class="nav-label">Explore</div><nav class="nav" id="nav">
+        <button class="active" data-page="overview"><span class="nav-icon">▦</span>Overview</button>
+        <button data-page="blocks"><span class="nav-icon">▤</span>Blocks</button>
+        <button data-page="transactions"><span class="nav-icon">↔</span>Transactions</button>
+        <button data-page="validators"><span class="nav-icon">◈</span>Validators</button>
+        <button data-page="address"><span class="nav-icon">⌕</span>Address lookup</button>
+        <button data-page="send"><span class="nav-icon">↗</span>Send transaction</button>
+      </nav></div>
+      <div class="side-bottom"><div class="network-card"><div class="network-title">Connected network</div><div class="network-row"><span class="dot" id="networkDot"></span><span id="networkName">BLEEP</span></div><div class="network-title mono" id="chainId" style="margin-top:5px">Checking node…</div></div></div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <div class="search"><input id="globalSearch" placeholder="Search block height, transaction hash, or address" aria-label="Search blocks, transactions, or addresses"><span class="search-hint">Enter ↵</span></div>
+        <button id="walletButton" class="wallet-button" type="button">Connect wallet</button>
+      </header>
+      <main class="content">
+        <section id="view-overview">
+          <div class="page-head"><div><div class="eyebrow">Network overview</div><h1>Explore BLEEP</h1><p>Live chain data from your connected BLEEP node.</p><div class="status" id="updatedAt">Connecting to node…</div></div><button class="refresh" id="refreshButton">↻ &nbsp;Refresh</button></div>
+          <div class="stats">
+            <article class="stat"><div class="stat-label">Block height <span>↗</span></div><div class="stat-value" id="heightStat">—</div><div class="stat-note">Canonical chain tip</div></article>
+            <article class="stat"><div class="stat-label">Network peers <span>◉</span></div><div class="stat-value" id="peersStat">—</div><div class="stat-note">Connected to this node</div></article>
+            <article class="stat"><div class="stat-label">Transactions <span>↔</span></div><div class="stat-value" id="txStat">—</div><div class="stat-note">Processed since node start</div></article>
+            <article class="stat"><div class="stat-label">Active validators <span>◈</span></div><div class="stat-value" id="validatorsStat">—</div><div class="stat-note">Live registry</div></article>
+          </div>
+          <div class="layout">
+            <section class="panel"><div class="panel-head"><h2>Latest blocks</h2><a href="#" data-open="blocks">View all →</a></div><div class="table-wrap"><table><thead><tr><th>Height</th><th>Block hash</th><th>Transactions</th><th>Age</th></tr></thead><tbody id="latestBlocks"><tr><td colspan="4" class="load">Loading live blocks…</td></tr></tbody></table></div></section>
+            <section class="panel"><div class="panel-head"><h2>Latest transactions</h2><a href="#" data-open="transactions">View all →</a></div><div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Amount</th><th>Block</th></tr></thead><tbody id="latestTxs"><tr><td colspan="3" class="load">Loading transactions…</td></tr></tbody></table></div></section>
+          </div>
+        </section>
+        <section id="view-blocks" class="hidden"><div class="page-head"><div><div class="eyebrow">Canonical history</div><h1>Blocks</h1><p>Browse blocks committed to the live chain.</p></div><button class="refresh" data-reload="blocks">↻ &nbsp;Refresh</button></div><section class="panel"><div class="table-wrap"><table><thead><tr><th>Height</th><th>Block hash</th><th>Proposer key</th><th>Transactions</th><th>Epoch</th><th>Timestamp</th></tr></thead><tbody id="blocksTable"><tr><td colspan="6" class="load">Loading…</td></tr></tbody></table></div><div class="panel-head"><button class="secondary" id="olderBlocks">Load older blocks</button><span id="blockPageNote"></span></div></section></section>
+        <section id="view-transactions" class="hidden"><div class="page-head"><div><div class="eyebrow">On-chain activity</div><h1>Transactions</h1><p>Confirmed transactions indexed in canonical blocks.</p></div><button class="refresh" data-reload="transactions">↻ &nbsp;Refresh</button></div><section class="panel"><div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Block</th><th>From</th><th>To</th><th>Amount</th><th>Timestamp</th></tr></thead><tbody id="transactionsTable"><tr><td colspan="6" class="load">Loading…</td></tr></tbody></table></div></section></section>
+        <section id="view-validators" class="hidden"><div class="page-head"><div><div class="eyebrow">Proof of stake</div><h1>Validators</h1><p>Validator status and stake from the node registry.</p></div><button class="refresh" data-reload="validators">↻ &nbsp;Refresh</button></div><div class="stats"><article class="stat"><div class="stat-label">Active validators</div><div class="stat-value" id="validatorCount">—</div><div class="stat-note">Registry participants</div></article><article class="stat"><div class="stat-label">Total active stake</div><div class="stat-value" id="totalStake">—</div><div class="stat-note">microBLEEP</div></article></div><section class="panel"><div class="table-wrap"><table><thead><tr><th>Validator</th><th>Status</th><th>Stake</th><th>Reputation</th><th>Joined epoch</th><th>Slashed</th></tr></thead><tbody id="validatorsTable"><tr><td colspan="6" class="load">Loading…</td></tr></tbody></table></div></section></section>
+        <section id="view-address" class="hidden"><div class="page-head"><div><div class="eyebrow">Account state</div><h1>Address lookup</h1><p>Inspect BLEEP balance and confirmed transaction activity.</p></div></div><section class="panel"><form class="form" id="addressForm"><div class="field"><label for="addressInput">BLEEP address</label><input id="addressInput" autocomplete="off" placeholder="Enter a BLEEP address" required></div><div class="form-actions"><button class="primary">Look up address</button><span class="hint">Balances are displayed in microBLEEP (8 decimals).</span></div></form></section><div id="addressResult"></div></section>
+        <section id="view-detail" class="hidden"><div class="page-head"><div><div class="eyebrow" id="detailType">Details</div><h1 id="detailTitle">Record details</h1></div><button class="secondary" id="backButton">← Back</button></div><div id="detailBody"></div></section>
+        <section id="view-send" class="hidden"><div class="page-head"><div><div class="eyebrow">Wallet</div><h1>Send transaction</h1><p>Review and sign with a compatible BLEEP wallet.</p></div></div><div class="layout"><section class="panel"><div class="panel-head"><h2>Transaction details</h2><span>SPHINCS+ signed</span></div><form class="form" id="sendForm"><div class="field"><label for="senderInput">From</label><input id="senderInput" readonly placeholder="Connect a BLEEP wallet first"></div><div class="field"><label for="receiverInput">Recipient address</label><input id="receiverInput" autocomplete="off" required placeholder="BLEEP1…"></div><div class="form-row"><div class="field"><label for="amountInput">Amount (BLEEP)</label><input id="amountInput" inputmode="decimal" required placeholder="0.00000001"></div><div class="field"><label for="nonceInput">Nonce</label><input id="nonceInput" type="number" min="0" step="1" required placeholder="Look up account"></div></div><div class="notice">Your wallet signs the transaction locally. The explorer never requests or stores your private key. The node applies its admission rules; verify the recipient and amount before signing.</div><div class="form-actions"><button class="primary" id="signSubmit" type="submit">Review &amp; sign</button><button class="secondary" id="authButton" type="button">Authenticate to node</button><span class="hint" id="authState">Node session required to submit transactions.</span></div></form></section><section class="panel"><div class="panel-head"><h2>Wallet connection</h2><span id="walletStatus">Not connected</span></div><div class="form"><p class="hint">Use a BLEEP wallet that injects <code>window.bleep.request</code>. Ethereum-only wallets are not compatible with BLEEP's SPHINCS+ signatures.</p><div class="detail-grid"><div>Account</div><div class="mono" id="walletAddress">Not connected</div><div>Signing</div><div>Wallet provider only</div><div>Network</div><div class="mono" id="walletChain">—</div></div></div></section></div></section>
+        <footer class="footer"><span>BLEEP Explorer · Live node data</span><span id="uptimeLabel">Node uptime —</span></footer>
+      </main>
+    </div>
+  </div>
+  <div class="overlay hidden" id="authDialog" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="dialog"><div class="dialog-head"><h2 id="authTitle">Node authentication</h2><button class="close" id="closeAuth" aria-label="Close">×</button></div><form class="form" id="authForm" style="padding:0"><div class="field"><label for="identityInput">DApp identity ID</label><input id="identityInput" autocomplete="username" required></div><div class="field"><label for="passwordInput">Password</label><input id="passwordInput" type="password" autocomplete="current-password" required></div><p class="hint">Credentials are sent only to this node's /rpc/auth/login endpoint. The session token remains in memory and is cleared when this page closes.</p><button class="primary">Sign in</button></form></div></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script>
+    (() => {
+      'use strict';
+      const $ = (id) => document.getElementById(id);
+      const state = { page: 'overview', height: 0, before: null, wallet: null, token: null, chainId: '', timer: null };
+      const fmt = (v) => Number(v || 0).toLocaleString();
+      const short = (s, n = 14) => s && s.length > n ? `${s.slice(0, n)}…${s.slice(-6)}` : (s || '—');
+      const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const age = (timestamp) => {
+        const seconds = Math.max(0, Math.floor(Date.now() / 1000 - Number(timestamp)));
+        return seconds < 60 ? `${seconds}s ago` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : `${Math.floor(seconds / 3600)}h ago`;
+      };
+      function toast(message, bad = false) {
+        const el = $('toast'); el.textContent = message; el.classList.toggle('bad', bad); el.classList.remove('hidden');
+        clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => el.classList.add('hidden'), 4200);
+      }
+      async function api(path, options = {}) {
+        const headers = new Headers(options.headers || {});
+        if (options.body) headers.set('content-type', 'application/json');
+        if (state.token && options.auth) headers.set('authorization', `Bearer ${state.token}`);
+        const response = await fetch(path, { ...options, headers, cache: 'no-store' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Node request failed (${response.status})`);
+        return data;
+      }
+      function setPage(page) {
+        state.page = page;
+        document.querySelectorAll('[id^="view-"]').forEach((el) => el.classList.add('hidden'));
+        $(`view-${page}`).classList.remove('hidden');
+        document.querySelectorAll('#nav button').forEach((button) => button.classList.toggle('active', button.dataset.page === page));
+        if (page === 'blocks') loadBlocks();
+        if (page === 'transactions') loadTransactions();
+        if (page === 'validators') loadValidators();
+      }
+      function errorRow(cols, error) { return `<tr><td colspan="${cols}" class="error">${escapeHtml(error)}</td></tr>`; }
+      async function loadHealth() {
+        try {
+          const [health, telemetry] = await Promise.all([api('/rpc/health'), api('/rpc/telemetry')]);
+          state.height = Number(health.height || 0); state.chainId = health.chain_id || '';
+          $('heightStat').textContent = fmt(state.height); $('peersStat').textContent = fmt(health.peers);
+          $('txStat').textContent = fmt(telemetry.transactions_processed); $('uptimeLabel').textContent = `Node uptime ${Math.floor(health.uptime_secs / 3600)}h ${Math.floor((health.uptime_secs % 3600) / 60)}m`;
+          $('chainId').textContent = state.chainId || 'Chain ID unavailable';
+          $('networkName').textContent = state.chainId || 'BLEEP node';
+          $('networkDot').classList.remove('off');
+          $('updatedAt').textContent = `Live · last updated ${new Date().toLocaleTimeString()}`;
+        } catch (error) {
+          $('networkDot').classList.add('off'); $('updatedAt').textContent = `Node unavailable · ${error.message}`;
+          $('heightStat').textContent = '—'; $('peersStat').textContent = '—'; $('txStat').textContent = '—';
+        }
+      }
+      async function loadBlocks(before = null, append = false) {
+        const body = $('blocksTable');
+        if (!append) body.innerHTML = '<tr><td colspan="6" class="load">Loading live blocks…</td></tr>';
+        try {
+          const params = new URLSearchParams({limit: '20'}); if (before !== null) params.set('before', String(before));
+          const data = await api(`/rpc/explorer/blocks?${params}`);
+          const rows = data.blocks.map((block) => `<tr><td><a href="#block/${encodeURIComponent(block.height)}" data-detail="block" data-id="${escapeHtml(block.height)}">#${fmt(block.height)}</a></td><td class="mono" title="${escapeHtml(block.hash)}">${escapeHtml(short(block.hash, 18))}</td><td class="mono">${escapeHtml(short(block.proposer || 'Genesis', 15))}</td><td>${fmt(block.tx_count)}</td><td>${fmt(block.epoch)}</td><td>${age(block.timestamp)}</td></tr>`).join('');
+          if (!append) body.innerHTML = rows || errorRow(6, 'No canonical blocks found.');
+          else body.insertAdjacentHTML('beforeend', rows);
+          state.before = data.blocks.length ? Number(data.blocks[data.blocks.length - 1].height) : null;
+          $('blockPageNote').textContent = `Latest block #${fmt(data.latest_height)}`;
+          $('olderBlocks').disabled = !data.blocks.length || Number(data.blocks[data.blocks.length - 1].height) === 0;
+          const latest = data.blocks.slice(0, 5);
+          $('latestBlocks').innerHTML = latest.map((block) => `<tr><td><a href="#block/${encodeURIComponent(block.height)}" data-detail="block" data-id="${escapeHtml(block.height)}">#${fmt(block.height)}</a></td><td class="mono">${escapeHtml(short(block.hash, 17))}</td><td>${fmt(block.tx_count)}</td><td>${age(block.timestamp)}</td></tr>`).join('') || errorRow(4, 'No canonical blocks found.');
+        } catch (error) {
+          if (!append) body.innerHTML = errorRow(6, error.message);
+          $('latestBlocks').innerHTML = errorRow(4, error.message);
+        }
+      }
+      async function loadTransactions() {
+        try {
+          const data = await api('/rpc/explorer/transactions?limit=25');
+          const rows = data.transactions.map((tx) => `<tr><td><a class="mono" href="#tx/${encodeURIComponent(tx.hash)}" data-detail="tx" data-id="${escapeHtml(tx.hash)}">${escapeHtml(short(tx.hash, 17))}</a></td><td><a href="#block/${encodeURIComponent(tx.block_height)}" data-detail="block" data-id="${escapeHtml(tx.block_height)}">#${fmt(tx.block_height)}</a></td><td class="mono">${escapeHtml(short(tx.sender, 13))}</td><td class="mono">${escapeHtml(short(tx.receiver, 13))}</td><td class="amount">${escapeHtml(tx.amount)} μBLP</td><td>${age(tx.timestamp)}</td></tr>`).join('');
+          $('transactionsTable').innerHTML = rows || errorRow(6, 'No confirmed transactions found.');
+          $('latestTxs').innerHTML = data.transactions.slice(0, 5).map((tx) => `<tr><td><a class="mono" href="#tx/${encodeURIComponent(tx.hash)}" data-detail="tx" data-id="${escapeHtml(tx.hash)}">${escapeHtml(short(tx.hash, 17))}</a></td><td class="amount">${escapeHtml(tx.amount)} μBLP</td><td><a href="#block/${encodeURIComponent(tx.block_height)}" data-detail="block" data-id="${escapeHtml(tx.block_height)}">#${fmt(tx.block_height)}</a></td></tr>`).join('') || errorRow(3, 'No confirmed transactions found.');
+        } catch (error) { $('transactionsTable').innerHTML = errorRow(6, error.message); $('latestTxs').innerHTML = errorRow(3, error.message); }
+      }
+      async function loadValidators() {
+        try {
+          const data = await api('/rpc/explorer/validators');
+          const rows = data.validators.map((v) => `<tr><td class="mono">${escapeHtml(v.id)}</td><td><span class="chip">${escapeHtml(v.status)}</span></td><td>${escapeHtml(v.stake)} μBLP</td><td>${(Number(v.reputation) * 100).toFixed(1)}%</td><td>${fmt(v.joined_epoch)}</td><td>${escapeHtml(v.total_slashed)} μBLP</td></tr>`).join('');
+          $('validatorsTable').innerHTML = rows || errorRow(6, 'No active validators are available.');
+          $('validatorsStat').textContent = fmt(data.count); $('validatorCount').textContent = fmt(data.count); $('totalStake').textContent = data.total_stake || '0';
+        } catch (error) { $('validatorsTable').innerHTML = errorRow(6, error.message); $('validatorsStat').textContent = '—'; }
+      }
+      async function openDetail(type, id) {
+        setPage('detail'); $('detailType').textContent = type === 'block' ? 'Canonical block' : 'Confirmed transaction';
+        $('detailTitle').textContent = type === 'block' ? `Block #${id}` : `Transaction ${short(id, 19)}`;
+        $('detailBody').innerHTML = '<section class="panel"><div class="load">Loading record…</div></section>';
+        try {
+          const result = await api(`/rpc/explorer/${type}/${encodeURIComponent(id)}`);
+          if (type === 'block') {
+            const b = result.block;
+            $('detailBody').innerHTML = `<section class="panel"><div class="panel-head"><h2>Block information</h2><span class="chip">Canonical</span></div><div class="detail-grid"><div>Height</div><div>#${fmt(b.height)}</div><div>Hash</div><div class="mono">${escapeHtml(b.hash)}</div><div>Previous hash</div><div class="mono">${escapeHtml(b.previous_hash)}</div><div>Timestamp</div><div>${new Date(Number(b.timestamp) * 1000).toLocaleString()}</div><div>Transactions</div><div>${fmt(b.tx_count)}</div><div>Epoch</div><div>${fmt(b.epoch)}</div><div>Proposer public key</div><div class="mono">${escapeHtml(b.proposer || 'Genesis block')}</div><div>Merkle root</div><div class="mono">${escapeHtml(b.merkle_root || '—')}</div><div>Consensus</div><div>${escapeHtml(b.consensus_mode)} · protocol ${fmt(b.protocol_version)}</div><div>Encoded size</div><div>${fmt(b.size_bytes)} bytes</div></div></section><section class="panel"><div class="panel-head"><h2>Transactions in block</h2><span>${fmt(result.transactions.length)} total</span></div><div class="table-wrap"><table><thead><tr><th>Hash</th><th>From</th><th>To</th><th>Amount</th></tr></thead><tbody>${result.transactions.map(tx => `<tr><td><a class="mono" href="#tx/${encodeURIComponent(tx.hash)}" data-detail="tx" data-id="${escapeHtml(tx.hash)}">${escapeHtml(short(tx.hash, 18))}</a></td><td class="mono">${escapeHtml(short(tx.sender, 13))}</td><td class="mono">${escapeHtml(short(tx.receiver, 13))}</td><td class="amount">${escapeHtml(tx.amount)} μBLP</td></tr>`).join('') || errorRow(4, 'This block contains no transactions.')}</tbody></table></div></section>`;
+          } else {
+            $('detailBody').innerHTML = `<section class="panel"><div class="panel-head"><h2>Transaction information</h2><span class="chip">Confirmed</span></div><div class="detail-grid"><div>Transaction hash</div><div class="mono">${escapeHtml(result.hash)}</div><div>Block</div><div><a href="#block/${encodeURIComponent(result.block_height)}" data-detail="block" data-id="${escapeHtml(result.block_height)}">#${fmt(result.block_height)}</a></div><div>From</div><div class="mono">${escapeHtml(result.sender)}</div><div>To</div><div class="mono">${escapeHtml(result.receiver)}</div><div>Amount</div><div class="amount">${escapeHtml(result.amount)} microBLEEP</div><div>Nonce</div><div>${fmt(result.nonce)}</div><div>Timestamp</div><div>${new Date(Number(result.timestamp) * 1000).toLocaleString()}</div><div>Chain ID</div><div class="mono">${escapeHtml(result.chain_id)}</div></div></section>`;
+          }
+        } catch (error) { $('detailBody').innerHTML = `<section class="panel"><div class="error">${escapeHtml(error.message)}</div></section>`; }
+      }
+      async function lookupAddress(address) {
+        setPage('address'); $('addressInput').value = address; $('addressResult').innerHTML = '<section class="panel"><div class="load">Loading account state…</div></section>';
+        try {
+          const [account, txs] = await Promise.all([api(`/rpc/explorer/address/${encodeURIComponent(address)}`), api(`/rpc/explorer/transactions?address=${encodeURIComponent(address)}&limit=25`)]);
+          const whole = BigInt(account.balance) / 100000000n, frac = (BigInt(account.balance) % 100000000n).toString().padStart(8, '0');
+          $('addressResult').innerHTML = `<div class="stats"><article class="stat"><div class="stat-label">Balance</div><div class="stat-value">${whole.toLocaleString()}.${frac} BLEEP</div><div class="stat-note">${escapeHtml(account.balance)} microBLEEP</div></article><article class="stat"><div class="stat-label">Account nonce</div><div class="stat-value">${fmt(account.nonce)}</div><div class="stat-note">Next transaction nonce</div></article><article class="stat"><div class="stat-label">Last indexed height</div><div class="stat-value">#${fmt(account.block_height)}</div><div class="stat-note">Current node state</div></article></div><section class="panel"><div class="panel-head"><h2>Account</h2><button class="secondary" id="useAccount">Use in send form</button></div><div class="detail-grid"><div>Address</div><div class="mono">${escapeHtml(account.address)}</div></div></section><section class="panel"><div class="panel-head"><h2>Related transactions</h2><span>Confirmed only</span></div><div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Block</th><th>From</th><th>To</th><th>Amount</th></tr></thead><tbody>${txs.transactions.map(tx => `<tr><td><a class="mono" href="#tx/${encodeURIComponent(tx.hash)}" data-detail="tx" data-id="${escapeHtml(tx.hash)}">${escapeHtml(short(tx.hash, 17))}</a></td><td><a href="#block/${encodeURIComponent(tx.block_height)}" data-detail="block" data-id="${escapeHtml(tx.block_height)}">#${fmt(tx.block_height)}</a></td><td class="mono">${escapeHtml(short(tx.sender, 12))}</td><td class="mono">${escapeHtml(short(tx.receiver, 12))}</td><td class="amount">${escapeHtml(tx.amount)} μBLP</td></tr>`).join('') || errorRow(5, 'No confirmed transactions for this address.')}</tbody></table></div></section>`;
+          $('useAccount').addEventListener('click', () => { $('receiverInput').value = account.address; setPage('send'); });
+          if (state.wallet && state.wallet === account.address) $('nonceInput').value = account.nonce;
+        } catch (error) { $('addressResult').innerHTML = `<section class="panel"><div class="error">${escapeHtml(error.message)}</div></section>`; }
+      }
+      async function connectWallet() {
+        const provider = window.bleep;
+        if (!provider || typeof provider.request !== 'function') throw new Error('No compatible BLEEP wallet found. Install a wallet that injects window.bleep.request.');
+        const accounts = await provider.request({ method: 'bleep_requestAccounts' });
+        const address = Array.isArray(accounts) ? accounts[0] : accounts;
+        if (typeof address !== 'string' || !address) throw new Error('Wallet did not return an account.');
+        state.wallet = address; $('senderInput').value = address; $('walletAddress').textContent = address;
+        $('walletStatus').textContent = 'Connected'; $('walletButton').textContent = short(address, 12);
+        $('walletChain').textContent = state.chainId || 'Unknown chain';
+        try { const account = await api(`/rpc/explorer/address/${encodeURIComponent(address)}`); $('nonceInput').value = account.nonce; }
+        catch (error) { toast(`Could not load wallet nonce: ${error.message}`, true); }
+        setPage('send'); toast('BLEEP wallet connected.');
+      }
+      function toMicro(amount) {
+        if (!/^(?:0|[1-9]\d*)(?:\.\d{1,8})?$/.test(amount)) throw new Error('Enter a positive amount with up to 8 decimal places.');
+        const [whole, fraction = ''] = amount.split('.');
+        const value = BigInt(whole) * 100000000n + BigInt(fraction.padEnd(8, '0'));
+        if (value <= 0n || value > 9007199254740991n) throw new Error("Amount must be within JavaScript's exact integer range (microBLEEP).");
+        return value;
+      }
+      function signatureBytes(value) {
+        if (Array.isArray(value)) return value;
+        if (typeof value === 'string' && /^0x(?:[0-9a-f]{2})+$/i.test(value)) {
+          const bytes = value.slice(2).match(/.{2}/g); return bytes.map((byte) => parseInt(byte, 16));
+        }
+        throw new Error('Wallet returned an invalid transaction signature.');
+      }
+      async function submitTransaction(event) {
+        event.preventDefault();
+        try {
+          if (!state.wallet) throw new Error('Connect a BLEEP wallet before submitting.');
+          if (!state.token) throw new Error('Authenticate to the node before submitting.');
+          if (!state.chainId) throw new Error('The node did not report its chain ID.');
+          const receiver = $('receiverInput').value.trim();
+          const amount = toMicro($('amountInput').value.trim());
+          const nonce = Number($('nonceInput').value);
+          if (!Number.isSafeInteger(nonce) || nonce < 0) throw new Error('Enter a valid account nonce.');
+          const tx = { chain_id: state.chainId, sender: state.wallet, receiver, amount: amount.toString(), timestamp: Math.floor(Date.now() / 1000), nonce };
+          if (typeof window.bleep?.request !== 'function') throw new Error('The connected wallet provider is no longer available.');
+          const signed = await window.bleep.request({ method: 'bleep_signTransaction', params: [tx] });
+          const signature = signatureBytes(signed?.signature ?? signed);
+          $('signSubmit').disabled = true; $('signSubmit').textContent = 'Submitting…';
+          const result = await api('/rpc/tx', { method: 'POST', auth: true, body: JSON.stringify({ ...tx, amount: Number(amount), signature }) });
+          if (result.status !== 'accepted') throw new Error(`Node rejected transaction: ${result.status}`);
+          toast(`Transaction accepted: ${result.tx_id}`);
+          $('sendForm').reset(); $('senderInput').value = state.wallet; $('nonceInput').value = nonce + 1;
+        } catch (error) { toast(error.message, true); }
+        finally { $('signSubmit').disabled = false; $('signSubmit').textContent = 'Review & sign'; }
+      }
+      $('nav').addEventListener('click', (event) => { const button = event.target.closest('[data-page]'); if (button) setPage(button.dataset.page); });
+      document.addEventListener('click', (event) => {
+        const open = event.target.closest('[data-open]'); if (open) { event.preventDefault(); setPage(open.dataset.open); return; }
+        const detail = event.target.closest('[data-detail]'); if (detail) { event.preventDefault(); openDetail(detail.dataset.detail, detail.dataset.id); }
+        const reload = event.target.closest('[data-reload]'); if (reload) ({blocks: loadBlocks, transactions: loadTransactions, validators: loadValidators})[reload.dataset.reload]();
+      });
+      $('globalSearch').addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        const value = event.currentTarget.value.trim(); if (!value) return;
+        if (/^\d+$/.test(value)) openDetail('block', value);
+        else if (/^(?:0x)?[a-f\d]{64}$/i.test(value)) openDetail('tx', value.replace(/^0x/i, ''));
+        else lookupAddress(value);
+      });
+      $('refreshButton').addEventListener('click', () => refresh());
+      $('olderBlocks').addEventListener('click', () => { if (state.before !== null) loadBlocks(state.before, true); });
+      $('addressForm').addEventListener('submit', (event) => { event.preventDefault(); lookupAddress($('addressInput').value.trim()); });
+      $('sendForm').addEventListener('submit', submitTransaction);
+      $('walletButton').addEventListener('click', () => connectWallet().catch((error) => toast(error.message, true)));
+      $('authButton').addEventListener('click', () => $('authDialog').classList.remove('hidden'));
+      $('closeAuth').addEventListener('click', () => $('authDialog').classList.add('hidden'));
+      $('authDialog').addEventListener('click', (event) => { if (event.target === $('authDialog')) $('authDialog').classList.add('hidden'); });
+      $('authForm').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        try {
+          const result = await api('/rpc/auth/login', { method: 'POST', body: JSON.stringify({ identity_id: $('identityInput').value.trim(), password: $('passwordInput').value }) });
+          state.token = result.token; $('passwordInput').value = ''; $('authDialog').classList.add('hidden');
+          $('authState').textContent = 'Authenticated for this page session.'; $('authButton').textContent = 'Authenticated'; toast('Node session established.');
+        } catch (error) { toast(error.message, true); }
+      });
+      $('backButton').addEventListener('click', () => setPage('overview'));
+      async function refresh() { await Promise.all([loadHealth(), loadBlocks(), loadTransactions(), loadValidators()]); }
+      refresh();
+      state.timer = setInterval(() => { loadHealth(); if (state.page === 'overview') { loadBlocks(); loadTransactions(); loadValidators(); } }, 10000);
+      window.addEventListener('beforeunload', () => clearInterval(state.timer));
+    })();
+  </script>
+</body>
+</html>

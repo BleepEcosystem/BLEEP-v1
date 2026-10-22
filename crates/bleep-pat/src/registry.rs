@@ -40,6 +40,8 @@ pub struct PATRegistry {
     pub events: Vec<PATEvent>,
     /// Set of executed intent hashes — prevents replay within this session.
     seen_intents: HashSet<[u8; 32]>,
+    /// Wallet nonces consumed by authenticated RPC intents.
+    seen_nonces: HashSet<([u8; 32], u64)>,
     engine: PATEngine,
 }
 
@@ -51,6 +53,7 @@ impl PATRegistry {
             allowances: BTreeMap::new(),
             events: Vec::new(),
             seen_intents: HashSet::new(),
+            seen_nonces: HashSet::new(),
             engine: PATEngine::new(),
         }
     }
@@ -133,6 +136,21 @@ impl PATRegistry {
             outcome.gas_used,
             outcome.diff.events.len()
         );
+        Ok(outcome)
+    }
+
+    /// Execute an RPC intent after its wallet signature was verified by the caller.
+    ///
+    /// The RPC boundary must verify the signature, chain ID, and signer before
+    /// calling this method. Nonces are consumed only after successful execution.
+    pub fn execute_signed(&mut self, intent: &PATIntent) -> PATResult<PATOutcome> {
+        let nonce_key = (intent.caller, intent.nonce);
+        if intent.nonce == 0 || self.seen_nonces.contains(&nonce_key) {
+            return Err(PATError::DuplicateIntent);
+        }
+
+        let outcome = self.execute(intent)?;
+        self.seen_nonces.insert(nonce_key);
         Ok(outcome)
     }
 

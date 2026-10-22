@@ -52,10 +52,13 @@ mod tests {
 
         let tx = Transaction {
             id: "tx123".to_string(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             from: wallet.address.clone(),
             to: "recipient_address".to_string(),
             amount: 10.5,
             fee: 0.1,
+            timestamp: 1,
+            nonce: 0,
             signature: vec![],
         };
 
@@ -83,10 +86,13 @@ mod tests {
 
         let tx = Transaction {
             id: "tx123".to_string(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             from: wallet.address.clone(),
             to: "recipient_address".to_string(),
             amount: 15.0,
             fee: 0.2,
+            timestamp: 1,
+            nonce: 0,
             signature: vec![1, 2, 3, 4],
         };
 
@@ -106,10 +112,13 @@ mod tests {
 
             let tx = Transaction {
                 id: "tx123".to_string(),
+                chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
                 from: wallet.address.clone(),
                 to: "recipient_address".to_string(),
                 amount: 12.5,
                 fee: 0.1,
+                timestamp: 1,
+                nonce: 0,
                 signature: vec![1, 2, 3, 4],
             };
 
@@ -128,10 +137,13 @@ mod tests {
 
             let tx = Transaction {
                 id: "tx123".to_string(),
+                chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
                 from: wallet.address.clone(),
                 to: "recipient_address".to_string(),
                 amount: 20.0,
                 fee: 0.15,
+                timestamp: 1,
+                nonce: 0,
                 signature: vec![1, 2, 3, 4],
             };
 

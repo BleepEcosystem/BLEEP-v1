@@ -50,13 +50,17 @@ pub fn run_consensus_engine() -> Result<(), Box<dyn std::error::Error>> {
         "Consensus orchestrator initialized in mode: {}",
         mode.as_str()
     );
+    log::warn!(
+        "Consensus orchestrator configuration is initialized only; no distributed vote or quorum-finality loop is running"
+    );
     Ok(())
 }
 
 pub use block_producer::{
-    start_block_producer, BlockProducer, FinalizedBlock, ProducerConfig, BLOCK_INTERVAL_MS,
-    MAX_TXS_PER_BLOCK,
+    ensure_live_finality_mode_supported, start_block_producer, BlockProducer, FinalizedBlock,
+    ProducerConfig, BLOCK_INTERVAL_MS, MAX_TXS_PER_BLOCK,
 };
+pub use pbft_engine::{LivePbftFinality, PbftMessage, PbftPhase, PBFT_MESSAGE_TYPE};
 
 pub mod gossip_bridge;
 pub use gossip_bridge::{decode_finalized_block, encode_finalized_block, GossipBridge};

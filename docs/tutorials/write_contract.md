@@ -220,23 +220,13 @@ cast call <contract-address> "get()(uint64)" \
 
 ## Part 3 — Programmable Asset Tokens (PAT)
 
-PATs are a first-class contract type in BLEEP, minted directly via RPC without requiring a full contract deployment.
-
-### Mint a PAT
-
-```bash
-curl -X POST http://localhost:8545/rpc/pat/mint \
-  -H "Content-Type: application/json" \
-  -d '{
-    "owner": "0xYOUR_ADDRESS",
-    "metadata": "BASE64_ENCODED_METADATA",
-    "ruleset": {
-      "transferable": true,
-      "compliance_flags": []
-    },
-    "initial_supply": 1000
-  }'
-```
+PATs are a first-class contract type in BLEEP. All mutation routes require an
+authenticated session and a wallet-signed request bound to the target chain,
+endpoint, and a one-time nonce. The signed `owner`, `caller`, or `from` address
+must match the signing public key; request-supplied addresses alone do not
+authorize token mutations. See the [PAT signed request format](../../crates/bleep-pat/README.md#signed-mutation-requests)
+for the payload schema before submitting a create, mint, burn, transfer,
+approval, freeze, burn-rate, or ownership-change request.
 
 ### Check PAT Balance
 

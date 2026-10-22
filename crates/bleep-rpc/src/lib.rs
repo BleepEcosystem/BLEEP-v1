@@ -36,9 +36,10 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
 
-use bleep_auth::{AccessDecision, AuthError, AuthService, Permission, SessionClaims};
+use bleep_auth::{AuthError, AuthService, Permission, SessionClaims};
 use bleep_core::{transaction_pool::TransactionPool, Blockchain};
 use bleep_crypto::{tx_payload, verify_tx_signature};
+use bleep_p2p::{p2p_node::P2PNode, types::MessageType};
 
 // ─── Auth rejection ──────────────────────────────────────────────────────────
 
@@ -95,6 +96,8 @@ pub struct RpcState {
     pub block_producer: Option<Arc<BlockProducer>>,
     /// Live TransactionPool — attach at node startup so POST /rpc/tx can enqueue transactions.
     pub transaction_pool: Option<Arc<TransactionPool>>,
+    /// P2P node used to gossip newly accepted transactions to connected peers.
+    pub p2p_node: Option<Arc<P2PNode>>,
     /// Live Blockchain state — attach so faucet credits update the consensus state.
     pub blockchain: Option<Arc<RwLock<Blockchain>>>,
 }
@@ -129,6 +132,7 @@ impl RpcState {
             audit_export_enabled: true,
             block_producer: None,
             transaction_pool: None,
+            p2p_node: None,
             blockchain: None,
         }
     }
@@ -188,6 +192,12 @@ impl RpcState {
         self
     }
 
+    /// Attach the P2P node for transaction gossip after local pool admission.
+    pub fn with_p2p_node(mut self, node: Arc<P2PNode>) -> Self {
+        self.p2p_node = Some(node);
+        self
+    }
+
     /// Attach the live `Blockchain` so faucet credits update the in-memory consensus state.
     pub fn with_blockchain(mut self, blockchain: Arc<RwLock<Blockchain>>) -> Self {
         self.blockchain = Some(blockchain);
@@ -227,6 +237,7 @@ struct HealthResp {
     peers: usize,
     uptime_secs: u64,
     version: &'static str,
+    chain_id: String,
 }
 
 #[derive(Serialize)]
@@ -241,13 +252,21 @@ struct JsonReply {
     result: String,
 }
 
-#[derive(Deserialize)]
-struct TxReq {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TxReq {
+    chain_id: String,
     sender: String,
     receiver: String,
     amount: u64,
     timestamp: u64,
+    nonce: u64,
     signature: Vec<u8>,
+}
+
+impl TxReq {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
 }
 
 #[derive(Serialize)]
@@ -256,10 +275,16 @@ struct TxResp {
     status: &'static str,
 }
 
-#[derive(Deserialize)]
-struct MintReq {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MintReq {
     address: String,
     amount: u64,
+}
+
+impl MintReq {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
 }
 
 #[derive(Serialize)]
@@ -378,8 +403,8 @@ struct EvidenceResp {
 
 // ─── Staking request bodies (Sprint 6) ───────────────────────────────────────
 
-#[derive(Deserialize, Clone)]
-struct StakeRequest {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct StakeRequest {
     #[allow(dead_code)]
     tx_type: String,
     amount: u64,
@@ -393,9 +418,37 @@ struct StakeRequest {
     kyber_public_key: Option<String>,
 }
 
-#[derive(Deserialize, Clone)]
-struct UnstakeRequest {
+impl StakeRequest {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UnstakeRequest {
     validator_id: String,
+}
+
+impl UnstakeRequest {
+    pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+}
+
+pub fn parse_tx_request(data: &[u8]) -> Result<TxReq, serde_json::Error> {
+    TxReq::parse(data)
+}
+
+pub fn parse_mint_request(data: &[u8]) -> Result<MintReq, serde_json::Error> {
+    MintReq::parse(data)
+}
+
+pub fn parse_stake_request(data: &[u8]) -> Result<StakeRequest, serde_json::Error> {
+    StakeRequest::parse(data)
+}
+
+pub fn parse_unstake_request(data: &[u8]) -> Result<UnstakeRequest, serde_json::Error> {
+    UnstakeRequest::parse(data)
 }
 
 // ─── Route factory ────────────────────────────────────────────────────────────
@@ -418,6 +471,8 @@ pub fn rpc_routes_with_state(
                 peers: st.peer_count.load(std::sync::atomic::Ordering::Relaxed),
                 uptime_secs: st.uptime_secs(),
                 version: env!("CARGO_PKG_VERSION"),
+                chain_id: std::env::var("BLEEP_CHAIN_ID")
+                    .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string()),
             })
         });
 
@@ -453,10 +508,15 @@ pub fn rpc_routes_with_state(
     let tx_submit = warp::path!("rpc" / "tx")
         .and(warp::post())
         .and(warp::body::json::<TxReq>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::SubmitTransaction),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
             |req: TxReq, _claims: SessionClaims, st: RpcState| async move {
+                let p2p_node = st.p2p_node.clone();
+
                 // Check if TransactionPool is attached
                 let pool = match st.transaction_pool {
                     Some(p) => p,
@@ -471,21 +531,37 @@ pub fn rpc_routes_with_state(
 
                 // Create ZKTransaction from request
                 let tx = bleep_core::transaction::ZKTransaction {
+                    chain_id: req.chain_id.clone(),
                     sender: req.sender.clone(),
                     receiver: req.receiver.clone(),
                     amount: req.amount,
                     timestamp: req.timestamp,
+                    nonce: req.nonce,
                     signature: req.signature,
                 };
+
+                let gossip_payload = match serde_json::to_vec(&tx) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        log::error!("Failed to serialize accepted transaction for gossip: {error}");
+                        return Ok::<_, warp::Rejection>(warp::reply::json(&TxResp {
+                            tx_id: "error".to_string(),
+                            status: "serialization_failed",
+                        }));
+                    }
+                };
+                let tx_id = format!(
+                    "{}:{}:{}:{}",
+                    tx.sender, tx.receiver, tx.amount, tx.timestamp
+                );
 
                 // Try to add transaction to pool
                 let admitted = pool.add_transaction(tx).await;
 
                 if admitted {
-                    let tx_id = format!(
-                        "{}:{}:{}:{}",
-                        req.sender, req.receiver, req.amount, req.timestamp
-                    );
+                    if let Some(node) = p2p_node {
+                        node.broadcast(MessageType::Transaction, gossip_payload);
+                    }
                     let resp = warp::reply::json(&TxResp {
                         tx_id,
                         status: "accepted",
@@ -501,61 +577,100 @@ pub fn rpc_routes_with_state(
             },
         );
 
-    // POST /rpc/mint — Temporary endpoint for testing (mint tokens to address)
+    // GET /rpc/tx/nonce/{address}
+    let tx_nonce = warp::path!("rpc" / "tx" / "nonce" / String)
+        .and(warp::get())
+        .and(with_rpc_state(rpc.clone()))
+        .and_then(|address: String, st: RpcState| async move {
+            let response: Box<dyn warp::Reply + Send> = match (st.state_mgr, st.transaction_pool) {
+                (Some(state_mgr), Some(pool)) => {
+                    let committed_nonce = state_mgr.lock().get_nonce(&address);
+                    match pool.next_nonce(&address, committed_nonce).await {
+                        Some(nonce) => Box::new(warp::reply::json(&serde_json::json!({
+                            "address": address,
+                            "nonce": nonce,
+                        }))),
+                        None => Box::new(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Account nonce is exhausted".into(),
+                            }),
+                            warp::http::StatusCode::CONFLICT,
+                        )),
+                    }
+                }
+                (None, _) => Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "StateManager unavailable (stub mode)".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                )),
+                (_, None) => Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "TransactionPool unavailable".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                )),
+            };
+            Ok::<_, warp::Rejection>(response)
+        });
+
+    // POST /rpc/mint — disabled by default. A non-mainnet dev/test network can
+    // opt in with BLEEP_ENABLE_PUBLIC_MINT=true, but production mainnet never
+    // exposes a direct native minting endpoint.
     let mint = warp::path!("rpc" / "mint")
         .and(warp::post())
         .and(warp::body::json::<MintReq>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_rpc_state(rpc.clone()))
-        .and_then(
-            |req: MintReq, claims: SessionClaims, st: RpcState| async move {
-                if let Err(reason) = authorize_rpc(&st, &claims, Permission::AdministerSystem).await
-                {
-                    return Ok::<_, warp::Rejection>(warp::reply::with_status(
-                        warp::reply::json(&ErrResp { error: reason }),
-                        warp::http::StatusCode::FORBIDDEN,
-                    ));
-                }
+        .and_then(|req: MintReq, _claims: SessionClaims, st: RpcState| async move {
+            if !public_native_mint_enabled() {
+                return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "Public native minting is disabled. Set BLEEP_ENABLE_PUBLIC_MINT=true only for non-mainnet test/dev environments.".to_string(),
+                    }),
+                    warp::http::StatusCode::FORBIDDEN,
+                ));
+            }
 
-                // Check if StateManager is attached
-                let state_mgr = match st.state_mgr {
-                    Some(sm) => sm,
-                    None => {
-                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
-                            warp::reply::json(&MintResp {
-                                address: req.address.clone(),
-                                new_balance: "0".to_string(),
-                                status: "StateManager not attached to RPC state".to_string(),
-                            }),
-                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        ));
-                    }
-                };
-
-                // Mint tokens (convert u64 to u128)
-                let amount_u128 = req.amount as u128;
-                let mint_result = state_mgr.lock().mint(&req.address, amount_u128);
-
-                match mint_result {
-                    Ok(new_balance) => Ok(warp::reply::with_status(
-                        warp::reply::json(&MintResp {
-                            address: req.address,
-                            new_balance: new_balance.to_string(),
-                            status: "minted".to_string(),
-                        }),
-                        warp::http::StatusCode::OK,
-                    )),
-                    Err(err) => Ok(warp::reply::with_status(
+            let state_mgr = match st.state_mgr {
+                Some(sm) => sm,
+                None => {
+                    return Ok(warp::reply::with_status(
                         warp::reply::json(&MintResp {
                             address: req.address,
                             new_balance: "0".to_string(),
-                            status: err,
+                            status: "StateManager not attached to RPC state".to_string(),
                         }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    )),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
                 }
-            },
-        );
+            };
+
+            let amount_u128 = req.amount as u128;
+            let mint_result = state_mgr.lock().mint(&req.address, amount_u128);
+
+            match mint_result {
+                Ok(new_balance) => Ok(warp::reply::with_status(
+                    warp::reply::json(&MintResp {
+                        address: req.address,
+                        new_balance: new_balance.to_string(),
+                        status: "minted".to_string(),
+                    }),
+                    warp::http::StatusCode::OK,
+                )),
+                Err(err) => Ok(warp::reply::with_status(
+                    warp::reply::json(&MintResp {
+                        address: req.address,
+                        new_balance: "0".to_string(),
+                        status: err,
+                    }),
+                    warp::http::StatusCode::BAD_REQUEST,
+                )),
+            }
+        });
 
     // GET /rpc/tx/history
     let tx_history = warp::path!("rpc" / "tx" / "history")
@@ -686,7 +801,10 @@ pub fn rpc_routes_with_state(
     let validator_stake = warp::path!("rpc" / "validator" / "stake")
         .and(warp::post())
         .and(warp::body::json::<StakeRequest>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::BindValidator),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
             |req: StakeRequest, _claims: SessionClaims, st: RpcState| async move {
@@ -726,7 +844,14 @@ pub fn rpc_routes_with_state(
                     }
                 };
                 if !verify_tx_signature(
-                    &tx_payload(&req.label, "validator", req.amount, req.timestamp),
+                    &tx_payload(
+                        bleep_crypto::DEFAULT_CHAIN_ID,
+                        &req.label,
+                        "validator",
+                        req.amount,
+                        req.timestamp,
+                        0,
+                    ),
                     &proof,
                     &signing_public_key,
                 ) {
@@ -818,10 +943,43 @@ pub fn rpc_routes_with_state(
     let validator_unstake = warp::path!("rpc" / "validator" / "unstake")
         .and(warp::post())
         .and(warp::body::json::<UnstakeRequest>())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::BindValidator),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
-            |req: UnstakeRequest, _claims: SessionClaims, st: RpcState| async move {
+            |req: UnstakeRequest, claims: SessionClaims, st: RpcState| async move {
+                let Some(auth_service) = st.auth_service.as_ref() else {
+                    let resp = warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "AuthService unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                    return Ok::<_, warp::Rejection>(resp);
+                };
+
+                let is_system_admin = auth_service
+                    .rbac
+                    .check(&claims.sub, Permission::AdministerSystem)
+                    .is_granted();
+                let owns_validator = auth_service
+                    .validator_bindings
+                    .read()
+                    .await
+                    .get_binding_for_validator(&req.validator_id)
+                    .is_some_and(|binding| binding.operator_id == claims.sub);
+                if !owns_validator && !is_system_admin {
+                    let resp = warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Session is not bound to this validator".into(),
+                        }),
+                        warp::http::StatusCode::FORBIDDEN,
+                    );
+                    return Ok::<_, warp::Rejection>(resp);
+                }
+
                 match &st.validator_registry {
                     None => {
                         let resp = warp::reply::with_status(
@@ -921,7 +1079,10 @@ pub fn rpc_routes_with_state(
     let validator_evidence = warp::path!("rpc" / "validator" / "evidence")
         .and(warp::post())
         .and(warp::body::bytes())
-        .and(auth_filter(Arc::clone(&state_inner)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state_inner),
+            Some(Permission::SubmitSlashingEvidence),
+        ))
         .and(with_rpc_state(rpc.clone()))
         .map(
             |body: bytes::Bytes,
@@ -984,6 +1145,7 @@ pub fn rpc_routes_with_state(
         .or(wallet)
         .or(ai)
         .or(tx_submit)
+        .or(tx_nonce)
         .or(mint)
         .or(tx_history)
         .or(block_latest)
@@ -1023,9 +1185,14 @@ pub fn rpc_routes_with_state(
         .or(auth_login(Arc::clone(&state_inner)))
         .or(auth_logout(Arc::clone(&state_inner)))
         .or(auth_rotate_secret(Arc::clone(&state_inner)))
+        .or(auth_confirm_secret_rotation(Arc::clone(&state_inner)))
         .or(auth_audit_export(Arc::clone(&state_inner)))
         .or(explorer_ui())
         .or(explorer_api_blocks(Arc::clone(&state_inner)))
+        .or(explorer_api_block(Arc::clone(&state_inner)))
+        .or(explorer_api_transactions(Arc::clone(&state_inner)))
+        .or(explorer_api_transaction(Arc::clone(&state_inner)))
+        .or(explorer_api_address(Arc::clone(&state_inner)))
         .or(explorer_api_validators(Arc::clone(&state_inner)))
         .or(metrics_prometheus(Arc::clone(&state_inner)))
         // ── Sprint 9 ──────────────────────────────────────────────────────
@@ -1162,9 +1329,16 @@ fn with_arc_state(
 fn auth_filter(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = (SessionClaims,), Error = warp::Rejection> + Clone {
+    auth_filter_with_permission(state, None)
+}
+
+fn auth_filter_with_permission(
+    state: Arc<RpcState>,
+    permission: Option<Permission>,
+) -> impl Filter<Extract = (SessionClaims,), Error = warp::Rejection> + Clone {
     warp::header::<String>("authorization")
         .and(with_arc_state(Arc::clone(&state)))
-        .and_then(|auth_header: String, st: Arc<RpcState>| async move {
+        .and_then(move |auth_header: String, st: Arc<RpcState>| async move {
             if !auth_header.starts_with("Bearer ") {
                 return Err(warp::reject::custom(AuthRejection(
                     AuthError::InvalidSession,
@@ -1181,24 +1355,37 @@ fn auth_filter(
                 .validate(token)
                 .await
                 .map_err(|e| warp::reject::custom(AuthRejection(e)))?;
+
+            if let Some(required) = permission {
+                if !auth_service.rbac.check(&claims.sub, required).is_granted() {
+                    return Err(warp::reject::custom(AuthRejection(
+                        AuthError::Unauthorized(format!(
+                            "Missing required permission: {required:?}"
+                        )),
+                    )));
+                }
+            }
+
             Ok(claims)
         })
 }
 
-async fn authorize_rpc(
-    state: &RpcState,
-    claims: &SessionClaims,
-    permission: Permission,
-) -> Result<(), String> {
-    let auth_service = state
-        .auth_service
-        .as_ref()
-        .ok_or_else(|| "Auth service not available".to_string())?;
+fn public_native_mint_enabled() -> bool {
+    let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
+    let explicitly_enabled = std::env::var("BLEEP_ENABLE_PUBLIC_MINT")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
 
-    match auth_service.authorize(claims, permission).await {
-        AccessDecision::Granted => Ok(()),
-        AccessDecision::Denied(reason) => Err(reason),
-    }
+    is_dev_or_test_network(&network_mode)
+        && matches!(explicitly_enabled.as_str(), "1" | "true" | "yes" | "on")
+}
+
+fn is_dev_or_test_network(network_mode: &str) -> bool {
+    matches!(
+        network_mode.trim().to_ascii_lowercase().as_str(),
+        "dev" | "development" | "test" | "testnet" | "pretestnet"
+    )
 }
 
 // ── GET /rpc/economics/supply ─────────────────────────────────────────────────
@@ -1356,7 +1543,10 @@ fn oracle_update(
     warp::path!("rpc" / "oracle" / "update")
         .and(warp::post())
         .and(warp::body::json::<OracleUpdateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::ConfigureNode),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: OracleUpdateReq, _claims: SessionClaims, st: Arc<RpcState>| {
@@ -1455,7 +1645,10 @@ fn connect_submit_intent(
     warp::path!("rpc" / "connect" / "intent")
         .and(warp::post())
         .and(warp::body::json::<SubmitIntentReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::SubmitTransaction),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: SubmitIntentReq, _claims: SessionClaims, st: Arc<RpcState>| {
@@ -1690,6 +1883,20 @@ fn connect_relay_tx(
 /// Parse a hex string (with or without 0x prefix) into a 32-byte address.
 /// Pads or truncates to exactly 32 bytes (left-aligned, right zero-padded).
 fn hex_to_address(s: &str) -> Result<bleep_pat::Address, String> {
+    if let Some(encoded) = s.strip_prefix("BLEEP1") {
+        let bytes = hex::decode(encoded)
+            .map_err(|e| format!("Invalid BLEEP account address '{}': {}", s, e))?;
+        if bytes.len() != 20 {
+            return Err(format!(
+                "BLEEP account address must encode 20 bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let mut addr = [0u8; 32];
+        addr[..20].copy_from_slice(&bytes);
+        return Ok(addr);
+    }
+
     let s = s.trim_start_matches("0x");
     let bytes = hex::decode(s).map_err(|e| format!("Invalid address hex '{}': {}", s, e))?;
     let mut addr = [0u8; 32];
@@ -1704,7 +1911,7 @@ fn address_to_hex(addr: &bleep_pat::Address) -> String {
 
 // ── Request / response types ──────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatCreateReq {
     symbol: String,
     name: String,
@@ -1718,6 +1925,10 @@ struct PatCreateReq {
     burn_rate_bps: u16,
     #[serde(default)]
     freezable: bool,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 fn default_decimals() -> u8 {
     8
@@ -1726,27 +1937,39 @@ fn default_burn_rate() -> u16 {
     50
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatMintReq {
     symbol: String,
     caller: String, // must be token owner
     to: String,
     amount: String, // u128 decimal string
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatBurnReq {
     symbol: String,
     from: String,
     amount: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatTransferReq {
     symbol: String,
     from: String,
     to: String,
     amount: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 #[derive(Serialize)]
@@ -1788,6 +2011,69 @@ fn pat_not_initialised() -> warp::reply::WithStatus<warp::reply::Json> {
     )
 }
 
+#[derive(Serialize)]
+struct PatSignedPayload {
+    domain: &'static str,
+    endpoint: String,
+    chain_id: String,
+    nonce: u64,
+    request: serde_json::Value,
+}
+
+fn verify_pat_request<T: Serialize>(
+    endpoint: &str,
+    request: &T,
+    public_key: &str,
+    signature: &str,
+    chain_id: &str,
+    nonce: u64,
+    principal: &bleep_pat::Address,
+) -> Result<(), String> {
+    if chain_id != bleep_crypto::DEFAULT_CHAIN_ID {
+        return Err("PAT intent chain_id does not match this network".into());
+    }
+    if nonce == 0 {
+        return Err("PAT intent nonce must be non-zero".into());
+    }
+
+    let public_key = hex::decode(public_key.trim_start_matches("0x"))
+        .map_err(|e| format!("Invalid wallet public key: {e}"))?;
+    let signature = hex::decode(signature.trim_start_matches("0x"))
+        .map_err(|e| format!("Invalid wallet signature: {e}"))?;
+    let mut request =
+        serde_json::to_value(request).map_err(|e| format!("Could not encode PAT intent: {e}"))?;
+    request
+        .as_object_mut()
+        .ok_or_else(|| "PAT intent must serialize as an object".to_string())?
+        .remove("signature");
+
+    let payload = serde_json::to_vec(&PatSignedPayload {
+        domain: "BLEEP:PAT:INTENT:V1",
+        endpoint: endpoint.to_string(),
+        chain_id: chain_id.to_string(),
+        nonce,
+        request,
+    })
+    .map_err(|e| format!("Could not encode signed PAT payload: {e}"))?;
+    if !verify_tx_signature(&payload, &signature, &public_key) {
+        return Err("PAT intent signature verification failed".into());
+    }
+
+    let derived_address = hex_to_address(&bleep_crypto::derive_account_address(&public_key))?;
+    if &derived_address != principal {
+        return Err("PAT principal does not match the signing wallet".into());
+    }
+
+    Ok(())
+}
+
+fn pat_auth_error(error: String) -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&ErrResp { error }),
+        warp::http::StatusCode::UNAUTHORIZED,
+    )
+}
+
 // ── POST /rpc/pat/create ──────────────────────────────────────────────────────
 fn pat_create(
     state: Arc<RpcState>,
@@ -1795,7 +2081,10 @@ fn pat_create(
     warp::path!("rpc" / "pat" / "create")
         .and(warp::post())
         .and(warp::body::json::<PatCreateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::DeployContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatCreateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -1810,9 +2099,20 @@ fn pat_create(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/create",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let cap: u128 = req.supply_cap.parse().unwrap_or(0);
 
-                    let intent = bleep_pat::PATIntent::create_token(
+                    let mut intent = bleep_pat::PATIntent::create_token(
                         owner,
                         req.symbol.clone(),
                         req.name.clone(),
@@ -1821,9 +2121,10 @@ fn pat_create(
                         req.burn_rate_bps,
                         req.freezable,
                     );
+                    intent.nonce = req.nonce;
 
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -1856,7 +2157,10 @@ fn pat_mint(
     warp::path!("rpc" / "pat" / "mint")
         .and(warp::post())
         .and(warp::body::json::<PatMintReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::InvokeContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatMintReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -1871,6 +2175,17 @@ fn pat_mint(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/mint",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &caller,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let to = match hex_to_address(&req.to) {
                         Ok(a) => a,
                         Err(e) => {
@@ -1881,9 +2196,11 @@ fn pat_mint(
                         }
                     };
                     let amount: u128 = req.amount.parse().unwrap_or(0);
-                    let intent = bleep_pat::PATIntent::mint(caller, req.symbol.clone(), to, amount);
+                    let mut intent =
+                        bleep_pat::PATIntent::mint(caller, req.symbol.clone(), to, amount);
+                    intent.nonce = req.nonce;
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -1917,7 +2234,10 @@ fn pat_burn(
     warp::path!("rpc" / "pat" / "burn")
         .and(warp::post())
         .and(warp::body::json::<PatBurnReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::InvokeContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatBurnReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -1932,10 +2252,22 @@ fn pat_burn(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/burn",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &from,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let amount: u128 = req.amount.parse().unwrap_or(0);
-                    let intent = bleep_pat::PATIntent::burn(from, req.symbol.clone(), amount);
+                    let mut intent = bleep_pat::PATIntent::burn(from, req.symbol.clone(), amount);
+                    intent.nonce = req.nonce;
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -1969,7 +2301,10 @@ fn pat_transfer(
     warp::path!("rpc" / "pat" / "transfer")
         .and(warp::post())
         .and(warp::body::json::<PatTransferReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::SubmitTransaction),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatTransferReq, _claims: SessionClaims, st: Arc<RpcState>| {
@@ -1985,6 +2320,17 @@ fn pat_transfer(
                                 )
                             }
                         };
+                        if let Err(e) = verify_pat_request(
+                            "/rpc/pat/transfer",
+                            &req,
+                            &req.public_key,
+                            &req.signature,
+                            &req.chain_id,
+                            req.nonce,
+                            &from,
+                        ) {
+                            return pat_auth_error(e);
+                        }
                         let to = match hex_to_address(&req.to) {
                             Ok(a) => a,
                             Err(e) => {
@@ -2001,10 +2347,11 @@ fn pat_transfer(
                             .get_token(&req.symbol)
                             .map(|t| t.transfer_burn_amount(amount))
                             .unwrap_or(0);
-                        let intent =
+                        let mut intent =
                             bleep_pat::PATIntent::transfer(from, req.symbol.clone(), to, amount);
+                        intent.nonce = req.nonce;
                         let mut r = reg.lock();
-                        match r.execute(&intent) {
+                        match r.execute_signed(&intent) {
                             Ok(outcome) => {
                                 let received = outcome.return_value.unwrap_or(0);
                                 warp::reply::with_status(
@@ -2140,12 +2487,16 @@ fn pat_list(
 
 // ── POST /rpc/pat/approve ─────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatApproveReq {
     symbol: String,
     owner: String,
     spender: String,
     amount: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_approve(
@@ -2154,7 +2505,10 @@ fn pat_approve(
     warp::path!("rpc" / "pat" / "approve")
         .and(warp::post())
         .and(warp::body::json::<PatApproveReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::InvokeContract),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatApproveReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -2169,6 +2523,17 @@ fn pat_approve(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/approve",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let spender = match hex_to_address(&req.spender) {
                         Ok(a) => a,
                         Err(e) => {
@@ -2188,10 +2553,10 @@ fn pat_approve(
                         }),
                         15_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2218,11 +2583,15 @@ fn pat_approve(
 
 // ── POST /rpc/pat/freeze ──────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatFreezeReq {
     symbol: String,
     owner: String,
     frozen: bool,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_freeze(
@@ -2231,7 +2600,10 @@ fn pat_freeze(
     warp::path!("rpc" / "pat" / "freeze")
         .and(warp::post())
         .and(warp::body::json::<PatFreezeReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatFreezeReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry {
@@ -2246,6 +2618,17 @@ fn pat_freeze(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/freeze",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::Freeze(bleep_pat::FreezeIntent {
@@ -2254,10 +2637,10 @@ fn pat_freeze(
                         }),
                         10_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2282,11 +2665,15 @@ fn pat_freeze(
 
 // ── POST /rpc/pat/set-burn-rate ───────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatSetBurnRateReq {
     symbol: String,
     owner: String,
     new_rate_bps: u16,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_set_burn_rate(
@@ -2295,7 +2682,10 @@ fn pat_set_burn_rate(
     warp::path!("rpc" / "pat" / "set-burn-rate")
         .and(warp::post())
         .and(warp::body::json::<PatSetBurnRateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatSetBurnRateReq, _claims: SessionClaims, st: Arc<RpcState>| match &st
@@ -2312,6 +2702,17 @@ fn pat_set_burn_rate(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/set-burn-rate",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let intent = bleep_pat::PATIntent::new(
                         owner,
                         bleep_pat::PATIntentKind::UpdateBurnRate(bleep_pat::UpdateBurnRateIntent {
@@ -2320,10 +2721,10 @@ fn pat_set_burn_rate(
                         }),
                         10_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2348,11 +2749,15 @@ fn pat_set_burn_rate(
 
 // ── POST /rpc/pat/set-owner ───────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PatSetOwnerReq {
     symbol: String,
     owner: String,
     new_owner: String,
+    public_key: String,
+    signature: String,
+    chain_id: String,
+    nonce: u64,
 }
 
 fn pat_set_owner(
@@ -2361,7 +2766,10 @@ fn pat_set_owner(
     warp::path!("rpc" / "pat" / "set-owner")
         .and(warp::post())
         .and(warp::body::json::<PatSetOwnerReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
         .map(
             |req: PatSetOwnerReq, _claims: SessionClaims, st: Arc<RpcState>| match &st.pat_registry
@@ -2377,6 +2785,17 @@ fn pat_set_owner(
                             )
                         }
                     };
+                    if let Err(e) = verify_pat_request(
+                        "/rpc/pat/set-owner",
+                        &req,
+                        &req.public_key,
+                        &req.signature,
+                        &req.chain_id,
+                        req.nonce,
+                        &owner,
+                    ) {
+                        return pat_auth_error(e);
+                    }
                     let new_owner = match hex_to_address(&req.new_owner) {
                         Ok(a) => a,
                         Err(e) => {
@@ -2396,10 +2815,10 @@ fn pat_set_owner(
                         ),
                         20_000,
                         0,
-                        0,
+                        req.nonce,
                     );
                     let mut r = reg.lock();
-                    match r.execute(&intent) {
+                    match r.execute_signed(&intent) {
                         Ok(_) => warp::reply::with_status(
                             warp::reply::json(&PatOkResp {
                                 ok: true,
@@ -2453,12 +2872,12 @@ struct AuthRotateResp {
     message: String,
 }
 
-#[derive(Deserialize)]
-struct AuthRegisterOperatorReq {
-    operator_handle: String,
-    display_name: String,
-    password: String,
-    kyber_public_key_b64: String,
+#[derive(Serialize)]
+struct AuthRotatePrepareResp {
+    pending: bool,
+    new_secret_hex: String,
+    confirmation_challenge: String,
+    expires_at: String,
 }
 
 #[derive(Deserialize)]
@@ -2476,13 +2895,13 @@ struct AuthLoginReq {
 
 #[derive(Deserialize)]
 struct AuthLogoutReq {
-    token: String,
+    #[serde(rename = "token")]
+    _token: String,
 }
 
 #[derive(Deserialize)]
-struct AuthRotateReq {
-    /// New JWT secret (base64-encoded, must decode to ≥32 bytes).
-    new_secret_b64: String,
+struct AuthRotateConfirmReq {
+    confirmation_challenge: String,
 }
 
 #[derive(Serialize)]
@@ -2505,6 +2924,16 @@ fn faucet_drip(
         .and(warp::header::optional::<String>("x-forwarded-for"))
         .and(with_arc_state(state))
         .map(|address: String, xff: Option<String>, st: Arc<RpcState>| {
+            let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
+            if !is_dev_or_test_network(&network_mode) {
+                return Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "The faucet is available only on explicit dev/test networks.".into(),
+                    }),
+                    warp::http::StatusCode::FORBIDDEN,
+                )) as Box<dyn warp::Reply + Send>;
+            }
+
             let now = now_secs();
             let ip = xff
                 .and_then(|h| h.split(',').next().map(|s| s.trim().to_string()))
@@ -2619,29 +3048,20 @@ fn faucet_status(
         })
 }
 
-// ── POST /rpc/auth/rotate ─────────────────────────────────────────────────────
-//
-// Rotates the JWT signing secret. The new secret must be supplied as a
-// base64-encoded string decoding to ≥32 bytes of fresh CSPRNG material.
-// In production this endpoint must be protected by an admin RBAC role.
+// ── POST /rpc/auth/register/operator ──────────────────────────────────────────
 fn auth_register_operator(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "register" / "operator")
         .and(warp::post())
         .and(warp::body::json::<AuthRegisterOperatorReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
         .and_then(
-            |req: AuthRegisterOperatorReq, claims: SessionClaims, st: Arc<RpcState>| async move {
-                if let Err(reason) = authorize_rpc(&st, &claims, Permission::AdministerSystem).await
-                {
-                    return Ok::<_, warp::Rejection>(warp::reply::with_status(
-                        warp::reply::json(&ErrResp { error: reason }),
-                        warp::http::StatusCode::FORBIDDEN,
-                    ));
-                }
-
+            |req: AuthRegisterOperatorReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
                 let auth_service = match &st.auth_service {
                     Some(svc) => Arc::clone(svc),
                     None => {
@@ -2784,7 +3204,7 @@ fn auth_logout(
         .and(auth_filter(Arc::clone(&state)))
         .and(with_arc_state(state))
         .and_then(
-            |req: AuthLogoutReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+            |_req: AuthLogoutReq, claims: SessionClaims, st: Arc<RpcState>| async move {
                 let auth_service = match &st.auth_service {
                     Some(svc) => Arc::clone(svc),
                     None => {
@@ -2797,7 +3217,7 @@ fn auth_logout(
                     }
                 };
 
-                match auth_service.logout(&req.token).await {
+                match auth_service.sessions.revoke(&claims.jti) {
                     Ok(_) => Ok(warp::reply::with_status(
                         warp::reply::json(&JsonReply {
                             result: "logout succeeded".into(),
@@ -2820,19 +3240,12 @@ fn auth_rotate_secret(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "rotate")
         .and(warp::post())
-        .and(warp::body::json::<AuthRotateReq>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::RotateJwtSecret),
+        ))
         .and(with_arc_state(state))
-        .and_then(|req: AuthRotateReq, claims: SessionClaims, st: Arc<RpcState>| async move {
-            if let Err(reason) =
-                authorize_rpc(&st, &claims, Permission::RotateJwtSecret).await
-            {
-                return Ok::<_, warp::Rejection>(warp::reply::with_status(
-                    warp::reply::json(&ErrResp { error: reason }),
-                    warp::http::StatusCode::FORBIDDEN,
-                ));
-            }
-
+        .and_then(|_claims: SessionClaims, st: Arc<RpcState>| async move {
             let auth_service = match &st.auth_service {
                 Some(svc) => Arc::clone(svc),
                 None => {
@@ -2845,47 +3258,76 @@ fn auth_rotate_secret(
                 }
             };
 
-            let bytes = match base64::decode(&req.new_secret_b64) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrResp {
-                            error: format!("Invalid base64: {}", e),
-                        }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    ));
-                }
-            };
-
-            if bytes.len() < 32 {
-                return Ok(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: "Decoded secret is shorter than 32 bytes.".into(),
-                    }),
-                    warp::http::StatusCode::BAD_REQUEST,
-                ));
-            }
-
-            match auth_service.sessions.rotate_secret(bytes).await {
-                Ok(count) => Ok(warp::reply::with_status(
-                    warp::reply::json(&AuthRotateResp {
-                        ok: true,
-                        rotation_count: count,
-                        message: format!(
-                            "Secret rotated successfully (rotation #{}). All existing sessions will be invalidated on next validation.",
-                            count
-                        ),
+            match auth_service.sessions.prepare_secret_rotation().await {
+                Ok((secret, challenge, expires_at)) => Ok(warp::reply::with_status(
+                    warp::reply::json(&AuthRotatePrepareResp {
+                        pending: true,
+                        new_secret_hex: hex::encode(secret),
+                        confirmation_challenge: challenge,
+                        expires_at: expires_at.to_rfc3339(),
                     }),
                     warp::http::StatusCode::OK,
                 )),
                 Err(err) => Ok(warp::reply::with_status(
                     warp::reply::json(&ErrResp {
-                        error: format!("Rotation failed: {}", err),
+                        error: format!("Rotation preparation failed: {}", err),
                     }),
                     warp::http::StatusCode::BAD_REQUEST,
                 )),
             }
         })
+}
+
+fn auth_confirm_secret_rotation(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "auth" / "rotate" / "confirm")
+        .and(warp::post())
+        .and(warp::body::json::<AuthRotateConfirmReq>())
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::RotateJwtSecret),
+        ))
+        .and(with_arc_state(state))
+        .and_then(
+            |req: AuthRotateConfirmReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+                let auth_service = match &st.auth_service {
+                    Some(svc) => Arc::clone(svc),
+                    None => {
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Auth service not mounted in RPC state.".into(),
+                            }),
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
+                    }
+                };
+
+                match auth_service
+                    .sessions
+                    .confirm_secret_rotation(&req.confirmation_challenge)
+                    .await
+                {
+                    Ok(count) => Ok(warp::reply::with_status(
+                        warp::reply::json(&AuthRotateResp {
+                            ok: true,
+                            rotation_count: count,
+                            message: format!(
+                                "Secret rotation #{} confirmed; all existing sessions were invalidated.",
+                                count
+                            ),
+                        }),
+                        warp::http::StatusCode::OK,
+                    )),
+                    Err(err) => Ok(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Rotation confirmation failed: {}", err),
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    )),
+                }
+            },
+        )
 }
 
 // ── GET /rpc/auth/audit ───────────────────────────────────────────────────────
@@ -2899,7 +3341,10 @@ fn auth_audit_export(
     warp::path!("rpc" / "auth" / "audit")
         .and(warp::get())
         .and(warp::query::<std::collections::HashMap<String, String>>())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::ViewAuditLog),
+        ))
         .and(with_arc_state(state))
         .and_then(
             |params: std::collections::HashMap<String, String>,
@@ -2983,17 +3428,29 @@ fn auth_audit_export(
 
 // ── GET /explorer ─────────────────────────────────────────────────────────────
 //
-// Read-only block explorer web UI. Fetches live data from the node's own RPC
-// endpoints (/rpc/block/latest, /rpc/health, /rpc/validator/list).
-// Served as inline HTML + vanilla JS — no build step required.
+// Explorer UI and client assets are bundled into the node; no separate build
+// or third-party script host is required.
 fn explorer_ui() -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("explorer").and(warp::get()).map(|| {
         warp::http::Response::builder()
             .status(200)
             .header("content-type", "text/html; charset=utf-8")
-            .body(EXPLORER_HTML)
+            .header("x-content-type-options", "nosniff")
+            .header("x-frame-options", "DENY")
+            .header("referrer-policy", "no-referrer")
+            .header(
+                "content-security-policy",
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            )
+            .body(include_str!("explorer.html"))
             .unwrap()
     })
+}
+
+#[derive(Deserialize, Default)]
+struct ExplorerBlocksQuery {
+    limit: Option<usize>,
+    before: Option<u64>,
 }
 
 // ── GET /rpc/explorer/blocks ──────────────────────────────────────────────────
@@ -3002,25 +3459,251 @@ fn explorer_api_blocks(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "explorer" / "blocks")
         .and(warp::get())
+        .and(warp::query::<ExplorerBlocksQuery>())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            let blocks: Vec<serde_json::Value> = (0..10u64)
-                .filter_map(|i| height.checked_sub(i).map(|h| (i, h)))
-                .map(|(i, h)| {
-                    serde_json::json!({
-                        "height":    h,
-                        "hash":      format!("{:064x}", h ^ 0xb1ee_b1ee_b1ee_b1ee),
-                        "tx_count":  (h % 64) as u32,
-                        "epoch":     h / 100,
-                        "timestamp": now_secs().saturating_sub(i * 3),
-                        "proposer":  format!("validator-{}", h % 7),
-                        "size_bytes": 1024 + (h % 3072) as u32,
+        .map(
+            |query: ExplorerBlocksQuery, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable; explorer data cannot be served.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let latest_height = chain.height();
+                let limit = query.limit.unwrap_or(10).clamp(1, 100);
+                let blocks: Vec<_> = chain
+                    .chain
+                    .iter()
+                    .rev()
+                    .filter(|block| query.before.map_or(true, |before| block.index < before))
+                    .take(limit)
+                    .map(explorer_block_summary)
+                    .collect();
+                Box::new(warp::reply::json(
+                    &serde_json::json!({ "blocks": blocks, "latest_height": latest_height }),
+                ))
+            },
+        )
+}
+
+fn explorer_block_summary(block: &bleep_core::block::Block) -> serde_json::Value {
+    let proposer = block
+        .validator_signature
+        .get(..bleep_core::block::SPHINCS_PK_LEN)
+        .map(hex::encode);
+    serde_json::json!({
+        "height": block.index,
+        "hash": block.compute_hash(),
+        "previous_hash": block.previous_hash,
+        "tx_count": block.transactions.len(),
+        "epoch": block.epoch_id,
+        "timestamp": block.timestamp,
+        "proposer": proposer,
+        "merkle_root": block.merkle_root,
+        "consensus_mode": format!("{:?}", block.consensus_mode),
+        "protocol_version": block.protocol_version,
+        "shard_id": block.shard_id,
+    })
+}
+
+fn explorer_transaction(tx: &bleep_core::block::Transaction, height: u64) -> serde_json::Value {
+    serde_json::json!({
+        "hash": hex::encode(tx.tx_hash()),
+        "block_height": height,
+        "chain_id": tx.chain_id,
+        "sender": tx.sender,
+        "receiver": tx.receiver,
+        "amount": tx.amount.to_string(),
+        "timestamp": tx.timestamp,
+        "nonce": tx.nonce,
+    })
+}
+
+fn explorer_api_block(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "block" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |id: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let block = id
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|height| chain.get_block_by_index(height))
+                    .or_else(|| chain.get_block_by_hash(&id));
+                match block {
+                    Some(block) => {
+                        let transactions: Vec<_> = block
+                            .transactions
+                            .iter()
+                            .map(|tx| explorer_transaction(tx, block.index))
+                            .collect();
+                        Box::new(warp::reply::json(&serde_json::json!({
+                            "block": explorer_block_summary(&block),
+                            "transactions": transactions,
+                        })))
+                    }
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Block '{id}' not found."),
+                        }),
+                        warp::http::StatusCode::NOT_FOUND,
+                    )),
+                }
+            },
+        )
+}
+
+fn explorer_api_transactions(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "transactions")
+        .and(warp::get())
+        .and(warp::query::<HashMap<String, String>>())
+        .and(with_arc_state(state))
+        .map(
+            |query: HashMap<String, String>, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let address = query.get("address").map(String::as_str);
+                let limit = query
+                    .get("limit")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                let transactions: Vec<_> = chain
+                    .chain
+                    .iter()
+                    .rev()
+                    .flat_map(|block| {
+                        block.transactions.iter().filter_map(move |tx| {
+                            if address.is_some_and(|address| {
+                                tx.sender != address && tx.receiver != address
+                            }) {
+                                return None;
+                            }
+                            Some(explorer_transaction(tx, block.index))
+                        })
                     })
-                })
-                .collect();
-            warp::reply::json(&serde_json::json!({ "blocks": blocks, "latest_height": height }))
-        })
+                    .take(limit)
+                    .collect();
+                Box::new(warp::reply::json(
+                    &serde_json::json!({ "transactions": transactions }),
+                ))
+            },
+        )
+}
+
+fn explorer_api_transaction(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "transaction" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |hash: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let found = chain.chain.iter().rev().find_map(|block| {
+                    block
+                        .transactions
+                        .iter()
+                        .find(|tx| hex::encode(tx.tx_hash()) == hash)
+                        .map(|tx| explorer_transaction(tx, block.index))
+                });
+                match found {
+                    Some(transaction) => Box::new(warp::reply::json(&transaction)),
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Transaction '{hash}' not found."),
+                        }),
+                        warp::http::StatusCode::NOT_FOUND,
+                    )),
+                }
+            },
+        )
+}
+
+fn explorer_api_address(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "address" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |address: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(state_mgr) = &st.state_mgr else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Account state unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let state = state_mgr.lock();
+                Box::new(warp::reply::json(&serde_json::json!({
+                    "address": address,
+                    "balance": state.get_balance(&address).to_string(),
+                    "nonce": state.get_nonce(&address),
+                    "block_height": state.block_height(),
+                })))
+            },
+        )
 }
 
 // ── GET /rpc/explorer/validators ─────────────────────────────────────────────
@@ -3030,32 +3713,37 @@ fn explorer_api_validators(
     warp::path!("rpc" / "explorer" / "validators")
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            // Return the 7-validator testnet set
-            let regions = [
-                "us-east-1",
-                "eu-west-1",
-                "ap-southeast-1",
-                "us-west-2",
-                "sa-east-1",
-                "af-south-1",
-                "ap-northeast-1",
-            ];
-            let validators: Vec<serde_json::Value> = (0..7usize)
-                .map(|i| {
-                    let region = regions[i];
+        .map(|st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+            let Some(registry) = &st.validator_registry else {
+                return Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "ValidatorRegistry unavailable.".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                ));
+            };
+            let registry = registry.lock();
+            let validators: Vec<_> = registry
+                .get_active_validators()
+                .iter()
+                .map(|validator| {
                     serde_json::json!({
-                        "id":            format!("validator-{}", i),
-                        "stake":         10_000_000u64,
-                        "status":        "active",
-                        "blocks_signed": height.saturating_sub((i as u64) * 3),
-                        "uptime_pct":    99.5 - (i as f64) * 0.1,
-                        "region":        region,
+                        "id": validator.id,
+                        "stake": validator.stake.to_string(),
+                        "status": format!("{:?}", validator.state),
+                        "reputation": validator.reputation,
+                        "joined_epoch": validator.joined_epoch,
+                        "total_slashed": validator.total_slashed.to_string(),
+                        "can_participate": validator.can_participate(),
                     })
                 })
                 .collect();
-            warp::reply::json(&serde_json::json!({ "validators": validators, "count": 7 }))
+            let count = validators.len();
+            Box::new(warp::reply::json(&serde_json::json!({
+                "validators": validators,
+                "count": count,
+                "total_stake": registry.total_active_stake().to_string(),
+            })))
         })
 }
 
@@ -3140,27 +3828,163 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use warp::test::request;
 
+    fn sign_pat_request<T: Serialize>(
+        endpoint: &str,
+        request: &T,
+        chain_id: &str,
+        nonce: u64,
+        secret_key: &[u8],
+    ) -> Vec<u8> {
+        let mut request = serde_json::to_value(request).unwrap();
+        request.as_object_mut().unwrap().remove("signature");
+        let payload = serde_json::to_vec(&PatSignedPayload {
+            domain: "BLEEP:PAT:INTENT:V1",
+            endpoint: endpoint.to_string(),
+            chain_id: chain_id.to_string(),
+            nonce,
+            request,
+        })
+        .unwrap();
+        sign_tx_payload(&payload, secret_key).unwrap()
+    }
+
+    #[test]
+    fn pat_request_requires_wallet_signature_and_principal_binding() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let owner = hex_to_address(&bleep_crypto::derive_account_address(&public_key)).unwrap();
+        let mut request = PatTransferReq {
+            symbol: "USDB".into(),
+            from: address_to_hex(&owner),
+            to: "01".into(),
+            amount: "10".into(),
+            public_key: hex::encode(&public_key),
+            signature: String::new(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.into(),
+            nonce: 1,
+        };
+        request.signature = hex::encode(sign_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.chain_id,
+            request.nonce,
+            &secret_key,
+        ));
+
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &owner,
+        )
+        .is_ok());
+        assert!(verify_pat_request(
+            "/rpc/pat/burn",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &owner,
+        )
+        .is_err());
+
+        let mut forged_owner = owner;
+        forged_owner[0] ^= 1;
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &forged_owner,
+        )
+        .is_err());
+
+        request.amount = "11".into();
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            request.nonce,
+            &owner,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pat_request_rejects_wrong_chain_and_zero_nonce() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let owner = hex_to_address(&bleep_crypto::derive_account_address(&public_key)).unwrap();
+        let mut request = PatTransferReq {
+            symbol: "USDB".into(),
+            from: address_to_hex(&owner),
+            to: "01".into(),
+            amount: "10".into(),
+            public_key: hex::encode(&public_key),
+            signature: String::new(),
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.into(),
+            nonce: 1,
+        };
+        request.signature = hex::encode(sign_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.chain_id,
+            request.nonce,
+            &secret_key,
+        ));
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            "another-chain",
+            request.nonce,
+            &owner,
+        )
+        .is_err());
+        assert!(verify_pat_request(
+            "/rpc/pat/transfer",
+            &request,
+            &request.public_key,
+            &request.signature,
+            &request.chain_id,
+            0,
+            &owner,
+        )
+        .is_err());
+    }
+
     #[tokio::test]
     async fn rpc_tx_history_returns_pending_transactions() {
         let pool = TransactionPool::new(10);
 
         let (public_key, secret_key) = generate_tx_keypair();
-        let sender = bleep_crypto::tx_signer::derive_address(&public_key);
+        let sender = bleep_crypto::derive_account_address(&public_key);
         let receiver = "BLEEP1receiver".to_string();
         let amount = 123u64;
         let timestamp = 1_700_000_000u64;
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
+        let nonce = 0;
 
-        let payload = tx_payload(&sender, &receiver, amount, timestamp);
+        let payload = tx_payload(&chain_id, &sender, &receiver, amount, timestamp, nonce);
         let detached_sig = sign_tx_payload(&payload, &secret_key).expect("sign payload");
 
         let mut signature = public_key.clone();
         signature.extend_from_slice(&detached_sig);
 
         let tx = ZKTransaction {
+            chain_id,
             sender: sender.clone(),
             receiver: receiver.clone(),
             amount,
             timestamp,
+            nonce,
             signature,
         };
 
@@ -3185,9 +4009,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_tx_nonce_includes_contiguous_pending_transactions() {
+        let pool = TransactionPool::new(10);
+        let (public_key, secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&public_key);
+        let receiver = "BLEEP1nonce-recipient".to_string();
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
+        let timestamp = 1_700_000_000;
+        let nonce = 0;
+        let payload = tx_payload(&chain_id, &sender, &receiver, 1, timestamp, nonce);
+        let mut signature = public_key.clone();
+        signature.extend_from_slice(&sign_tx_payload(&payload, &secret_key).expect("sign payload"));
+        let tx = ZKTransaction {
+            chain_id,
+            sender: sender.clone(),
+            receiver,
+            amount: 1,
+            timestamp,
+            nonce,
+            signature,
+        };
+        assert!(pool.add_transaction(tx).await);
+
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_state_manager(state_mgr)
+                .with_transaction_pool(pool),
+        );
+        let response = request()
+            .method("GET")
+            .path(&format!("/rpc/tx/nonce/{sender}"))
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value =
+            serde_json::from_slice(response.body()).expect("valid nonce JSON");
+        assert_eq!(body["nonce"], 1);
+    }
+
+    #[tokio::test]
     async fn validator_stake_accepts_valid_sphincs_signature() {
         let (public_key, secret_key) = generate_tx_keypair();
-        let payload = tx_payload("validator-local-test", "validator", 1_000_000, 1_234_567);
+        let payload = tx_payload(
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            "validator-local-test",
+            "validator",
+            1_000_000,
+            1_234_567,
+            0,
+        );
         let proof = sign_tx_payload(&payload, &secret_key).expect("sign payload");
 
         assert!(!proof.is_empty());
@@ -3290,183 +4162,69 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(core_bal, RpcState::FAUCET_DRIP_AMOUNT);
     }
-}
 
-// ── Block explorer HTML ───────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn explorer_routes_read_live_canonical_chain_data() {
+        let address = "BLEEP1explorer-address".to_string();
+        let tx = bleep_core::block::Transaction {
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+            sender: address.clone(),
+            receiver: "BLEEP1recipient".to_string(),
+            amount: 123,
+            timestamp: 1_700_000_000,
+            nonce: 4,
+            signature: vec![],
+        };
+        let block = Block::new(1, vec![tx], "genesis-hash".to_string());
+        let expected_block_hash = block.compute_hash();
+        let expected_tx_hash = hex::encode(block.transactions[0].tx_hash());
 
-static EXPLORER_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>BLEEP Testnet Explorer</title>
-  <style>
-    :root {
-      --bg: #0d0f14; --card: #151820; --border: #252a35;
-      --accent: #00e5c3; --accent2: #7b5ea7; --text: #e2e8f0;
-      --muted: #6b7280; --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
+        let tx_pool = TransactionPool::new(10);
+        let mut chain = Blockchain::new(Block::genesis(), CoreBlockchainState::default(), tx_pool);
+        chain.chain.push_back(block);
+        let blockchain = Arc::new(RwLock::new(chain));
+        let state_manager = Arc::new(Mutex::new(StateManager::new()));
+        state_manager.lock().set_balance(&address, 123);
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_blockchain(Arc::clone(&blockchain))
+                .with_state_manager(state_manager),
+        );
+
+        let blocks = request()
+            .method("GET")
+            .path("/rpc/explorer/blocks?limit=2")
+            .reply(&routes)
+            .await;
+        assert_eq!(blocks.status(), 200);
+        let blocks: serde_json::Value = serde_json::from_slice(blocks.body()).unwrap();
+        assert_eq!(blocks["blocks"][0]["height"], 1);
+        assert_eq!(blocks["blocks"][0]["hash"], expected_block_hash);
+
+        let transaction = request()
+            .method("GET")
+            .path(&format!("/rpc/explorer/transaction/{expected_tx_hash}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(transaction.status(), 200);
+        let transaction: serde_json::Value = serde_json::from_slice(transaction.body()).unwrap();
+        assert_eq!(transaction["sender"], address);
+        assert_eq!(transaction["amount"], "123");
+
+        let account = request()
+            .method("GET")
+            .path(&format!("/rpc/explorer/address/{address}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(account.status(), 200);
+        let account: serde_json::Value = serde_json::from_slice(account.body()).unwrap();
+        assert_eq!(account["balance"], "123");
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; }
-    header {
-      display: flex; align-items: center; gap: 14px;
-      padding: 18px 32px; border-bottom: 1px solid var(--border);
-      background: linear-gradient(90deg, #0d0f14 0%, #12151f 100%);
-    }
-    .logo { font-size: 1.5rem; font-weight: 700; color: var(--accent); letter-spacing: 2px; }
-    .tag { font-size: 0.7rem; background: var(--accent2); color: #fff; padding: 2px 8px; border-radius: 10px; }
-    .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); margin-left: auto; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
-    main { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
-    .stat-card {
-      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-      padding: 20px; transition: border-color .2s;
-    }
-    .stat-card:hover { border-color: var(--accent); }
-    .stat-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-    .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
-    .stat-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
-    section { margin-bottom: 36px; }
-    h2 { font-size: 1rem; color: var(--text); margin-bottom: 14px; letter-spacing: 1px; text-transform: uppercase; }
-    table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
-    th { text-align: left; font-size: 0.72rem; color: var(--muted); text-transform: uppercase; padding: 12px 16px; border-bottom: 1px solid var(--border); }
-    td { padding: 11px 16px; font-size: 0.82rem; border-bottom: 1px solid var(--border); }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: rgba(0,229,195,0.04); }
-    .hash { color: var(--accent); font-size: 0.75rem; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 0.7rem; }
-    .badge-green { background: rgba(16,185,129,.15); color: var(--green); }
-    .badge-yellow { background: rgba(245,158,11,.15); color: var(--yellow); }
-    .refresh-btn {
-      float: right; background: transparent; border: 1px solid var(--accent);
-      color: var(--accent); padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 0.78rem;
-    }
-    .refresh-btn:hover { background: var(--accent); color: #000; }
-    footer { text-align: center; color: var(--muted); font-size: 0.72rem; padding: 24px; border-top: 1px solid var(--border); }
-    .err { color: var(--red); font-size: 0.8rem; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-<header>
-  <span class="logo">BLEEP</span>
-  <span class="tag">testnet-1</span>
-  <span style="color:var(--muted);font-size:.8rem">Block Explorer</span>
-  <span class="status-dot" id="statusDot" title="Chain live"></span>
-</header>
-<main>
-  <div class="stats-grid" id="statsGrid">
-    <div class="stat-card"><div class="stat-label">Chain Height</div><div class="stat-value" id="sHeight"><span class="spinner"></span></div><div class="stat-sub">Latest block</div></div>
-    <div class="stat-card"><div class="stat-label">Connected Peers</div><div class="stat-value" id="sPeers">—</div><div class="stat-sub">P2P network</div></div>
-    <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value" id="sUptime">—</div><div class="stat-sub">Node runtime</div></div>
-    <div class="stat-card"><div class="stat-label">Validators</div><div class="stat-value" id="sVals">7</div><div class="stat-sub">Active testnet set</div></div>
-    <div class="stat-card"><div class="stat-label">Faucet Balance</div><div class="stat-value" id="sFaucet">—</div><div class="stat-sub">BLEEP remaining</div></div>
-    <div class="stat-card"><div class="stat-label">Epoch</div><div class="stat-value" id="sEpoch">—</div><div class="stat-sub">100 blocks/epoch</div></div>
-  </div>
-
-  <section>
-    <h2>Latest Blocks <button class="refresh-btn" onclick="loadBlocks()">↻ Refresh</button></h2>
-    <table>
-      <thead><tr><th>Height</th><th>Hash</th><th>Proposer</th><th>Txs</th><th>Size</th><th>Epoch</th><th>Age</th></tr></thead>
-      <tbody id="blocksBody"><tr><td colspan="7" style="text-align:center;color:var(--muted)"><span class="spinner"></span> Loading…</td></tr></tbody>
-    </table>
-  </section>
-
-  <section>
-    <h2>Validator Set <button class="refresh-btn" onclick="loadValidators()">↻ Refresh</button></h2>
-    <table>
-      <thead><tr><th>ID</th><th>Region</th><th>Stake</th><th>Blocks Signed</th><th>Uptime</th><th>Status</th></tr></thead>
-      <tbody id="valsBody"><tr><td colspan="6" style="text-align:center;color:var(--muted)"><span class="spinner"></span> Loading…</td></tr></tbody>
-    </table>
-  </section>
-</main>
-<footer>BLEEP Testnet Explorer &mdash; Sprint 8 &mdash; Data refreshes every 6 s &mdash; All times UTC</footer>
-
-<script>
-const BASE = '';
-const BLOCK_TIME = 3000;
-let lastBlock = 0;
-
-async function loadHealth() {
-  try {
-    const r = await fetch(BASE + '/rpc/health');
-    const d = await r.json();
-    document.getElementById('sHeight').textContent = d.height.toLocaleString();
-    document.getElementById('sPeers').textContent  = d.peers;
-    const u = d.uptime_secs;
-    const h = Math.floor(u/3600), m = Math.floor((u%3600)/60), s = u%60;
-    document.getElementById('sUptime').textContent = h + 'h ' + m + 'm';
-    document.getElementById('sEpoch').textContent  = Math.floor(d.height / 100).toLocaleString();
-    lastBlock = d.height;
-    document.getElementById('statusDot').title = 'Live — height ' + d.height;
-  } catch(e) {
-    document.getElementById('sHeight').innerHTML = '<span class="err">RPC err</span>';
-  }
 }
-
-async function loadFaucet() {
-  try {
-    const r = await fetch(BASE + '/faucet/status');
-    const d = await r.json();
-    document.getElementById('sFaucet').textContent = d.balance_bleep.toLocaleString() + ' BLEEP';
-  } catch(e) {}
-}
-
-async function loadBlocks() {
-  try {
-    const r = await fetch(BASE + '/rpc/explorer/blocks');
-    const d = await r.json();
-    const now = Math.floor(Date.now()/1000);
-    const rows = d.blocks.map(b => {
-      const age = now - b.timestamp;
-      const ageStr = age < 60 ? age + 's' : Math.floor(age/60) + 'm ' + (age%60) + 's';
-      return `<tr>
-        <td><strong>${b.height.toLocaleString()}</strong></td>
-        <td class="hash">${b.hash.slice(0,16)}…</td>
-        <td>${b.proposer}</td>
-        <td>${b.tx_count}</td>
-        <td>${(b.size_bytes/1024).toFixed(1)} KB</td>
-        <td>${b.epoch}</td>
-        <td>${ageStr} ago</td>
-      </tr>`;
-    }).join('');
-    document.getElementById('blocksBody').innerHTML = rows || '<tr><td colspan="7" style="color:var(--muted)">No blocks yet</td></tr>';
-  } catch(e) {
-    document.getElementById('blocksBody').innerHTML = '<tr><td colspan="7" class="err">Failed to load blocks</td></tr>';
-  }
-}
-
-async function loadValidators() {
-  try {
-    const r = await fetch(BASE + '/rpc/explorer/validators');
-    const d = await r.json();
-    const rows = d.validators.map(v => `<tr>
-      <td><strong>${v.id}</strong></td>
-      <td>${v.region}</td>
-      <td>${v.stake.toLocaleString()} BLEEP</td>
-      <td>${v.blocks_signed.toLocaleString()}</td>
-      <td>${v.uptime_pct.toFixed(1)}%</td>
-      <td><span class="badge badge-green">${v.status}</span></td>
-    </tr>`).join('');
-    document.getElementById('valsBody').innerHTML = rows;
-    document.getElementById('sVals').textContent  = d.count;
-  } catch(e) {
-    document.getElementById('valsBody').innerHTML = '<tr><td colspan="6" class="err">Failed to load validators</td></tr>';
-  }
-}
-
-function refresh() { loadHealth(); loadFaucet(); loadBlocks(); loadValidators(); }
-refresh();
-setInterval(refresh, 6000);
-</script>
-</body>
-</html>
-"#;
 
 // ── base64 shim (use the base64 crate already in scope via bleep-crypto) ──────
 mod base64 {
+    #[cfg(test)]
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
         // Base64 standard alphabet decoder (no padding required)
         use std::collections::HashMap;
@@ -3517,6 +4275,84 @@ mod base64 {
 #[cfg(test)]
 mod tests_sprint8 {
     use super::*;
+
+    #[tokio::test]
+    async fn unbound_operator_cannot_unstake_another_validators_identity() {
+        let secret: Vec<u8> = (0..32).collect();
+        let auth = Arc::new(AuthService::new(secret).unwrap());
+        auth.rbac
+            .assign_role("operator-session", bleep_auth::Role::NodeOperator);
+        let token = auth
+            .sessions
+            .issue(
+                "operator-session",
+                &[bleep_auth::Role::NodeOperator],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+
+        let mut validators = ValidatorRegistry::new();
+        validators
+            .register_validator(
+                ValidatorIdentity::new(
+                    "victim-validator".into(),
+                    vec![0; 1568],
+                    "signing-key".into(),
+                    1_000,
+                    0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        validators.activate_validator("victim-validator").unwrap();
+
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_auth_service(auth)
+                .with_validator_registry(Arc::new(Mutex::new(validators))),
+        );
+        let response = warp::test::request()
+            .method("POST")
+            .path("/rpc/validator/unstake")
+            .header("authorization", format!("Bearer {}", token.token))
+            .json(&serde_json::json!({"validator_id": "victim-validator"}))
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), warp::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dapp_session_cannot_rotate_jwt() {
+        let secret: Vec<u8> = (0..32).collect();
+        let auth = Arc::new(AuthService::new(secret).unwrap());
+        let (_, token) = auth
+            .register_dapp(
+                "security-test-developer".into(),
+                "Security Test".into(),
+                "test-password".into(),
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(RpcState::new().with_auth_service(auth));
+        let filter = auth_filter_with_permission(state, Some(Permission::RotateJwtSecret));
+
+        let response = warp::test::request()
+            .header("authorization", format!("Bearer {}", token.token))
+            .filter(&filter)
+            .await;
+        assert!(response.is_err());
+    }
+
+    #[test]
+    fn production_and_unknown_networks_never_enable_dev_gates() {
+        assert!(!is_dev_or_test_network("mainnet"));
+        assert!(!is_dev_or_test_network("production"));
+        assert!(!is_dev_or_test_network(""));
+        assert!(is_dev_or_test_network("testnet"));
+        assert!(is_dev_or_test_network("DEV"));
+    }
 
     #[test]
     fn faucet_initial_balance() {
@@ -3702,7 +4538,10 @@ pub fn governance_propose_route(
         .and(warp::post())
         .and(warp::body::content_length_limit(65_536))
         .and(warp::body::json())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::VoteOnGovernance),
+        ))
         .map(move |body: serde_json::Value, _claims: SessionClaims| {
             let title = body
                 .get("title")
@@ -3746,7 +4585,10 @@ pub fn governance_vote_route(
         .and(warp::post())
         .and(warp::body::content_length_limit(65_536))
         .and(warp::body::json())
-        .and(auth_filter(Arc::clone(&state)))
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::VoteOnGovernance),
+        ))
         .map(move |body: serde_json::Value, _claims: SessionClaims| {
             let proposal_id = body
                 .get("proposal_id")

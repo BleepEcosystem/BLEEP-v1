@@ -17,10 +17,12 @@
 //!                    │  (EVM / WASM / ZK)         │
 //!                    │  StateManager (RocksDB)    │
 //!                    │  Sparse Merkle Trie root   │
-//!                    │  sign_block (correct 32b)  │
-//!                    │  Blockchain::add_block     │
-//!                    │  P2P gossip broadcast      │
+//!                    │  SPHINCS+ block signing   │
+//!                    │  PBFT prevote/precommit   │
+//!                    │  Blockchain commit        │
 //!                    └───────────────────────────┘
+//!                            │ PBFT quorum
+//!                    P2P block gossip
 //!                            │ FinalizedBlock
 //!                    Scheduler (20 tasks)
 //!                    RPC server (warp :8545)
@@ -59,7 +61,7 @@ use bleep_state::state_manager::StateManager;
 // ── Consensus ─────────────────────────────────────────────────────────────────
 use bleep_consensus::slashing_engine::SlashingEngine;
 use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
-use bleep_consensus::{run_consensus_engine, BlockProducer};
+use bleep_consensus::BlockProducer;
 use bleep_sig_availability::{
     AvailabilityConfig, MempoolSigCache, SigAvailabilityGossipHandler, SigAvailabilityLayer,
     ValidatorRegistry as SalValidatorRegistry,
@@ -83,6 +85,10 @@ use bleep_pat::launch_asset_token_logic;
 use bleep_wallet_core::init_wallet_services;
 
 // ── Economics ─────────────────────────────────────────────────────────────────
+use bleep_economics::distribution::{
+    INITIAL_CIRCULATING_SUPPLY, LAUNCH_COMMUNITY_UNLOCK, LAUNCH_ECOSYSTEM_UNLOCK,
+    LAUNCH_FOUNDATION_UNLOCK, LAUNCH_VALIDATOR_UNLOCK,
+};
 use bleep_economics::oracle_bridge::{OracleSource, PriceUpdate};
 use bleep_economics::{BleepEconomicsRuntime, EpochInput};
 
@@ -116,18 +122,24 @@ struct TxPoolSigCache {
     tx_pool: Arc<TransactionPool>,
 }
 
+impl TxPoolSigCache {
+    fn transactions(&self) -> Vec<bleep_core::transaction::ZKTransaction> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.tx_pool.get_transactions())
+        })
+    }
+}
+
 impl MempoolSigCache for TxPoolSigCache {
     fn get_sig(&self, sig_hash: &[u8; 32]) -> Option<Vec<u8>> {
-        let txs = tokio::runtime::Handle::current().block_on(self.tx_pool.get_transactions());
-        txs.into_iter().find_map(|tx| {
+        self.transactions().into_iter().find_map(|tx| {
             let candidate = bleep_sig_availability::hash_sig(&tx.signature);
             (candidate == *sig_hash).then_some(tx.signature)
         })
     }
 
     fn get_signer_pk(&self, sig_hash: &[u8; 32]) -> Option<Vec<u8>> {
-        let txs = tokio::runtime::Handle::current().block_on(self.tx_pool.get_transactions());
-        txs.into_iter().find_map(|tx| {
+        self.transactions().into_iter().find_map(|tx| {
             let candidate = bleep_sig_availability::hash_sig(&tx.signature);
             if candidate == *sig_hash {
                 Some(tx.signature[..64].to_vec())
@@ -138,14 +150,38 @@ impl MempoolSigCache for TxPoolSigCache {
     }
 }
 
+#[cfg(test)]
+mod tx_pool_sig_cache_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_can_be_called_from_runtime_worker() {
+        let cache = Arc::new(TxPoolSigCache {
+            tx_pool: TransactionPool::new(1),
+        });
+        let result = tokio::spawn(async move { cache.get_sig(&[0; 32]) })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
+    // Bridge the `log` facade used by BLEEP diagnostics to the environment logger
+    // before installing the tracing subscriber. This ensures block validation and
+    // chain-state failures are not silently dropped when no logger backend exists.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .try_init();
+
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
 
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║  BLEEP Blockchain Node — Protocol Version 5 · Sprint 9       ║");
@@ -227,6 +263,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 2: State + genesis ───────────────────────────────────────────────
     info!("⛓  [2/16] Initialising genesis block and persistent state…");
 
+    let chain_id = std::env::var("BLEEP_CHAIN_ID")
+        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
     let state_dir =
         std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
 
@@ -236,48 +274,82 @@ async fn run() -> Result<(), Box<dyn Error>> {
             s
         }
         Err(e) => {
-            warn!("  ⚠️  StateManager open failed ({}), using temp dir", e);
-            StateManager::new()
+            return Err(format!(
+                "Persistent StateManager at {} could not be opened: {}",
+                state_dir, e
+            )
+            .into());
         }
     };
 
-    // Mint genesis allocations only at height 0 (first start).
-    // mint() now returns Result — cap violations are logged and abort startup.
+    // Mint the canonical launch unlocks only into a fresh genesis state.
+    // Existing height-0 state with a different supply must be migrated or reset,
+    // never silently topped up with a second allocation.
     if state.block_height() == 0 {
-        state
-            .mint("bleep:genesis:foundation", 500_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint foundation failed: {}", e);
-                std::process::exit(1);
-            });
-        state
-            .mint("bleep:genesis:rewards", 100_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint rewards failed: {}", e);
-                std::process::exit(1);
-            });
-        state
-            .mint("bleep:genesis:validators", 50_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint validators failed: {}", e);
-                std::process::exit(1);
-            });
-        info!("  ✅ Genesis allocations minted (650T µBLEEP).");
+        let existing_supply = state.total_supply();
+        if existing_supply == 0 {
+            for (address, amount) in [
+                ("bleep:genesis:foundation", LAUNCH_FOUNDATION_UNLOCK),
+                ("bleep:genesis:rewards", LAUNCH_VALIDATOR_UNLOCK),
+                ("bleep:genesis:community", LAUNCH_COMMUNITY_UNLOCK),
+                ("bleep:genesis:ecosystem", LAUNCH_ECOSYSTEM_UNLOCK),
+            ] {
+                state.mint(address, amount).unwrap_or_else(|e| {
+                    error!("Genesis mint for {address} failed: {e}");
+                    std::process::exit(1);
+                });
+            }
+        } else if existing_supply != INITIAL_CIRCULATING_SUPPLY {
+            error!(
+                "Height-0 state has {} microBLP; expected 0 (fresh genesis) or {} (already allocated). Reset or explicitly migrate this state before starting the updated testnet.",
+                existing_supply, INITIAL_CIRCULATING_SUPPLY
+            );
+            std::process::exit(1);
+        }
+        if state.total_supply() != INITIAL_CIRCULATING_SUPPLY {
+            error!(
+                "Genesis supply invariant failed: expected {} microBLP, got {}.",
+                INITIAL_CIRCULATING_SUPPLY,
+                state.total_supply()
+            );
+            std::process::exit(1);
+        }
+        info!(
+            "  ✅ Genesis allocations verified ({} BLP circulating; 200,000,000 BLP hard cap).",
+            INITIAL_CIRCULATING_SUPPLY / 100_000_000
+        );
     }
 
     // Rebuild the Sparse Merkle Trie from the persisted DB state
-    if let Err(e) = state.rebuild_trie_from_db() {
-        warn!("  ⚠️  Trie rebuild: {}", e);
+    state
+        .rebuild_trie_from_db()
+        .map_err(|e| format!("Persisted state trie rebuild failed: {e}"))?;
+
+    let genesis = Block::genesis();
+    let genesis_hash = genesis.compute_hash();
+    let canonical_blocks = state
+        .load_canonical_blocks(&chain_id, &genesis_hash, |block: &Block| {
+            block.compute_hash()
+        })
+        .map_err(|e| format!("Canonical chain recovery failed: {e}"))?;
+    if canonical_blocks
+        .last()
+        .map(|block| block.index)
+        .unwrap_or(0)
+        != state.block_height()
+    {
+        return Err(format!(
+            "Persisted account height {} does not match recovered canonical chain",
+            state.block_height()
+        )
+        .into());
     }
 
     let state = Arc::new(Mutex::new(state));
 
     // Transaction pools
-    let tx_pool = TransactionPool::new(10_000);
+    let tx_pool = TransactionPool::new_with_chain_id(10_000, chain_id.clone());
     let mempool = Mempool::new();
-
-    // Genesis block (unsigned — trust anchor)
-    let genesis = Block::new(0, vec![], "0".to_string());
 
     let blockchain = {
         let mut core_state = CoreBlockchainState::default();
@@ -292,7 +364,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 ),
             }
         }
-        Blockchain::new(genesis, core_state, tx_pool.clone())
+        let mut blockchain = Blockchain::new(genesis, core_state, tx_pool.clone());
+        blockchain
+            .restore_blocks(canonical_blocks)
+            .map_err(|e| format!("Canonical block validation failed: {e}"))?;
+        blockchain
     };
     let blockchain = Arc::new(RwLock::new(blockchain));
 
@@ -342,9 +418,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
             0,             // genesis epoch
         );
         match genesis_validator {
-            Ok(mut v) => {
-                let _ = v.activate();
-                let _ = reg.register_validator(v);
+            Ok(v) => {
+                reg.register_validator(v)
+                    .and_then(|_| reg.activate_validator(&validator_id))
+                    .map_err(|e| format!("Genesis validator activation failed: {e}"))?;
                 info!(
                     "  ✅ Genesis validator registered: id={} (Kyber-1024 + SPHINCS+ PKs wired)",
                     validator_id
@@ -369,6 +446,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("💰 [9/16] Initialising BleepEconomicsRuntime (tokenomics + fee market + oracle)…");
     let economics_runtime = {
         let mut rt = BleepEconomicsRuntime::genesis();
+        let current_supply = state.lock().total_supply();
+        rt.initialize_genesis_supply(current_supply)
+            .map_err(|e| format!("Economics supply initialization failed: {e}"))?;
+        info!(
+            "  ✅ Economics supply initialized from persisted account balances ({} microBLP).",
+            current_supply
+        );
 
         // Register genesis validator with economics engine
         let genesis_val_id = hex::encode(&sphincs_pk[..8]);
@@ -482,6 +566,30 @@ async fn run() -> Result<(), Box<dyn Error>> {
         p2p_node.peer_count()
     );
 
+    let local_validator_id = hex::encode(&sphincs_pk[..8]);
+    let pbft_validator_keys = validator_registry
+        .lock()
+        .get_active_validators()
+        .into_iter()
+        .filter(|validator| validator.can_participate())
+        .map(|validator| {
+            hex::decode(&validator.signing_key_id)
+                .map(|public_key| (validator.id.clone(), public_key))
+                .map_err(|e| format!("Invalid active validator signing key {}: {e}", validator.id))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let live_pbft_finality = Arc::new(bleep_consensus::LivePbftFinality::new(
+        local_validator_id.clone(),
+        pbft_validator_keys,
+        sphincs_sk.clone(),
+        sphincs_pk.clone(),
+        Some(Arc::clone(&p2p_node)),
+    )?);
+    info!(
+        "  ✅ PBFT vote transport active for {} validator(s)",
+        live_pbft_finality.validator_count()
+    );
+
     let (sal_handler, sal_rx) = SigAvailabilityGossipHandler::new();
     let sal_bridge = Arc::new(SigAvailabilityBridge::new(
         sal_handler.clone(),
@@ -515,9 +623,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 11: Scheduler + BlockProducer ───────────────────────────────────
     info!("⚖  [14/16] Wiring BlockProducer and task Scheduler…");
 
-    // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx
-    // GossipBridge subscribes to block_tx and handles P2P broadcast externally
-    let (block_producer, block_rx) = BlockProducer::new_with_sig_availability(
+    // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx.
+    // It gossips complete serialized blocks directly through the P2P node.
+    let (mut block_producer, block_rx) = BlockProducer::new_with_sig_availability(
         hex::encode(&sphincs_pk[..8]), // validator_id (first 8 bytes of SPHINCS+ PK)
         1_000_000u64,                  // stake weight
         Arc::clone(&tx_pool),
@@ -528,10 +636,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(Arc::clone(&p2p_node)), // direct gossip broadcast
         Some(sal_bridge.clone()),
     );
+    block_producer.set_chain_id(chain_id.clone());
+    block_producer.set_validator_registry(Arc::clone(&validator_registry));
+    block_producer.set_pbft_finality(Arc::clone(&live_pbft_finality));
+    let canonical_commit_lock = Arc::new(tokio::sync::Mutex::new(()));
+    block_producer.set_canonical_commit_lock(Arc::clone(&canonical_commit_lock));
     let block_producer = Arc::new(block_producer);
 
-    // Subscribe a second receiver for GossipBridge BEFORE the producer starts
-    let block_rx_gossip = block_producer.subscribe();
     let mut block_rx_sched = block_rx;
 
     // Build scheduler
@@ -540,6 +651,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (interval_handle, block_sched_handle) = scheduler.start();
 
     // Build live AuthService for the RPC auth subsystem.
+    let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").unwrap_or_else(|_| {
+        error!("BLEEP_JWT_SECRET must be explicitly configured; refusing to start.");
+        std::process::exit(1);
+    });
+    let jwt_secret = general_purpose::STANDARD
+        .decode(&jwt_secret_b64)
+        .unwrap_or_else(|e| {
+            error!(
+                "BLEEP_JWT_SECRET is not valid base64: {}; refusing to start.",
+                e
+            );
+            std::process::exit(1);
+        });
+    if jwt_secret.len() < 32 {
+        error!("BLEEP_JWT_SECRET must decode to at least 32 bytes; refusing to start.");
+        std::process::exit(1);
+    }
     let auth_service = Arc::new(AuthService::new(jwt_secret).unwrap_or_else(|e| {
         error!("Failed to initialize AuthService: {}", e);
         std::process::exit(1);
@@ -556,6 +684,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_connect_orchestrator(Arc::clone(&connect_orchestrator))
         .with_pat_registry(Arc::clone(&pat_registry))
         .with_transaction_pool(Arc::clone(&tx_pool))
+        .with_p2p_node(Arc::clone(&p2p_node))
         .with_blockchain(Arc::clone(&blockchain))
         .with_auth_service(Arc::clone(&auth_service));
 
@@ -651,28 +780,185 @@ async fn run() -> Result<(), Box<dyn Error>> {
         BlockProducer::run_arc(producer_for_task).await;
     });
 
-    // GossipBridge: fan out FinalizedBlock events to connected P2P peers
-    let gossip_bridge = bleep_consensus::GossipBridge::new(Arc::clone(&p2p_node));
-    let gossip_handle = tokio::spawn(async move {
-        gossip_bridge.run(block_rx_gossip).await;
-    });
-
     // ── Inbound block handler ────────────────────────────────────────────────
     // Listens for gossip blocks from peers, validates them, and inserts
     // valid blocks into the local chain (sync-mode / light node path).
     let inbound_blockchain = Arc::clone(&blockchain);
     let inbound_p2p_node = Arc::clone(&p2p_node);
+    let inbound_tx_pool = Arc::clone(&tx_pool);
     let inbound_state = Arc::clone(&state);
-    let inbound_pk = sphincs_pk.clone(); // SPHINCS+ PK used as fallback block verifier key
+    let inbound_validators = Arc::clone(&validator_registry);
+    let inbound_chain_id = chain_id.clone();
+    let inbound_genesis_hash = genesis_hash.clone();
+    let inbound_commit_lock = Arc::clone(&canonical_commit_lock);
+    let inbound_pbft_finality = Arc::clone(&live_pbft_finality);
 
     let inbound_handle = tokio::spawn(async move {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
         loop {
             match inbound_p2p_node.recv_with_payload().await {
-                Some((_peer_id, mut msg, plaintext)) => {
+                Some((peer_id, mut msg, plaintext)) => {
                     msg.payload = plaintext;
+                    if msg.message_type == MessageType::Transaction {
+                        let transaction: bleep_core::transaction::ZKTransaction =
+                            match serde_json::from_slice(&msg.payload) {
+                                Ok(transaction) => transaction,
+                                Err(error) => {
+                                    warn!(
+                                        "[InboundBlockHandler] Bad transaction gossip payload: {}",
+                                        error
+                                    );
+                                    continue;
+                                }
+                            };
+                        if transaction.chain_id != inbound_chain_id {
+                            warn!(
+                                "[InboundBlockHandler] Rejecting transaction for chain {}",
+                                transaction.chain_id
+                            );
+                            continue;
+                        }
+                        if inbound_tx_pool.add_transaction(transaction).await {
+                            inbound_p2p_node.gossip.enqueue(msg, Some(peer_id));
+                        }
+                        continue;
+                    }
+
                     if msg.message_type == MessageType::SigAvailability {
                         sal_bridge.handle_inbound_message(msg);
+                        continue;
+                    }
+
+                    if matches!(
+                        &msg.message_type,
+                        MessageType::Custom(name) if name == bleep_consensus::PBFT_MESSAGE_TYPE
+                    ) {
+                        let committee_keys = inbound_validators
+                            .lock()
+                            .get_active_validators()
+                            .into_iter()
+                            .filter(|validator| validator.can_participate())
+                            .map(|validator| {
+                                hex::decode(&validator.signing_key_id)
+                                    .map(|key| (validator.id.clone(), key))
+                            })
+                            .collect::<Result<Vec<_>, _>>();
+                        let committee_keys = match committee_keys {
+                            Ok(keys) => keys,
+                            Err(e) => {
+                                warn!("[InboundBlockHandler] Invalid PBFT committee key: {}", e);
+                                continue;
+                            }
+                        };
+                        if !inbound_pbft_finality.matches_committee(&committee_keys) {
+                            warn!(
+                                "[InboundBlockHandler] Ignoring PBFT message for a stale committee"
+                            );
+                            continue;
+                        }
+
+                        let message: bleep_consensus::PbftMessage =
+                            match serde_json::from_slice(&msg.payload) {
+                                Ok(message) => message,
+                                Err(e) => {
+                                    warn!("[InboundBlockHandler] Bad PBFT payload: {}", e);
+                                    continue;
+                                }
+                            };
+
+                        if let bleep_consensus::PbftMessage::Proposal { block } = &message {
+                            let Some(signer_pk) = block
+                                .validator_signature
+                                .get(..bleep_core::block::SPHINCS_PK_LEN)
+                            else {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} has no proposer key",
+                                    block.index
+                                );
+                                continue;
+                            };
+                            let signer_key_id = hex::encode(signer_pk);
+                            let (proposer_id, validator_stakes) = {
+                                let registry = inbound_validators.lock();
+                                let active: Vec<_> = registry
+                                    .get_active_validators()
+                                    .into_iter()
+                                    .filter(|validator| validator.can_participate())
+                                    .collect();
+                                let proposer_id = active
+                                    .iter()
+                                    .find(|validator| {
+                                        validator
+                                            .signing_key_id
+                                            .eq_ignore_ascii_case(&signer_key_id)
+                                    })
+                                    .map(|validator| validator.id.clone());
+                                let stakes = active
+                                    .iter()
+                                    .map(|validator| bleep_consensus::pos_engine::ValidatorStake {
+                                        id: validator.id.clone(),
+                                        stake: u64::try_from(validator.effective_stake())
+                                            .unwrap_or(u64::MAX),
+                                        active: true,
+                                        slashing_count: validator
+                                            .double_sign_count
+                                            .saturating_add(validator.equivocation_count)
+                                            .saturating_add(validator.downtime_count),
+                                    })
+                                    .collect::<Vec<_>>();
+                                (proposer_id, stakes)
+                            };
+                            let Some(proposer_id) = proposer_id else {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} signer is not active",
+                                    block.index
+                                );
+                                continue;
+                            };
+                            let selected =
+                                bleep_consensus::pos_engine::PoSConsensusEngine::select_proposer(
+                                    block.index,
+                                    &validator_stakes,
+                                    &block.previous_hash,
+                                );
+                            if !selected.is_ok_and(|selected| selected == proposer_id) {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} is not from the selected proposer",
+                                    block.index
+                                );
+                                continue;
+                            }
+                            let proposal_valid = {
+                                let chain = inbound_blockchain.read().unwrap();
+                                let Some(tip) = chain.latest_block() else {
+                                    continue;
+                                };
+                                if block.index != tip.index.saturating_add(1)
+                                    || !BlockValidator::validate_full_block(&tip, block, signer_pk)
+                                {
+                                    false
+                                } else {
+                                    let mut staged_state = chain.state.read().unwrap().clone();
+                                    staged_state.apply_block(block).is_ok()
+                                }
+                            };
+                            if !proposal_valid
+                                || block
+                                    .transactions
+                                    .iter()
+                                    .any(|tx| tx.chain_id != inbound_chain_id)
+                            {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} failed block validation",
+                                    block.index
+                                );
+                                continue;
+                            }
+                        }
+
+                        if let Err(e) = inbound_pbft_finality.receive_message(message) {
+                            warn!("[InboundBlockHandler] PBFT message rejected: {}", e);
+                        }
                         continue;
                     }
 
@@ -690,8 +976,43 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         }
                     };
 
-                    // Block-level validation: Fiat-Shamir ZKP + validator sig
-                    let valid = BlockValidator::validate_block(&block, &inbound_pk);
+                    if !inbound_pbft_finality.is_finalized(block.index, &block.compute_hash()) {
+                        warn!(
+                            "[InboundBlockHandler] Rejecting block {} without a verified PBFT commit quorum",
+                            block.index
+                        );
+                        continue;
+                    }
+
+                    let Some(signer_pk) = block
+                        .validator_signature
+                        .get(..bleep_core::block::SPHINCS_PK_LEN)
+                    else {
+                        warn!(
+                            "[InboundBlockHandler] Block {} has no validator signing key",
+                            block.index
+                        );
+                        continue;
+                    };
+                    let signer_pk = signer_pk.to_vec();
+                    let authorized_signer = inbound_validators
+                        .lock()
+                        .has_active_signing_key(&hex::encode(&signer_pk));
+                    if !authorized_signer {
+                        warn!(
+                            "[InboundBlockHandler] Block {} signer is not in the active validator set",
+                            block.index
+                        );
+                        continue;
+                    }
+
+                    // Verify the signature against the key embedded by the signer,
+                    // then authorize that key against the local active validator set.
+                    let valid = BlockValidator::validate_block(&block, &signer_pk)
+                        && block
+                            .transactions
+                            .iter()
+                            .all(|tx| tx.chain_id == inbound_chain_id);
                     if !valid {
                         warn!(
                             "[InboundBlockHandler] Block {} failed block-level validation — discarding",
@@ -716,14 +1037,59 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
 
                     // Insert validated block
+                    let _canonical_guard = inbound_commit_lock.lock().await;
                     let accepted = {
                         let mut chain = inbound_blockchain.write().unwrap();
-                        chain.add_block(block.clone(), &inbound_pk)
+                        let Some(tip) = chain.latest_block() else {
+                            continue;
+                        };
+                        if block.index != tip.index.saturating_add(1)
+                            || !BlockValidator::validate_full_block(&tip, &block, &signer_pk)
+                        {
+                            false
+                        } else {
+                            let mut staged_core_state = chain.state.read().unwrap().clone();
+                            if staged_core_state.apply_block(&block).is_err() {
+                                warn!(
+                                    "[InboundBlockHandler] Block {} failed core-state preflight",
+                                    block.index
+                                );
+                                continue;
+                            }
+                            let mut state = inbound_state.lock();
+                            let transfers: Vec<bleep_state::state_manager::CanonicalTransfer> =
+                                block
+                                    .transactions
+                                    .iter()
+                                    .map(|tx| bleep_state::state_manager::CanonicalTransfer {
+                                        sender: tx.sender.clone(),
+                                        receiver: tx.receiver.clone(),
+                                        amount: tx.amount,
+                                        nonce: tx.nonce,
+                                    })
+                                    .collect();
+                            match state.apply_canonical_block(
+                                &block,
+                                block.index,
+                                &block.compute_hash(),
+                                &block.previous_hash,
+                                &inbound_chain_id,
+                                &inbound_genesis_hash,
+                                &transfers,
+                            ) {
+                                Ok(()) => chain.add_block(block.clone(), &signer_pk),
+                                Err(e) => {
+                                    warn!(
+                                        "[InboundBlockHandler] Block {} state transition rejected: {}",
+                                        block.index, e
+                                    );
+                                    false
+                                }
+                            }
+                        }
                     };
 
                     if accepted {
-                        // Advance state height to match inbound block
-                        inbound_state.lock().advance_block();
                         info!(
                             "[InboundBlockHandler] ✅ Accepted inbound block {} txs={}",
                             block.index,
@@ -739,12 +1105,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    info!("  ✅ BlockProducer online (3s slots, PoS, VM execution, P2P gossip).");
+    info!("  ✅ BlockProducer online (active-set proposer selection, VM execution, P2P gossip).");
+    info!("  ✅ Live PBFT prevote/precommit quorum gates canonical block commits.");
     info!("  ✅ Scheduler: 20 maintenance tasks registered.");
 
-    // ── Step 15: Consensus engine ─────────────────────────────────────────────
-    info!("🗂  [15/16] Wiring consensus engine (PoS-Normal mode)…");
-    run_consensus_engine()?;
+    // ── Step 15: Consensus status ─────────────────────────────────────────────
+    info!("🗂  [15/16] Live PBFT quorum voting and certificate verification active.");
 
     // ── Step 16: RPC server ───────────────────────────────────────────────────
     let rpc_listen_addr = std::env::var("BLEEP_RPC_LISTEN_ADDR")
@@ -879,7 +1245,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Abort background tasks
     producer_handle.abort();
     relay_handle.abort();
-    gossip_handle.abort();
     bridge_handle.abort();
     interval_handle.abort();
     block_sched_handle.abort();

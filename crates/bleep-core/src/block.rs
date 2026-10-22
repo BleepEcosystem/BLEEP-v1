@@ -15,8 +15,8 @@
 //! ```
 //!
 //! `PK_LEN`  = 64 bytes  (SPHINCS+-SHAKE-256-simple)
-//! `SIG_LEN` = 49,088 bytes (SPHINCS+-SHAKE-256-simple detached sig)
-//! Total `validator_signature` = 7,888 bytes
+//! `SIG_LEN` = 49,856 bytes (SPHINCS+-SHAKE-256-simple detached sig)
+//! Total `validator_signature` = 49,920 bytes
 //!
 //! `verify_signature(public_key)` reconstructs the block hash, then calls
 //! `sphincsshake256fsimple::verify_detached_signature`.
@@ -43,42 +43,57 @@ use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as
 /// Byte length of a SPHINCS+-SHAKE-256-simple public key.
 /// pqcrypto_sphincsplus::sphincsshake256fsimple generates 64-byte public keys.
 pub const SPHINCS_PK_LEN: usize = 64;
-/// Byte length of a SPHINCS+-SHAKE-256-simple detached signature.
+/// Byte length of a SPHINCS+-SHAKE-256-simple detached signature, matching
+/// `PQCLEAN_SPHINCSSHAKE256FSIMPLE_CLEAN_CRYPTO_BYTES` in the upstream FFI.
 pub const SPHINCS_SIG_LEN: usize = 49_856;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
+    pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
     pub timestamp: u64,
+    pub nonce: u64,
     pub signature: Vec<u8>,
 }
 
 impl Transaction {
     /// Compute the canonical transaction hash used for compact-block propagation.
     pub fn tx_hash(&self) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(self.sender.as_bytes());
-        h.update(self.receiver.as_bytes());
-        h.update(self.amount.to_le_bytes());
-        h.update(self.timestamp.to_le_bytes());
-        h.finalize().into()
+        tx_payload(
+            &self.chain_id,
+            &self.sender,
+            &self.receiver,
+            self.amount,
+            self.timestamp,
+            self.nonce,
+        )
     }
 
     /// Verify the SPHINCS+ transaction signature.
     pub fn verify_signature(&self) -> bool {
         if self.signature.is_empty() {
-            return true; // Legacy / genesis transactions without signatures are accepted.
+            return false;
         }
-        if self.signature.len() < SPHINCS_PK_LEN {
+        if self.signature.len() != VALIDATOR_SIG_LEN || self.chain_id.is_empty() {
             return false;
         }
         let pk_bytes = &self.signature[..SPHINCS_PK_LEN];
         let sig_bytes = &self.signature[SPHINCS_PK_LEN..];
-        let payload = tx_payload(&self.sender, &self.receiver, self.amount, self.timestamp);
+        if bleep_crypto::derive_account_address(pk_bytes) != self.sender {
+            return false;
+        }
+        let payload = tx_payload(
+            &self.chain_id,
+            &self.sender,
+            &self.receiver,
+            self.amount,
+            self.timestamp,
+            self.nonce,
+        );
         verify_tx_signature(&payload, sig_bytes, pk_bytes)
     }
 }
@@ -117,10 +132,12 @@ pub struct BlockHeader {
 /// The full signature is available from the Signature Availability Layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactTransaction {
+    pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
     pub timestamp: u64,
+    pub nonce: u64,
     /// SHA3-256(raw_signature) — matches the corresponding leaf in sig_commitment_root.
     pub sig_hash: [u8; 32],
 }
@@ -181,7 +198,7 @@ pub struct Block {
     pub previous_hash: String,
     pub merkle_root: String,
 
-    /// Sprint 6: `pk_bytes(32) || SPHINCS+_sig(SPHINCS_SIG_LEN)` = 7,888 bytes.
+    /// Sprint 6: `pk_bytes(64) || SPHINCS+_sig(SPHINCS_SIG_LEN)` = 49,920 bytes.
     /// Empty for genesis (unsigned trust anchor).
     /// 96 bytes for legacy Sprint 5 blocks (SHA3 scheme, still accepted).
     pub validator_signature: Vec<u8>,
@@ -204,6 +221,13 @@ pub struct Block {
 }
 
 impl Block {
+    /// Construct the deterministic unsigned genesis block.
+    pub fn genesis() -> Self {
+        let mut genesis = Self::new(0, vec![], "0".to_string());
+        genesis.timestamp = 0;
+        genesis
+    }
+
     pub fn new(index: u64, transactions: Vec<Transaction>, previous_hash: String) -> Self {
         let timestamp = Utc::now().timestamp() as u64;
         let merkle_root = Block::calculate_merkle_root(&transactions);
@@ -282,10 +306,12 @@ impl Block {
                 .iter()
                 .enumerate()
                 .map(|(i, tx)| CompactTransaction {
+                    chain_id: tx.chain_id.clone(),
                     sender: tx.sender.clone(),
                     receiver: tx.receiver.clone(),
                     amount: tx.amount,
                     timestamp: tx.timestamp,
+                    nonce: tx.nonce,
                     sig_hash: sig_hashes.get(i).copied().unwrap_or([0u8; 32]),
                 })
                 .collect(),
@@ -310,7 +336,7 @@ impl Block {
     pub fn compute_hash(&self) -> String {
         let mut h = Sha3_256::new();
         h.update(format!(
-            "{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}",
             self.index,
             self.timestamp,
             self.previous_hash,
@@ -319,7 +345,8 @@ impl Block {
             self.consensus_mode as u8,
             self.protocol_version,
             self.shard_registry_root,
-            self.shard_id
+            self.shard_id,
+            self.shard_state_root
         ));
         // Bind sig_commitment_root into the block hash so the SPHINCS+ signature
         // commits to the SAL root. Non-zero only for blocks with real tx signatures.
@@ -345,7 +372,7 @@ impl Block {
     /// (as returned by `generate_tx_keypair()` or `sphincsshake256fsimple::keypair()`).
     /// `sphincs_pk_bytes` must be raw SPHINCS+-SHAKE-256-simple public key bytes (64 bytes).
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49_856)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
     /// The block proof is generated separately by the consensus producer.
     pub fn sign_block(&mut self, seed_bytes: &[u8]) -> Result<(), String> {
         // For backward compatibility: derive keypair from seed
@@ -360,7 +387,7 @@ impl Block {
     /// `sphincs_sk_bytes` must be raw SPHINCS+-SHAKE-256-simple secret key bytes.
     /// `sphincs_pk_bytes` must be the corresponding 64-byte public key.
     ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49_856)`.
+    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
     pub fn sign_block_with_pk(
         &mut self,
         sphincs_sk_bytes: &[u8],
@@ -387,7 +414,7 @@ impl Block {
         let sig = sphincsshake256fsimple::detached_sign(&block_hash_bytes, &sk);
         let sig_bytes = sig.as_bytes();
 
-        // Build signature: pk(64) || sig(49_856)
+        // Build signature: pk(64) || sig(49856)
         let mut vsig = Vec::with_capacity(VALIDATOR_SIG_LEN);
         vsig.extend_from_slice(sphincs_pk_bytes); // [0..64]   validator public key
         vsig.extend_from_slice(sig_bytes); // [64..]    SPHINCS+ detached sig
@@ -401,10 +428,9 @@ impl Block {
     /// Accepts two formats:
     ///
     /// 1. **Empty** — genesis / unsigned block: always `Ok(true)`.
-    /// 2. **7,888 bytes (SPHINCS+ scheme)** — verified with `pqcrypto`.
+    /// 2. **49,920 bytes (SPHINCS+ scheme)** — verified with `pqcrypto`.
     ///
-    /// `public_key` must be the 32-byte SHA3 fingerprint of the SPHINCS+ sk seed
-    /// (as derived by `derive_block_keypair`).
+    /// `public_key` must be the raw 64-byte SPHINCS+-SHAKE-256-simple public key.
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, String> {
         if self.validator_signature.is_empty() {
             return Ok(self.index == 0); // only the unsigned genesis block is exempt
@@ -499,6 +525,21 @@ impl Block {
         }
         if pub_inputs.sig_count as usize != self.transactions.len() {
             log::error!("Extended STARK: sig_count mismatch");
+            return false;
+        }
+        let expected_merkle_root_hash: [u8; 32] =
+            Sha3_256::digest(self.merkle_root.as_bytes()).into();
+        if pub_inputs.merkle_root_hash != expected_merkle_root_hash {
+            log::error!("Extended STARK: merkle_root_hash mismatch");
+            return false;
+        }
+        let expected_smt_root: [u8; 32] = Sha3_256::digest(self.shard_state_root.as_bytes()).into();
+        if pub_inputs.smt_root != expected_smt_root {
+            log::error!("Extended STARK: smt_root mismatch");
+            return false;
+        }
+        if pub_inputs.block_hash != self.compute_hash_bytes() {
+            log::error!("Extended STARK: block_hash mismatch");
             return false;
         }
         if pub_inputs.sig_commitment_root != self.sig_commitment_root {
@@ -648,34 +689,27 @@ impl Block {
         if transactions.is_empty() {
             return String::new();
         }
-        let mut hashes: Vec<String> = transactions
-            .iter()
-            .map(|tx| {
-                let mut h = Sha3_256::new();
-                h.update(tx.sender.as_bytes());
-                h.update(tx.receiver.as_bytes());
-                h.update(tx.amount.to_le_bytes());
-                h.update(tx.timestamp.to_le_bytes());
-                hex::encode(h.finalize())
-            })
-            .collect();
 
-        while hashes.len() > 1 {
-            if hashes.len() % 2 == 1 {
-                let last = hashes.last().unwrap().clone();
-                hashes.push(last);
+        let mut levels: Vec<[u8; 32]> = transactions.iter().map(|tx| tx.tx_hash()).collect();
+
+        while levels.len() > 1 {
+            if levels.len() % 2 == 1 {
+                let last = *levels.last().unwrap();
+                levels.push(last);
             }
-            hashes = hashes
+
+            levels = levels
                 .chunks(2)
                 .map(|pair| {
                     let mut h = Sha3_256::new();
-                    h.update(pair[0].as_bytes());
-                    h.update(pair[1].as_bytes());
-                    hex::encode(h.finalize())
+                    h.update(pair[0]);
+                    h.update(pair[1]);
+                    h.finalize().into()
                 })
                 .collect();
         }
-        hashes[0].clone()
+
+        hex::encode(levels[0])
     }
 }
 
@@ -723,7 +757,7 @@ mod tests {
         b.sign_block_with_pk(sk_bytes.as_bytes(), pk_bytes.as_bytes())
             .expect("sign_block failed");
 
-        // validator_signature should be pk_hash(32) + sphincs_sig
+        // validator_signature should be pk(64) + SPHINCS+ signature
         assert!(
             b.validator_signature.len() > 32,
             "sig len={}",
