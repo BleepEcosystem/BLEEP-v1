@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
@@ -2888,6 +2889,14 @@ struct AuthRegisterDappReq {
 }
 
 #[derive(Deserialize)]
+struct AuthRegisterOperatorReq {
+    operator_handle: String,
+    display_name: String,
+    password: String,
+    kyber_public_key_b64: String,
+}
+
+#[derive(Deserialize)]
 struct AuthLoginReq {
     identity_id: String,
     password: String,
@@ -3074,7 +3083,7 @@ fn auth_register_operator(
                     }
                 };
 
-                let kyber_public_key = match base64::decode(&req.kyber_public_key_b64) {
+                let kyber_public_key = match STANDARD.decode(&req.kyber_public_key_b64) {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         return Ok(warp::reply::with_status(
@@ -4222,55 +4231,6 @@ mod tests {
     }
 }
 
-// ── base64 shim (use the base64 crate already in scope via bleep-crypto) ──────
-mod base64 {
-    #[cfg(test)]
-    pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        // Base64 standard alphabet decoder (no padding required)
-        use std::collections::HashMap;
-        let alphabet: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut map = HashMap::new();
-        for (i, &c) in alphabet.iter().enumerate() {
-            map.insert(c, i as u8);
-        }
-        let s = s.trim_end_matches('=').as_bytes();
-        let mut out = Vec::with_capacity(s.len() * 3 / 4 + 1);
-        let mut i = 0;
-        while i + 3 < s.len() {
-            let (a, b, c, d) = (
-                *map.get(&s[i]).ok_or("bad char")?,
-                *map.get(&s[i + 1]).ok_or("bad char")?,
-                *map.get(&s[i + 2]).ok_or("bad char")?,
-                *map.get(&s[i + 3]).ok_or("bad char")?,
-            );
-            out.push((a << 2) | (b >> 4));
-            out.push((b << 4) | (c >> 2));
-            out.push((c << 6) | d);
-            i += 4;
-        }
-        match s.len() - i {
-            2 => {
-                let (a, b) = (
-                    *map.get(&s[i]).ok_or("bad char")?,
-                    *map.get(&s[i + 1]).ok_or("bad char")?,
-                );
-                out.push((a << 2) | (b >> 4));
-            }
-            3 => {
-                let (a, b, c) = (
-                    *map.get(&s[i]).ok_or("bad char")?,
-                    *map.get(&s[i + 1]).ok_or("bad char")?,
-                    *map.get(&s[i + 2]).ok_or("bad char")?,
-                );
-                out.push((a << 2) | (b >> 4));
-                out.push((b << 4) | (c >> 2));
-            }
-            _ => {}
-        }
-        Ok(out)
-    }
-}
-
 // ── Sprint 8 unit tests ───────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests_sprint8 {
@@ -4400,13 +4360,13 @@ mod tests_sprint8 {
     #[test]
     fn base64_decode_valid() {
         // "hello" in base64 is "aGVsbG8="
-        let decoded = base64::decode("aGVsbG8=").unwrap();
+        let decoded = STANDARD.decode("aGVsbG8=").unwrap();
         assert_eq!(decoded, b"hello");
     }
 
     #[test]
     fn base64_short_secret_rejected() {
-        let short = base64::decode("aGVsbG8=").unwrap(); // "hello" = 5 bytes
+        let short = STANDARD.decode("aGVsbG8=").unwrap();
         assert!(short.len() < 32);
     }
 

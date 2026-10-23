@@ -21,7 +21,6 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use bleep_crypto::tx_signer::derive_address as derive_tx_address;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as Sha2Digest;
