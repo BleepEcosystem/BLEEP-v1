@@ -120,12 +120,14 @@ impl StateManager {
         };
 
         log::info!("[StateManager] Opened DB — block_height={}", block_height);
-        Ok(Self {
+        let mut state = Self {
             db,
             cache: HashMap::new(),
             block_height,
             trie: SparseMerkleTrie::new(),
-        })
+        };
+        state.rebuild_trie_from_db()?;
+        Ok(state)
     }
 
     /// In-memory (temp dir). Panics only if the OS temp dir is unusable.
@@ -229,6 +231,9 @@ impl StateManager {
     }
 
     /// Validate, execute, and atomically persist an inbound canonical block.
+    ///
+    /// The header's expected post-state root is compared against the trie root
+    /// after all transfers have been applied and before any block data is flushed.
     pub fn apply_canonical_block<T: serde::Serialize>(
         &mut self,
         block: &T,
@@ -237,11 +242,13 @@ impl StateManager {
         previous_hash: &str,
         chain_id: &str,
         genesis_hash: &str,
+        expected_post_state_root: &str,
         transfers: &[CanonicalTransfer],
     ) -> StateResult<()> {
         self.check_next_canonical_block(index, previous_hash, chain_id, genesis_hash)?;
 
         let original_cache = self.cache.clone();
+        let original_trie = self.trie.clone();
         for transfer in transfers {
             if self.get_nonce(&transfer.sender) != transfer.nonce
                 || !self.apply_transfer_with_nonce(
@@ -259,6 +266,16 @@ impl StateManager {
             }
         }
 
+        let actual_post_state_root = hex::encode(self.state_root());
+        if actual_post_state_root != expected_post_state_root {
+            self.cache = original_cache;
+            self.trie = original_trie;
+            return Err(StateError::Storage(format!(
+                "block {} post-state root mismatch: expected {}, computed {}",
+                index, expected_post_state_root, actual_post_state_root
+            )));
+        }
+
         self.block_height = index;
         self.sync_trie();
         if let Err(e) =
@@ -266,8 +283,7 @@ impl StateManager {
         {
             self.block_height = index.saturating_sub(1);
             self.cache = original_cache;
-            self.trie = SparseMerkleTrie::new();
-            self.rebuild_trie_from_db()?;
+            self.trie = original_trie;
             return Err(e);
         }
         Ok(())
@@ -1023,6 +1039,7 @@ mod tests {
                 genesis_hash,
                 chain_id,
                 genesis_hash,
+                "",
                 &[rejected_transfer],
             )
             .is_err());
@@ -1036,6 +1053,26 @@ mod tests {
             amount: 12,
             nonce: 0,
         };
+        let mut expected_state = SparseMerkleTrie::new();
+        expected_state.insert("alice", 38, 1);
+        expected_state.insert("bob", 12, 0);
+        let expected_post_state_root = hex::encode(expected_state.root());
+        assert!(state
+            .apply_canonical_block(
+                &"block-one",
+                1,
+                block_hash,
+                genesis_hash,
+                chain_id,
+                genesis_hash,
+                "incorrect-root",
+                std::slice::from_ref(&valid_transfer),
+            )
+            .is_err());
+        assert_eq!(state.block_height(), 0);
+        assert_eq!(state.get_balance("alice"), 50);
+        assert_eq!(state.get_balance("bob"), 0);
+
         state
             .apply_canonical_block(
                 &"block-one",
@@ -1044,16 +1081,22 @@ mod tests {
                 genesis_hash,
                 chain_id,
                 genesis_hash,
+                &expected_post_state_root,
                 &[valid_transfer],
             )
             .expect("apply inbound block");
         drop(state);
 
-        let reopened = StateManager::open(&path).expect("reopen state");
+        let mut reopened = StateManager::open(&path).expect("reopen state");
         assert_eq!(reopened.block_height(), 1);
         assert_eq!(reopened.get_balance("alice"), 38);
         assert_eq!(reopened.get_balance("bob"), 12);
         assert_eq!(reopened.get_nonce("alice"), 1);
+        assert_eq!(
+            hex::encode(reopened.state_root()),
+            expected_post_state_root,
+            "reconstructed trie root must equal the committed post-state root"
+        );
         drop(reopened);
 
         let _ = std::fs::remove_dir_all(&path);

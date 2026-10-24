@@ -1075,6 +1075,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 &block.previous_hash,
                                 &inbound_chain_id,
                                 &inbound_genesis_hash,
+                                &block.shard_state_root,
                                 &transfers,
                             ) {
                                 Ok(()) => chain.add_block(block.clone(), &signer_pk),

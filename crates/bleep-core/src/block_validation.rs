@@ -16,6 +16,11 @@ impl BlockValidator {
     /// by `BlockProducer`. An empty proof is allowed only for unsigned genesis
     /// blocks.
     pub fn validate_block(block: &Block, public_key: &[u8]) -> bool {
+        if !Self::verify_merkle_root(block) {
+            log::error!("Block {} transaction Merkle root mismatch", block.index);
+            return false;
+        }
+
         // Verify validator signature (quantum-secure)
         match block.verify_signature(public_key) {
             Ok(valid) => {
@@ -145,6 +150,12 @@ impl BlockValidator {
             .par_iter()
             .map(|tx| tx.verify_signature())
             .all(|valid| valid)
+    }
+
+    /// Recompute the transaction Merkle root from the block body.
+    pub fn verify_merkle_root(block: &Block) -> bool {
+        let computed = Block::calculate_merkle_root(&block.transactions);
+        computed == block.merkle_root
     }
 
     /// **AI-based anomaly detection for malicious blocks**
@@ -338,5 +349,14 @@ mod tests {
         block_b.shard_state_root = "1".repeat(64);
 
         assert_ne!(block_a.compute_hash(), block_b.compute_hash());
+    }
+
+    #[test]
+    fn merkle_root_must_match_block_transactions() {
+        let mut block = Block::new(1, vec![], "prev".to_string());
+        assert!(BlockValidator::verify_merkle_root(&block));
+
+        block.merkle_root = "tampered".into();
+        assert!(!BlockValidator::verify_merkle_root(&block));
     }
 }
