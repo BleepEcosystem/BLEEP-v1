@@ -517,10 +517,16 @@ impl BlockProducer {
                 }
 
                 // Path 1: native transfer (sender → receiver, exact amount)
-                let ok = state.apply_transfer(&zt.sender, &zt.receiver, zt.amount as u128);
+                let ok = state.apply_transfer(
+                    &zt.sender,
+                    &zt.receiver,
+                    zt.amount as u128,
+                    zt.nonce,
+                    zt.timestamp,
+                );
                 if !ok {
                     warn!(
-                        "[BlockProducer] insufficient funds: {}→{} amt={}",
+                        "[BlockProducer] state transition rejected (funds, nonce, or timestamp): {}→{} amt={}",
                         zt.sender, zt.receiver, zt.amount
                     );
                     // Track this failed tx for removal from pool

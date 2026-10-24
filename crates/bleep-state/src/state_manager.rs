@@ -31,6 +31,7 @@ const PREFIX_BLOCK: &[u8] = b"chain:block:";
 const KEY_HEIGHT: &[u8] = b"sys:block_height";
 const KEY_CHAIN_ID: &[u8] = b"chain:id";
 const KEY_TIP_HASH: &[u8] = b"chain:tip_hash";
+const TRANSACTION_REPLAY_WINDOW_SECS: u64 = 30;
 
 /// Persisted account record.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -243,10 +244,11 @@ impl StateManager {
         let original_cache = self.cache.clone();
         for transfer in transfers {
             if self.get_nonce(&transfer.sender) != transfer.nonce
-                || !self.apply_transfer(
+                || !self.apply_transfer_with_nonce(
                     &transfer.sender,
                     &transfer.receiver,
                     transfer.amount as u128,
+                    transfer.nonce,
                 )
             {
                 self.cache = original_cache.clone();
@@ -488,7 +490,11 @@ impl StateManager {
 
     // ── Apply transactions ────────────────────────────────────────────────────
 
-    /// Debit sender, credit receiver. Returns false if insufficient balance.
+    /// Apply a fresh transfer with the sender's exact next nonce.
+    ///
+    /// Timestamps use the same ±30 second replay window as authenticated P2P
+    /// messages. Historical canonical blocks use `apply_transfer_with_nonce`
+    /// after consensus validation instead of this wall-clock check.
     ///
     /// ## S-06 Fix: checked arithmetic throughout
     ///
@@ -497,7 +503,55 @@ impl StateManager {
     /// arithmetic now uses `checked_sub` / `checked_add`.  Any overflow
     /// (impossible at realistic balances but incorrect in a state machine)
     /// causes a logged rejection rather than silent corruption.
-    pub fn apply_transfer(&mut self, sender: &str, receiver: &str, amount: u128) -> bool {
+    pub fn apply_transfer(
+        &mut self,
+        sender: &str,
+        receiver: &str,
+        amount: u128,
+        nonce: u64,
+        timestamp: u64,
+    ) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.abs_diff(timestamp) > TRANSACTION_REPLAY_WINDOW_SECS {
+            log::warn!(
+                "[StateManager] apply_transfer: timestamp outside replay window (tx={}, now={})",
+                timestamp,
+                now
+            );
+            return false;
+        }
+
+        self.apply_transfer_with_nonce(sender, receiver, amount, nonce)
+    }
+
+    fn apply_transfer_with_nonce(
+        &mut self,
+        sender: &str,
+        receiver: &str,
+        amount: u128,
+        nonce: u64,
+    ) -> bool {
+        let current_nonce = self.get_nonce(sender);
+        if nonce != current_nonce {
+            log::warn!(
+                "[StateManager] apply_transfer: invalid nonce for {} (expected {}, got {})",
+                sender,
+                current_nonce,
+                nonce
+            );
+            return false;
+        }
+        let Some(next_nonce) = current_nonce.checked_add(1) else {
+            log::error!(
+                "[StateManager] apply_transfer: nonce overflow for {}",
+                sender
+            );
+            return false;
+        };
+
         if amount == 0 {
             log::warn!("[StateManager] apply_transfer: zero-amount rejected");
             return false;
@@ -537,7 +591,9 @@ impl StateManager {
 
         self.set_balance(sender, new_sender_bal);
         self.set_balance(receiver, new_recv_bal);
-        self.increment_nonce(sender);
+        let sender_entry = self.cache_entry(sender);
+        sender_entry.state.nonce = next_nonce;
+        sender_entry.dirty = true;
         true
     }
 
@@ -769,6 +825,13 @@ mod tests {
         StateManager::new()
     }
 
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs()
+    }
+
     #[test]
     fn balance_roundtrip() {
         let mut m = fresh();
@@ -789,16 +852,48 @@ mod tests {
     fn missing_account_has_zero_balance() {
         let mut m = fresh();
         assert_eq!(m.get_balance("new_user"), 0);
-        assert!(!m.apply_transfer("new_user", "receiver", 1));
+        assert!(!m.apply_transfer("new_user", "receiver", 1, 0, now()));
     }
 
     #[test]
     fn apply_transfer_ok() {
         let mut m = fresh();
         m.mint("alice", 500).expect("mint");
-        assert!(m.apply_transfer("alice", "bob", 200));
+        assert!(m.apply_transfer("alice", "bob", 200, 0, now()));
         assert_eq!(m.get_balance("alice"), 300);
         assert_eq!(m.get_balance("bob"), 200);
+        assert_eq!(m.get_nonce("alice"), 1);
+    }
+
+    #[test]
+    fn apply_transfer_rejects_replayed_or_out_of_order_nonce() {
+        let mut m = fresh();
+        m.mint("alice", 500).expect("mint");
+
+        assert!(!m.apply_transfer("alice", "bob", 100, 1, now()));
+        assert_eq!(m.get_balance("alice"), 500);
+        assert_eq!(m.get_nonce("alice"), 0);
+
+        assert!(m.apply_transfer("alice", "bob", 100, 0, now()));
+        assert!(!m.apply_transfer("alice", "bob", 100, 0, now()));
+        assert_eq!(m.get_balance("alice"), 400);
+        assert_eq!(m.get_nonce("alice"), 1);
+    }
+
+    #[test]
+    fn apply_transfer_rejects_timestamps_outside_replay_window() {
+        let mut m = fresh();
+        m.mint("alice", 500).expect("mint");
+        let stale_timestamp = now().saturating_sub(TRANSACTION_REPLAY_WINDOW_SECS + 1);
+
+        assert!(!m.apply_transfer("alice", "bob", 100, 0, stale_timestamp));
+        assert_eq!(m.get_balance("alice"), 500);
+        assert_eq!(m.get_nonce("alice"), 0);
+
+        let future_timestamp = now() + TRANSACTION_REPLAY_WINDOW_SECS + 2;
+        assert!(!m.apply_transfer("alice", "bob", 100, 0, future_timestamp));
+        assert_eq!(m.get_balance("alice"), 500);
+        assert_eq!(m.get_nonce("alice"), 0);
     }
 
     #[test]
@@ -807,7 +902,7 @@ mod tests {
         m.mint("alice", 100).expect("mint");
         // S-06: zero-amount transfers must be rejected
         assert!(
-            !m.apply_transfer("alice", "bob", 0),
+            !m.apply_transfer("alice", "bob", 0, 0, now()),
             "S-06: zero-amount transfer must be rejected"
         );
         assert_eq!(
@@ -821,7 +916,7 @@ mod tests {
     fn apply_transfer_insufficient() {
         let mut m = fresh();
         m.mint("alice", 50).expect("mint");
-        assert!(!m.apply_transfer("alice", "bob", 200));
+        assert!(!m.apply_transfer("alice", "bob", 200, 0, now()));
         assert_eq!(m.get_balance("alice"), 50);
     }
 
@@ -829,7 +924,7 @@ mod tests {
     fn apply_transfer_checked_sub_cannot_underflow() {
         let mut m = fresh();
         // Alice has 0 — transfer must fail, not wrap around
-        let ok = m.apply_transfer("alice", "bob", 1);
+        let ok = m.apply_transfer("alice", "bob", 1, 0, now());
         assert!(!ok, "S-06: zero balance must not underflow");
         assert_eq!(m.get_balance("alice"), 0);
     }
