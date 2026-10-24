@@ -82,11 +82,15 @@ fn unlock_wallet_key(
                 "Plaintext wallet unlock requires BLEEP_WALLET_PLAINTEXT_DEV=1 on a dev/test network"
             ));
         }
-        return wallet.unlock("").map_err(Into::into);
+        return wallet
+            .unlock("")
+            .map_err(|error| anyhow!(error.to_string()));
     }
 
     let password = wallet_password(false)?;
-    wallet.unlock(&password).map_err(Into::into)
+    wallet
+        .unlock(&password)
+        .map_err(|error| anyhow!(error.to_string()))
 }
 
 #[tokio::main]
