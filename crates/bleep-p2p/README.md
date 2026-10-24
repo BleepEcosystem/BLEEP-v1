@@ -44,8 +44,8 @@ Every message on the BLEEP P2P network is post-quantum authenticated:
 
 | Operation | Algorithm | Standard |
 |---|---|---|
-| Node identity (long-term) | SPHINCS+-SHAKE-256f-simple | FIPS 205, SL5 |
-| Session key establishment | Kyber-1024 / ML-KEM-1024 | FIPS 203, SL5 |
+| Node identity (long-term) | SPHINCS+-SHAKE-256f-simple | Legacy/round-3 API; FIPS 205 conformance not claimed |
+| Session key establishment | Kyber-1024 | Legacy Kyber API; not FIPS 203 ML-KEM |
 | Session encryption | AES-256-GCM | NIST SP 800-38D |
 | Onion routing per-hop | Kyber-1024 + AES-256-GCM | — |
 | Peer ID derivation | Deterministic hash of SPHINCS+ public key | SHA3-256 |

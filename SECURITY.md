@@ -128,9 +128,9 @@ An independent third-party audit of `bleep-crypto`, `bleep-consensus`, `bleep-st
 
 BLEEP's security model assumes a quantum polynomial-time (QPT) adversary equipped with Shor's algorithm. The protocol maintains 256-bit post-quantum security on all sensitive paths:
 
-- **SPHINCS+-SHAKE-256f-simple** (FIPS 205, SL5) — transaction signing, block signing, finality certificate signatures, P2P authentication
-- **Kyber-1024 / ML-KEM-1024** (FIPS 203, SL5) — key encapsulation, validator binding, onion routing
-- **Winterfell STARK** (FRI-based, hash security) — block validity proofs, cross-chain bridge proofs
+- **SPHINCS+-SHAKE-256f-simple** (legacy/round-3 API; FIPS 205 conformance not claimed) — transaction signing, block signing, finality certificate signatures, P2P authentication
+- **Kyber-1024** (legacy Kyber API; not FIPS 203 ML-KEM) — key encapsulation, validator binding, onion routing
+- **Winterfell STARK** (FRI-based, hash security) — bounded block-metadata constraints; does not prove transaction validity or state-transition execution
 
 No classical public-key primitive (RSA, ECDSA, x25519, BLS) is present on any cryptographically sensitive path. No trusted setup ceremony is required for any proof system.
 

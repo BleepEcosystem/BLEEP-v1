@@ -2,7 +2,7 @@
 
 **Post-Quantum BFT Consensus Engine — BLEEP Quantum Trust Network**
 
-`bleep-consensus` implements BLEEP's multi-mode proof-of-stake Byzantine fault-tolerant consensus. It produces SPHINCS+-signed blocks with embedded Winterfell STARK validity proofs, manages epoch transitions, enforces deterministic slashing, and coordinates across 10 shards — all under a strict safety-over-liveliness design principle.
+`bleep-consensus` implements BLEEP's multi-mode proof-of-stake Byzantine fault-tolerant consensus. It produces SPHINCS+-signed blocks with embedded Winterfell STARK proofs of bounded metadata constraints (not execution validity), manages epoch transitions, enforces deterministic slashing, and coordinates across 10 shards.
 
 ---
 
@@ -133,7 +133,7 @@ The following scenarios are covered in the 72-hour adversarial test suite:
 | `LongRangeReorg(50)` | Rejected at `FinalityManager` |
 | `DoubleSign(validator-0)` | 33% slashed; evidence committed; tombstoned |
 | `STARKProofTamper` | Tampered proof rejected at `BlockValidityVerifier` |
-| `LoadStress(10,000 TPS, 60s)` | Max throughput; STARK proofs generated within slot budget |
+| `LoadStress(10,000 TPS, 60s)` | Arithmetic block-capacity model check; not an executed load test or measured TPS |
 | SAL integration (Sprint 10) | `sig_commitment_root` verified in `validate_block()`; gossip-stripped blocks accepted via extended STARK proof |
 | SAL integration | `sig_commitment_root` verified in `validate_block()`; gossip-stripped blocks accepted |
 

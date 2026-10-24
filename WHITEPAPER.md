@@ -2,7 +2,7 @@
 
 # BLEEP · Quantum Trust Network
 
-### *Proven Execution · Quantum Foundation · Intent Native*
+### *Bounded Metadata Proofs · Post-Quantum Algorithms · Intent Native*
 
 **A Post-Quantum Cryptographic Foundation for Verifiable Decentralized Execution**
 
@@ -22,11 +22,9 @@ Muhammad Attahir · May 2026
 
 ## Abstract
 
-Every existing distributed execution protocol accepts block validity on the basis of validator consensus — not mathematical proof. When a block is finalised, it is finalised because a supermajority of validators signed it, not because any party has independently verified that its state transition is correct. Simultaneously, the cryptographic foundations of these systems — ECDSA, secp256k1, x25519 — are vulnerable to polynomial-time attack by Shor's algorithm on a sufficiently capable fault-tolerant quantum processor, exposing their historical transaction records to retroactive decryption by adversaries archiving signed data today.
-This paper describes BLEEP, a distributed execution environment investigating both problems in a single implementation. Every block produced by BLEEP carries a Winterfell STARK validity proof — a hash-based, transparent, post-quantum secure construction requiring no trusted setup ceremony — generated before broadcast and independently verified by each validator before any vote is cast. Block correctness is not assumed from consensus; it is proven. Transaction signing, peer authentication, key encapsulation, and proof verification are secured exclusively by NIST-finalized post-quantum primitives: SPHINCS+-SHAKE-256f-simple (FIPS 205, Security Level 5) and Kyber-1024/ML-KEM-1024 (FIPS 203, Security Level 5). No classical public-key primitive is present on any sensitive path. No migration is required — because no classical primitive was introduced.
+This paper describes BLEEP, an experimental distributed execution environment investigating post-quantum algorithm integration and transparent STARK proofs. Its extended Winterfell AIR proves bounded metadata relationships—epoch arithmetic, transaction/signature count equality and limits, and batch sequence equality. It does not prove transaction signatures, derive Merkle or signature-commitment roots, or prove state-transition execution. Conventional validation and execution code perform those checks separately. The implementation uses `pqcrypto` SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs. These are legacy/round-3 algorithm APIs; this paper does not claim FIPS 205 (SLH-DSA) or FIPS 203 (ML-KEM) implementation conformance or validation.
 
-Protocol Version 5 presents the following empirical measurements from a live implementation: Winterfell STARK block validity proofs averaging ~850 ms generation and ~12 ms verification on reference hardware (8-core, 32 GB RAM) within a 3,000 ms slot budget; SPHINCS+ signatures of 49,088 bytes per transaction, producing approximately 204 MB of aggregate signature data per 4,096-transaction block; an internal security audit resolving all Critical and High findings across 16,127 lines of Rust; and a 72-hour adversarial test suite across 10 scenarios with all passing.
-These measurements are empirical data on the practical overhead of combining STARK-based execution proofs with NIST-finalized post-quantum primitives in a live distributed system — constraints directly relevant to Ethereum's long-term trajectory toward provable execution and post-quantum migration.
+The repository reports proof timings of approximately 850 ms generation and 12 ms verification on reference hardware; those timings apply to the bounded metadata proof, not an execution-validity proof. The active SPHINCS+ signature size is 49,856 bytes. A local single-node CLI benchmark measured 6.43 TPS sequentially and 26.33 TPS with 32 concurrent CLI workers; neither figure measures network-wide consensus or protocol capacity. The repository also contains simulated throughput projections, which are not achieved performance.
 
 ## 1. Introduction
 
@@ -40,18 +38,18 @@ The operationally significant threat is **archival**. Every transaction broadcas
 
 A protocol that launches with classical cryptography and plans a post-quantum migration inherits a coordination problem that history shows cannot be cleanly solved. Validators, wallets, bridges, indexers, and all tooling must upgrade simultaneously. HTTPS migration took over a decade and is still not complete.
 
-**BLEEP eliminates this problem by not having it.** Post-quantum from genesis means no migration coordination, no ecosystem split, and no retroactive liability.
+BLEEP uses post-quantum algorithm APIs from genesis, avoiding a classical-key migration today. The current Kyber and SPHINCS+ APIs are legacy/round-3 variants; FIPS 203/205 conformance is not established, so standardization and production-readiness work may still require migration.
 
 ### 1.3 The Execution Problem
 
-Every existing Layer 1 asks validators and users to trust that a block's state transition was computed correctly. There is no independently verifiable proof. When a block is accepted, it is accepted on the basis of validator signatures — not mathematical proof of execution validity.
+BLEEP does not currently prove block state-transition execution with a STARK. The extended AIR proves a bounded set of metadata relationships, while transaction signatures, Merkle roots, state roots, and transaction execution are checked by conventional validation code.
 
-BLEEP solves both problems simultaneously. Every block includes a Winterfell STARK validity proof generated before broadcast, verified independently by every validator. Block correctness is not voted upon — it is proven.
+BLEEP currently includes an extended Winterfell STARK for bounded block-metadata constraints. Transaction signature verification, Merkle-root checks, state-root checks, and transaction execution are separate conventional validation paths; the STARK does not prove those operations.
 
 ### 1.4 Design Goals
 
 - Post-quantum security at Security Level 5 on all signature, key-encapsulation, and zero-knowledge proof paths, with no classical fallback.
-- Proven execution: every block ships with a Winterfell STARK validity proof, generated before broadcast and verified before any vote is cast.
+- Bounded metadata proof: the extended Winterfell AIR checks epoch arithmetic, transaction/signature counts and bounds, and batch sequence equality. It does not prove transaction or state-transition validity.
 - Intent-native runtime: callers express outcomes, not instructions; the VM router resolves execution path automatically.
 - Deterministic protocol execution: byte-identical outputs on every honest node running the same software version.
 - Constitutional parameter immutability: enforced by Rust const_assert! — cannot be altered by governance vote or software upgrade.
@@ -66,7 +64,7 @@ BLEEP solves both problems simultaneously. Every block includes a Winterfell STA
 
 ### 2.1 Definition: Quantum Trust Network
 
-A Quantum Trust Network is a distributed execution system in which transaction validity, node identity, network message authentication, and zero-knowledge proof verification are enforced exclusively using cryptographic primitives believed to resist attacks by both classical PPT adversaries and quantum QPT adversaries equipped with Shor's algorithm, as formalized in NIST FIPS 203 and FIPS 205, and in hash-based transparent proof systems.
+A Quantum Trust Network is a distributed execution system that uses post-quantum algorithm families for selected cryptographic operations and transparent hash-based proof systems. Use of an algorithm related to a NIST standard does not by itself establish FIPS implementation conformance or validation.
 
 ### 2.2 Architecture Overview
 
@@ -143,9 +141,9 @@ graph TB
 
 | **Pillar**               | **What it means**                                           | **How it is implemented**                                                         |
 |--------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------|
-| Proven Execution         | Every block ships with a cryptographic proof of correctness | Winterfell STARK BlockValidityProof — generated pre-broadcast, verified pre-vote  |
+| Bounded Metadata Proofs | Selected metadata relationships are proven | Winterfell extended AIR — epoch arithmetic, transaction/signature counts and bounds, batch sequence |
 | Intent Native            | Callers express outcomes, not instructions                  | PAT engine + 7-tier VM router — intent resolved to optimal execution path         |
-| Quantum Foundation       | No classical public-key primitive on any sensitive path     | SPHINCS+ (FIPS 205) + Kyber-1024 (FIPS 203) at Security Level 5 — from block zero |
+| Post-Quantum Algorithms | Post-quantum signature and KEM algorithms are used on configured paths | SPHINCS+-SHAKE-256f-simple and legacy Kyber-1024 APIs; FIPS conformance is not claimed |
 | Constitutional Integrity | Supply cap, inflation, finality cannot be changed by anyone | Rust const_assert! — violations do not compile                                    |
 
 
@@ -162,17 +160,17 @@ graph LR
     subgraph PQ["Post-Quantum Secure ✅"]
         direction TB
         TX_SIGN["Transaction Signing
-SPHINCS+-SHAKE-256f · FIPS 205 · SL5"]
+SPHINCS+-SHAKE-256f-simple · legacy API"]
         BLK_SIGN["Block Signing
-SPHINCS+-SHAKE-256f · FIPS 205 · SL5"]
+SPHINCS+-SHAKE-256f-simple · legacy API"]
         P2P_AUTH["P2P Authentication
-SPHINCS+-SHAKE-256f · FIPS 205 · SL5"]
+SPHINCS+-SHAKE-256f-simple · legacy API"]
         KEM["Key Encapsulation
-Kyber-1024 / ML-KEM-1024 · FIPS 203 · SL5"]
+Kyber-1024 · legacy API; not ML-KEM"]
         ONION["Onion Routing
 Kyber-1024 per-hop + AES-256-GCM"]
-        ZKP_BLOCK["Block Validity Proofs
-Winterfell STARK · Hash-based · No ECC"]
+        ZKP_BLOCK["Bounded Metadata Proof
+Winterfell STARK · Hash-based · No trusted setup"]
         ZKP_BRIDGE["Cross-Chain Bridge Proofs
 SPHINCS+-bound STARK transcripts"]
         AUDIT["Audit Log
@@ -191,32 +189,30 @@ SHA3-256 Merkle chain · sync=true"]
 
 *Figure 2: Post-Quantum Cryptographic Boundary — secured paths (left) and absent classical primitives (right)*
 
-### 3.2 Signature Scheme — SPHINCS+-SHAKE-256f-simple (FIPS 205)
+### 3.2 Signature Scheme — SPHINCS+-SHAKE-256f-simple
 
 | **Parameter**       | **Value**                                                      |
 |---------------------|----------------------------------------------------------------|
-| NIST Standard       | FIPS 205 (SLH-DSA)                                             |
-| Security Level      | 5 — ≥256-bit post-quantum security                             |
-| Security Assumption | One-wayness of SHAKE-256 (hash-based)                          |
+| Standard status     | Legacy/round-3 SPHINCS+ API; FIPS 205 conformance is not claimed |
+| Parameter set       | SHAKE-256f-simple                                               |
 | Public Key          | 64 bytes                                                       |
 | Secret Key          | 128 bytes (Zeroizing\<Vec\<u8\>\> — zeroed on drop)            |
-| Signature           | 49,088 bytes                                                   |
+| Signature           | 49,856 bytes                                                   |
 | Crate               | pqcrypto-sphincsplus v0.7.2                                    |
 | Usage               | Transaction signing, block signing, P2P message authentication |
 
-> **Bandwidth:** Raw SPHINCS+ signature data is ~24.3 MB per block at 512 tx/block. The **Signature Availability Layer** (live, Protocol Version 5) reduces block-gossip bandwidth to **~320 KB per block (~98.7% reduction)** via a Blake3 Merkle commitment (`sig_commitment_root`) over SHA3-256(sig_i), bound into both the SPHINCS+ block signature and the 68-column extended STARK proof. Receiving validators verify authenticity without individual signatures.
+> **Bandwidth:** Each SPHINCS+ signature is 49,856 bytes; 512 signatures total about 24.3 MiB. The Signature Availability Layer commits to signature hashes. The 48-column extended AIR proves bounded metadata relationships, not signature validity or commitment-root derivation.
 
-### 3.3 Key Encapsulation — Kyber-1024 / ML-KEM-1024 (FIPS 203)
+### 3.3 Key Encapsulation — Kyber-1024
 
 | **Parameter**       | **Value**                                                         |
 |---------------------|-------------------------------------------------------------------|
-| NIST Standard       | FIPS 203 (ML-KEM)                                                 |
-| Security Level      | 5 — ≥256-bit post-quantum security                                |
-| Security Assumption | Hardness of Module-LWE (lattice-based)                            |
+| Standard status     | Legacy Kyber API; FIPS 203 ML-KEM conformance is not claimed      |
+| Parameter set       | Kyber-1024                                                        |
 | Public Key          | 1,568 bytes                                                       |
 | Secret Key          | 3,168 bytes (Zeroizing\<Vec\<u8\>\> — zeroed on drop)             |
 | Output              | 1,568-byte ciphertext + 32-byte shared secret                     |
-| Crate               | pqcrypto-kyber v0.8.1                                             |
+| Crate               | pqcrypto-kyber                                                     |
 | Usage               | Validator binding, peer KEM, wallet key management, onion routing |
 
 ### 3.4 Zero-Knowledge Proofs — Winterfell STARK (FRI-based)
@@ -226,11 +222,10 @@ SHA3-256 Merkle chain · sync=true"]
 | Construction        | FRI-based STARK over 128-bit prime field                             |
 | Trusted Setup       | None — fully transparent                                             |
 | Post-Quantum Secure | Yes — reduces to collision resistance of BLAKE3 / SHA3-256           |
-| Trace Width         | 48 columns (BlockValidityAir)                                        |
-| Public Inputs       | block_index, epoch_id, tx_count, merkle_root_hash, validator_pk_hash |
-| Proof Generation    | ~850 ms on reference hardware (8-core, 32 GB RAM)                    |
-| Proof Verification  | ~12 ms on reference hardware                                         |
-| Slot Budget         | 3,000 ms — proof generation fits within one slot                     |
+| Trace Width         | 48 columns (`ExtendedBlockValidityAir`)                              |
+| Constraints         | Epoch arithmetic, transaction/signature counts and bounds, batch sequence |
+| Execution validity  | Not proved; conventional validation remains necessary                |
+| Reported timing      | ~850 ms generation / ~12 ms verification for metadata proof          |
 | Crate               | winterfell v0.13.1                                                   |
 
 
@@ -303,7 +298,7 @@ sequenceDiagram
     BP->>MEM: select up to 4,096 txs (fee-descending)
     BP->>ST: compute SMT root
     BP->>ZK: BlockValidityProver.prove() — ~850ms · 48-col trace
-    ZK-->>BP: BlockValidityProof
+    ZK-->>BP: Extended metadata STARK proof
     BP->>BP: SPHINCS+ sign completed block
     BP->>VAL: broadcast (block + STARK proof + SPHINCS+ sig)
     VAL->>ZK: BlockValidityVerifier.verify() — ~12ms
@@ -354,9 +349,9 @@ Stake-proportional VRF"]
         BP["BlockProducer
 Select ≤4,096 txs · Compute SMT root"]
         STARK["STARK Prover
-~850ms · 48-col trace · 5 public inputs"]
+Bounded metadata AIR · 48-col trace"]
         SIGN["SPHINCS+ Block Sign
-49,088-byte signature"]
+49,856-byte signature"]
         BCAST["P2P Broadcast
 Gossip fanout=8"]
     end
@@ -616,7 +611,7 @@ BLEEP's security analysis considers three adversary classes:
 | TxReplay                    | PASS       | Rejected by nonce check                          |
 | InvalidBlockFlood(1000)     | PASS       | Rejected at SPHINCS+ gate; peer rate-limited     |
 | STARKProofTamper            | PASS       | Tampered proof rejected at BlockValidityVerifier |
-| LoadStress(10,000 TPS, 60s) | PASS       | Max throughput; STARK proofs within slot budget  |
+| LoadStress(10,000 TPS, 60s) | Model check | Arithmetic block-capacity scenario; not an executed load test or measured TPS |
 
 
 ---
@@ -624,6 +619,12 @@ BLEEP's security analysis considers three adversary classes:
 ## 10. Scalability
 
 ### 10.1 Projected Performance — Simulated, Pre-Testnet
+
+These figures are simulation projections, not measured network throughput. The separate
+[local-node benchmark](benchmark.md) measured 6.43 TPS for sequential CLI submissions and
+26.33 TPS with 32 concurrent CLI workers on one node with zero peers. These end-to-end numbers
+include process startup, wallet loading, signing, and RPC overhead; they do not establish protocol
+capacity or multi-validator throughput.
 
 | **Metric**                     | **Value**                                   |
 |--------------------------------|---------------------------------------------|
@@ -635,7 +636,7 @@ BLEEP's security analysis considers three adversary classes:
 | STARK proof generation (avg)   | ~850 ms per block                           |
 | STARK proof verification (avg) | ~12 ms per block                            |
 
-> These are projections from simulated workloads — 7 validators, controlled network latency, geographically concentrated nodes, uniform transaction mix. Actual throughput on a geographically distributed public testnet will be measured and published during Phase 6. STARK timings on reference 8-core, 32 GB RAM hardware.
+> **Projection caveat:** The figures are from a simulated workload (7 validators, controlled network latency, geographically concentrated nodes, uniform transaction mix), not achieved TPS. Public-testnet throughput, multi-validator propagation, and finality measurements remain outstanding. Reported STARK timings refer to the bounded metadata proof, not an execution-validity proof.
 
 ### 10.2 Sharding
 
@@ -652,11 +653,11 @@ SelfHealingOrchestrator tracks protocol health: Healthy → Degraded → Critica
 
 ### 11.1 Post-Quantum Primitives Introduce Measurable Overhead
 
-SPHINCS+-SHAKE-256f-simple produces 49,088-byte signatures. The Signature Availability Layer (Protocol Version 5) reduces per-block gossip bandwidth from ~24.3 MB (512 tx × 49,088 bytes raw) to ~320 KB (~98.7% reduction). The `sig_commitment_root` — a Blake3 Merkle root over SHA3-256(sig_i) for all block transactions — is stamped on the block before SPHINCS+ signing and committed into the extended STARK proof, so receivers verify authenticity without individual signatures. Kyber-1024 public keys are 1,568 bytes compared to 32-byte Curve25519 keys. Winterfell proof generation averages ~850–950 ms per block, within the 3,000 ms slot budget. These overheads are the direct, quantified cost of transparent post-quantum security with no trusted setup — accepted as an explicit design trade-off.
+SPHINCS+-SHAKE-256f-simple signatures are 49,856 bytes. The Signature Availability Layer exchanges signature commitments, but signature validity and commitment-root derivation are checked outside the AIR. The 48-column extended STARK proves bounded metadata relationships; it does not prove execution validity. Kyber-1024 public keys are 1,568 bytes compared to 32-byte Curve25519 keys. Reported Winterfell proof timings apply to the bounded metadata proof, not an execution proof. The cryptographic APIs are legacy/round-3 implementations; FIPS 203/205 conformance is not claimed.
 
 ### 11.2 Signature Aggregation Not Yet Available
 
-SPHINCS+ does not support aggregation: n validators produce n independent 49,088-byte signatures. Hash-based signature aggregation is a medium-term research direction.
+SPHINCS+ does not support aggregation: n validators produce n independent 49,856-byte signatures. Hash-based signature aggregation is a medium-term research direction.
 
 ### 11.3 Throughput Figures Are Simulated
 
@@ -700,13 +701,13 @@ Mandatory SPHINCS+ enforcement across all transaction types, Ed25519 sunset, Kyb
 
 ## 13. Conclusion
 
-BLEEP is a Quantum Trust Network: the first distributed execution protocol in which every block ships with a mathematical proof of its own correctness, every instruction is expressed as intent, and the entire cryptographic foundation is built on NIST-standardised post-quantum primitives — by construction, from genesis.
+BLEEP is an experimental distributed execution protocol with an intent-oriented runtime, bounded metadata STARK proofs, and post-quantum algorithm implementations.
 
-No classical public-key primitive or pairing-based construction is present on any cryptographically sensitive path. No trusted setup ceremony is required for any proof system. No migration path is needed — because the problem was solved before the protocol accumulated economic value and ecosystem dependencies.
+No classical public-key primitive is intended on the configured cryptographic paths, and the Winterfell STARK requires no trusted setup. The current post-quantum APIs are legacy/round-3 variants; FIPS conformance and whether migration will be required for production remain open.
 
-Protocol Version 5 establishes the practical foundation for this design: SPHINCS+-signed blocks at a 3,000 ms slot interval, Kyber-1024 key encapsulation for all peer channels, Winterfell STARK block validity proofs benchmarked at ~850 ms generation and ~12 ms verification, a 72-hour adversarial test suite with all scenarios passing, an internal security audit with all Critical and High findings resolved, and projected throughput averaging 10,921 TPS across 10 shards under simulated conditions.
+Protocol Version 5 includes SPHINCS+-signed blocks, Kyber-1024 key encapsulation, an extended Winterfell STARK for bounded metadata constraints, and simulated throughput projections. The local-node CLI measurements and their limitations are documented in [benchmark.md](benchmark.md). FIPS implementation conformance, execution-validity proofs, and public-testnet throughput have not been established.
 
-The four pillars — proven execution, intent-native runtime, quantum-native foundation, and constitutional integrity — are verifiable properties of the Protocol Version 5 codebase. Public testnet deployment in Phase 6 will validate these properties at the scale and adversarial conditions required for a globally adopted protocol.
+The current implementation includes an intent-oriented runtime, bounded metadata proofs, post-quantum algorithm APIs, and a 200,000,000 BLEEP maximum supply. Execution-validity proofs, FIPS implementation conformance, and public-testnet performance remain unestablished.
 
 
 ---
@@ -760,7 +761,7 @@ All values are drawn from the production Rust source at Protocol Version 5. Para
 
 | **Parameter**           | **Value**               | **Source**                  |
 |-------------------------|-------------------------|-----------------------------|
-| SPHINCS+ signature size | 49,088 bytes            | pqcrypto-sphincsplus v0.7.2 |
+| SPHINCS+ signature size | 49,856 bytes | pqcrypto-sphincsplus |
 | SPHINCS+ public key     | 64 bytes                | pqcrypto-sphincsplus v0.7.2 |
 | SPHINCS+ secret key     | 128 bytes               | pqcrypto-sphincsplus v0.7.2 |
 | Kyber-1024 public key   | 1,568 bytes             | pqcrypto-kyber              |
@@ -770,7 +771,7 @@ All values are drawn from the production Rust source at Protocol Version 5. Para
 | Gossip max message size | 2,097,152 bytes (2 MiB) | MAX_GOSSIP_MSG_BYTES        |
 | Gossip fanout           | 8                       | bleep-p2p                   |
 | Kademlia k-bucket size  | 20                      | bleep-p2p                   |
-| STARK trace columns     | 48                      | BlockValidityAir            |
+| STARK trace columns     | 48                      | ExtendedBlockValidityAir    |
 | STARK proof setup       | None (transparent)      | bleep-zkp                   |
 | JWT entropy minimum     | 3.5 bits/byte           | session.rs                  |
 

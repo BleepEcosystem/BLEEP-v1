@@ -2,7 +2,7 @@
 
 **Post-Quantum Cryptographic Primitives — BLEEP Quantum Trust Network**
 
-`bleep-crypto` is the root cryptographic dependency of the BLEEP protocol. It provides NIST-finalised post-quantum signatures and key encapsulation at Security Level 5, symmetric encryption, hash functions, Merkle commitments, and zero-knowledge proof primitives. All secret key types are zeroed on drop. No classical public-key primitive appears on any protocol-sensitive path.
+`bleep-crypto` is the root cryptographic dependency of the BLEEP protocol. It provides post-quantum signature and key-encapsulation algorithm APIs, symmetric encryption, hash functions, Merkle commitments, and proof primitives. Use of these algorithm families does not establish FIPS implementation conformance or validation. All secret key types are zeroed on drop.
 
 ---
 
@@ -17,13 +17,13 @@ Copyright © 2026 Muhammad Attahir.
 
 | Primitive | Algorithm | Standard | Security Level | Role |
 |---|---|---|---|---|
-| **Signatures (primary)** | SPHINCS+-SHAKE-256f-simple | FIPS 205 (SLH-DSA) | Level 5 | Transaction signing, block signing, P2P auth |
-| **Key encapsulation** | Kyber-1024 / ML-KEM-1024 | FIPS 203 (ML-KEM) | Level 5 | Validator binding, peer KEM, onion routing |
+| **Signatures (primary)** | SPHINCS+-SHAKE-256f-simple | Legacy/round-3 API; FIPS 205 conformance not claimed | Level 5 parameter set | Transaction signing, block signing, P2P auth |
+| **Key encapsulation** | Kyber-1024 | Legacy Kyber API; not FIPS 203 ML-KEM | Level 5 parameter set | Validator binding, peer KEM, onion routing |
 | **Symmetric encryption** | AES-256-GCM | NIST SP 800-38D | 256-bit classical | Metadata, payload, session encryption |
 | **State hashing** | SHA3-256 | FIPS 202 | 128-bit PQ | State roots, Merkle nodes, block hashes, audit log chaining |
 | **Content addressing** | BLAKE3 | — | 128-bit PQ | Indexer, Winterfell FRI commitment hashing |
 | **Signatures (wallet)** | Falcon | FIPS 206 (ML-DSA) | Level 5 | Wallet-core key management |
-| **ZK proofs** | Winterfell STARK | FRI-based | PQ (hash security) | Block validity, cross-chain bridge (via bleep-zkp) |
+| **ZK proofs** | Winterfell STARK | FRI-based | Hash-based | Bounded block-metadata constraints; not state-transition validity |
 | **ZK proofs** | Groth16 (BN254) | — | Classical only | Governance vote privacy, recovery proofs |
 
 > **Note on Ed25519:** Ed25519 is present in the codebase for compatibility purposes and is used in non-security-critical paths. It is on the Phase 9 sunset list. The `quantum` feature flag (enabled by default) ensures Ed25519 is not used on any transaction signing, block signing, or peer authentication path.
@@ -70,12 +70,12 @@ Primary interface for SPHINCS+, Kyber-1024, and Falcon operations. Re-exported a
 ```rust
 use bleep_crypto::{sphincs_sign, sphincs_verify, kyber_encapsulate, kyber_decapsulate};
 
-// SPHINCS+-SHAKE-256f-simple — FIPS 205, Security Level 5
+// SPHINCS+-SHAKE-256f-simple — legacy/round-3 API
 let (pk, sk) = sphincs_keypair();
-let sig = sphincs_sign(&sk, &message);         // 49,088-byte signature
+let sig = sphincs_sign(&sk, &message);         // 49,856-byte signature
 sphincs_verify(&pk, &message, &sig)?;
 
-// Kyber-1024 / ML-KEM-1024 — FIPS 203, Security Level 5
+// Kyber-1024 legacy API (not FIPS 203 ML-KEM)
 let (ek, dk) = kyber_keypair();                // ek: 1,568 bytes, dk: 3,168 bytes
 let (ciphertext, shared_secret) = kyber_encapsulate(&ek);
 let recovered_secret = kyber_decapsulate(&dk, &ciphertext);
@@ -112,7 +112,7 @@ use bleep_crypto::{generate_tx_keypair, sign_tx_payload, verify_tx_signature, tx
 
 let (sk, pk) = generate_tx_keypair();       // SPHINCS+ keypair on quantum builds
 let payload = tx_payload(&tx);
-let sig = sign_tx_payload(&sk, &payload);   // 49,088-byte SPHINCS+ signature
+let sig = sign_tx_payload(&sk, &payload);   // 49,856-byte SPHINCS+ signature
 verify_tx_signature(&pk, &payload, &sig)?;
 ```
 
@@ -129,7 +129,7 @@ verify_merkle_proof(&root, &key, &proof)?;
 
 ### `zkp_verification` — ZK Proof Engine
 
-`BLEEPZKPModule` handles Groth16 (BN254) and Bulletproofs for governance vote privacy and asset recovery proofs. Note: Groth16 is pairing-based and not post-quantum secure — it is used only for vote privacy where retroactive decryption does not pose an asset-loss risk. STARK proofs for block validity are handled by `bleep-zkp`.
+`BLEEPZKPModule` handles Groth16 (BN254) and Bulletproofs for governance vote privacy and asset recovery proofs. Note: Groth16 is pairing-based and not post-quantum secure — it is used only for vote privacy where retroactive decryption does not pose an asset-loss risk. `bleep-zkp`'s extended STARK proves bounded metadata constraints, not block execution validity.
 
 ```rust
 use bleep_crypto::zkp_verification::BLEEPZKPModule;
@@ -143,20 +143,22 @@ module.verify(&proof, &public_inputs)?;
 
 ## Algorithm Parameters
 
-### SPHINCS+-SHAKE-256f-simple (FIPS 205)
+### SPHINCS+-SHAKE-256f-simple
 
 | Parameter | Value |
 |---|---|
+| Standard status | Legacy/round-3 API; FIPS 205 conformance is not claimed |
 | Public key | 64 bytes |
 | Secret key | 128 bytes (`Zeroizing<Vec<u8>>`) |
-| Signature | 49,088 bytes |
+| Signature | 49,856 bytes |
 | Security assumption | One-wayness of SHAKE-256 (hash-based) |
 | Post-quantum secure | Yes — no algebraic assumptions |
 
-### Kyber-1024 / ML-KEM-1024 (FIPS 203)
+### Kyber-1024
 
 | Parameter | Value |
 |---|---|
+| Standard status | Legacy Kyber API; not FIPS 203 ML-KEM |
 | Encapsulation key | 1,568 bytes |
 | Decapsulation key | 3,168 bytes (`Zeroizing<Vec<u8>>`) |
 | Ciphertext | 1,568 bytes |

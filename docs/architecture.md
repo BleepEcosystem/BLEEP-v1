@@ -261,11 +261,11 @@ Join us in building a chain that adapts, protects, and survives the future.
 
 **Status:** Live — Protocol Version 5, Sprint 10
 
-The SAL solves the SPHINCS+ block-propagation bandwidth problem without sacrificing post-quantum security.
+The SAL is intended to reduce SPHINCS+ block-propagation bandwidth. A signature commitment is not a substitute for checking the signatures or the commitment-root derivation.
 
 ### Problem
 
-SPHINCS+-SHAKE-256f-simple produces 49,088-byte signatures. At 512 tx/block, raw signature data per block is ~24.3 MB. Broadcasting this with every block is impractical for validators on commodity internet connections.
+SPHINCS+-SHAKE-256f-simple produces 49,856-byte signatures. At 512 tx/block, raw signature data per block is about 24.3 MiB. Broadcasting this with every block is impractical for validators on commodity internet connections.
 
 ### Solution
 
@@ -280,17 +280,20 @@ Blake3 Merkle tree over {sig_hash_i}
 
 block.sig_commitment_root = root        ← stamped BEFORE signing
 block.sign_block_with_pk()             ← SPHINCS+ sig covers root
-generate_extended_proof()              ← STARK proof commits to root
+generate_extended_proof()              ← root is a public input; AIR does not prove its derivation
 
-Gossip: to_gossip()                    →  ~320 KB (zero sig bytes)
+Gossip: to_gossip()                    →  compact payload (signature bytes omitted)
 SAL: broadcast_block_announcement()    →  sig_commitment_root + sig_hashes
 
                                             receive CompactBlock
-                                            verify SPHINCS+ sig (covers root)
-                                            verify STARK proof (covers root)
-                                            verify_sig_commitment_root():
-                                              sigs empty → trust STARK ✓
+                                            fetch/verify full signatures
+                                            recompute signature commitment
+                                            verify block through conventional validation
 ```
+
+The current extended STARK proves bounded metadata relationships only; it does not prove
+signature validity or signature-commitment-root derivation. Blocks with stripped transaction
+signatures must not be accepted on the strength of the STARK alone.
 
 ### Data Structures
 
@@ -312,4 +315,3 @@ block.zk_proof (non-empty blocks):
 ```
 
 `Block::verify_zkp()` dispatches on the `EXTSTARK1` prefix. Legacy `STARK_V1` and Fiat-Shamir proofs are still accepted for backward compatibility.
-

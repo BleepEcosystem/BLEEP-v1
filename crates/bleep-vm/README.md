@@ -271,7 +271,7 @@ executor.router.register_engine(Arc::new(CairoEngine));
 | Solidity / Vyper (EVM) | ✅ Live | revm — Berlin/London/Shanghai compatible |
 | WASM | ✅ Live | Wasmer 4.2 + Cranelift JIT |
 | ZK (Groth16) | ✅ Live | ark-groth16 on BN254 |
-| STARK (Winterfell) | ✅ Live | Block validity proofs via `bleep-zkp` |
+| STARK (Winterfell) | ✅ Live | Bounded block-metadata proofs via `bleep-zkp`; not execution-validity proofs |
 | Cross-chain (BLEEP Connect) | ✅ Live | Tiers 3 and 4 on Ethereum Sepolia |
 | Move VM | 🔲 Planned (Phase 8) | — |
 | zkEVM | 🔲 Planned (Phase 8) | — |

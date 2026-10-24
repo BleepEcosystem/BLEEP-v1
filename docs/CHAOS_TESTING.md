@@ -5,6 +5,11 @@
 **Continuous run:** 72 hours  
 **Result:** ✅ All applicable scenarios PASS
 
+The `LoadStress` entries are arithmetic block-capacity model checks in `ChaosEngine`; they do
+not submit transactions, run a sustained load, or measure TPS. They must not be read as achieved
+throughput. See [benchmark.md](../benchmark.md) for measured single-node CLI results and their
+limitations.
+
 ---
 
 ## BFT Safety Bound
@@ -34,9 +39,9 @@ BLEEP consensus tolerates up to `f < n/3` Byzantine faults. With `n = 7` validat
 | TxReplay | ✅ PASS | Rejected by nonce check (I-S5) |
 | EclipseAttack(validator-6) | ✅ PASS | Mitigated by Kademlia k=20 and DNS seeds |
 | InvalidBlockFlood(1000) | ✅ PASS | Rejected at SPHINCS+ gate; peer rate-limited |
-| LoadStress(1,000 TPS, 60s) | ✅ PASS | 4,096 tx/block; 1,000 TPS sustained |
-| LoadStress(5,000 TPS, 60s) | ✅ PASS | 4,096 tx/block; 5,000 TPS sustained |
-| LoadStress(10,000 TPS, 60s) | ✅ PASS | Block capacity saturated; 10,000 TPS at max throughput |
+| LoadStress(1,000 TPS, 60s) | ✅ Model check | Arithmetic capacity estimate; no transaction load executed |
+| LoadStress(5,000 TPS, 60s) | ✅ Model check | Arithmetic capacity estimate; no transaction load executed |
+| LoadStress(10,000 TPS, 60s) | ✅ Model check | Block-capacity saturation branch; not a TPS measurement |
 
 ---
 
