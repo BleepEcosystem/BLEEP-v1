@@ -176,6 +176,27 @@ impl Blockchain {
     /// Returns `true` on success.  `public_key` is the expected validator key;
     /// genesis uses `&[]` and is always accepted without signature check.
     pub fn add_block(&mut self, block: Block, public_key: &[u8]) -> bool {
+        self.add_block_inner(block, |previous, block| {
+            BlockValidator::validate_full_block(previous, block, public_key)
+        })
+    }
+
+    /// Validate, apply, drain pool, and append a block whose proposer key must
+    /// belong to the validator set for the block's epoch.
+    pub fn add_block_with_validator_set(
+        &mut self,
+        block: Block,
+        validator_keys: &[Vec<u8>],
+    ) -> bool {
+        self.add_block_inner(block, |previous, block| {
+            BlockValidator::validate_full_block_with_validator_set(previous, block, validator_keys)
+        })
+    }
+
+    fn add_block_inner<F>(&mut self, block: Block, validate: F) -> bool
+    where
+        F: FnOnce(&Block, &Block) -> bool,
+    {
         let last_block = match self.chain.back() {
             Some(b) => b,
             None => {
@@ -185,9 +206,7 @@ impl Blockchain {
         };
 
         // ── 1. Full structural + signature validation ─────────────────────
-        if (!block.transactions.is_empty() || block.index != 0)
-            && !BlockValidator::validate_full_block(last_block, &block, public_key)
-        {
+        if (!block.transactions.is_empty() || block.index != 0) && !validate(last_block, &block) {
             log::error!("Block {} failed validation", block.index);
             return false;
         }

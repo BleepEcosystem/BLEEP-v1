@@ -850,6 +850,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 continue;
                             }
                         };
+                        let epoch_validator_keys = committee_keys
+                            .iter()
+                            .map(|(_, public_key)| public_key.clone())
+                            .collect::<Vec<_>>();
                         if !inbound_pbft_finality.matches_committee(&committee_keys) {
                             warn!(
                                 "[InboundBlockHandler] Ignoring PBFT message for a stale committee"
@@ -934,7 +938,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     continue;
                                 };
                                 if block.index != tip.index.saturating_add(1)
-                                    || !BlockValidator::validate_full_block(&tip, block, signer_pk)
+                                    || !BlockValidator::validate_full_block_with_validator_set(
+                                        &tip,
+                                        block,
+                                        &epoch_validator_keys,
+                                    )
                                 {
                                     false
                                 } else {
@@ -984,35 +992,40 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    let Some(signer_pk) = block
-                        .validator_signature
-                        .get(..bleep_core::block::SPHINCS_PK_LEN)
-                    else {
-                        warn!(
-                            "[InboundBlockHandler] Block {} has no validator signing key",
-                            block.index
-                        );
-                        continue;
+                    let epoch_validator_keys = {
+                        let registry = inbound_validators.lock();
+                        registry
+                            .get_active_validators()
+                            .into_iter()
+                            .filter(|validator| validator.can_participate())
+                            .map(|validator| {
+                                hex::decode(&validator.signing_key_id).map_err(|e| {
+                                    format!(
+                                        "Invalid signing key for active validator {}: {}",
+                                        validator.id, e
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
                     };
-                    let signer_pk = signer_pk.to_vec();
-                    let authorized_signer = inbound_validators
-                        .lock()
-                        .has_active_signing_key(&hex::encode(&signer_pk));
-                    if !authorized_signer {
-                        warn!(
-                            "[InboundBlockHandler] Block {} signer is not in the active validator set",
-                            block.index
-                        );
-                        continue;
-                    }
+                    let epoch_validator_keys = match epoch_validator_keys {
+                        Ok(keys) => keys,
+                        Err(e) => {
+                            warn!(
+                                "[InboundBlockHandler] Could not load epoch validator keys: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    };
 
-                    // Verify the signature against the key embedded by the signer,
-                    // then authorize that key against the local active validator set.
-                    let valid = BlockValidator::validate_block(&block, &signer_pk)
-                        && block
-                            .transactions
-                            .iter()
-                            .all(|tx| tx.chain_id == inbound_chain_id);
+                    let valid = BlockValidator::validate_block_with_validator_set(
+                        &block,
+                        &epoch_validator_keys,
+                    ) && block
+                        .transactions
+                        .iter()
+                        .all(|tx| tx.chain_id == inbound_chain_id);
                     if !valid {
                         warn!(
                             "[InboundBlockHandler] Block {} failed block-level validation — discarding",
@@ -1044,7 +1057,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             continue;
                         };
                         if block.index != tip.index.saturating_add(1)
-                            || !BlockValidator::validate_full_block(&tip, &block, &signer_pk)
+                            || !BlockValidator::validate_full_block_with_validator_set(
+                                &tip,
+                                &block,
+                                &epoch_validator_keys,
+                            )
                         {
                             false
                         } else {
@@ -1078,7 +1095,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 &block.shard_state_root,
                                 &transfers,
                             ) {
-                                Ok(()) => chain.add_block(block.clone(), &signer_pk),
+                                Ok(()) => chain.add_block_with_validator_set(
+                                    block.clone(),
+                                    &epoch_validator_keys,
+                                ),
                                 Err(e) => {
                                     warn!(
                                         "[InboundBlockHandler] Block {} state transition rejected: {}",

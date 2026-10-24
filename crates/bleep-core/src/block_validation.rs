@@ -81,6 +81,28 @@ impl BlockValidator {
         true
     }
 
+    /// Validate a block only if its embedded proposer key belongs to the
+    /// validator set selected for the block's epoch.
+    pub fn validate_block_with_validator_set(block: &Block, validator_keys: &[Vec<u8>]) -> bool {
+        let Some(signer_key) = block
+            .validator_signature
+            .get(..crate::block::SPHINCS_PK_LEN)
+        else {
+            return false;
+        };
+        if !validator_keys
+            .iter()
+            .any(|registered_key| registered_key.as_slice() == signer_key)
+        {
+            log::error!(
+                "Block {} signer is not a member of its epoch validator set",
+                block.index
+            );
+            return false;
+        }
+        Self::validate_block(block, signer_key)
+    }
+
     /// Verify that `block.sig_commitment_root` is consistent with the transaction
     /// signatures carried in the block (proposer path) or trust the STARK proof
     /// (gossip-stripped path).
@@ -303,6 +325,32 @@ impl BlockValidator {
         log::debug!("Block {} passed full validation pipeline", block.index);
         true
     }
+
+    /// Full block validation using the validator set for the block's epoch.
+    pub fn validate_full_block_with_validator_set(
+        prev_block: &Block,
+        block: &Block,
+        validator_keys: &[Vec<u8>],
+    ) -> bool {
+        if !Self::validate_block_with_validator_set(block, validator_keys) {
+            log::error!(
+                "Block {} failed epoch validator-set signature validation",
+                block.index
+            );
+            return false;
+        }
+        if !Self::validate_block_link(prev_block, block)
+            || !Self::network_validate(block)
+            || !Self::ai_validate(block)
+        {
+            log::error!(
+                "Block {} failed link, network, or anomaly validation",
+                block.index
+            );
+            return false;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -358,5 +406,20 @@ mod tests {
 
         block.merkle_root = "tampered".into();
         assert!(!BlockValidator::verify_merkle_root(&block));
+    }
+
+    #[test]
+    fn epoch_validator_set_rejects_unregistered_block_signer() {
+        let mut block = Block::new(1, vec![], "prev".to_string());
+        block.validator_signature = vec![7; crate::block::SPHINCS_PK_LEN];
+
+        assert!(!BlockValidator::validate_block_with_validator_set(
+            &block,
+            &[vec![8; crate::block::SPHINCS_PK_LEN]]
+        ));
+        assert!(!BlockValidator::validate_block_with_validator_set(
+            &block,
+            &[]
+        ));
     }
 }
