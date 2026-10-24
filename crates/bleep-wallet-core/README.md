@@ -101,8 +101,10 @@ The `scripts/` directory in the repository root provides shell wrappers for comm
 
 ## Security
 
-- Secret keys implement `Zeroize` and are zeroed from memory on drop.
-- Falcon private keys are stored encrypted (AES-256-GCM) when persisted to disk.
+- Secret keys and decrypted signing-key buffers are zeroized on drop.
+- Signing keys use Argon2id with a random per-wallet salt and AES-256-GCM.
+- Unix wallet files are atomically written with `0600` permissions.
+- Plaintext key storage requires explicit opt-in and is restricted to dev/test networks.
 - The wallet never transmits private key material over the network.
 - All RPC communication should use TLS in production environments.
 

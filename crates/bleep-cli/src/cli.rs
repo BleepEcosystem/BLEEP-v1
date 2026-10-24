@@ -19,6 +19,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 use bleep_cli::{
     AiCommand, BlockCommand, Cli, Commands, EconomicsCommand, FaucetCommand, GovernanceCommand,
@@ -50,6 +51,43 @@ use bleep_zkp::Verifier as ZkVerifier;
 /// Default RPC endpoint (override via BLEEP_RPC env var).
 const DEFAULT_RPC: &str = "http://127.0.0.1:8545";
 const DEFAULT_P2P_LISTEN_ADDR: &str = "0.0.0.0:7700";
+
+fn wallet_password(confirm: bool) -> Result<Zeroizing<String>> {
+    if let Ok(password) = std::env::var("BLEEP_WALLET_PASSWORD") {
+        if password.is_empty() {
+            return Err(anyhow!("BLEEP_WALLET_PASSWORD must not be empty"));
+        }
+        return Ok(Zeroizing::new(password));
+    }
+
+    let password = Zeroizing::new(rpassword::prompt_password("Wallet password: ")?);
+    if password.is_empty() {
+        return Err(anyhow!("Wallet password must not be empty"));
+    }
+    if confirm {
+        let confirmation = Zeroizing::new(rpassword::prompt_password("Confirm wallet password: ")?);
+        if *password != *confirmation {
+            return Err(anyhow!("Wallet passwords do not match"));
+        }
+    }
+    Ok(password)
+}
+
+fn unlock_wallet_key(
+    wallet: &bleep_wallet_core::wallet::EncryptedWallet,
+) -> Result<Zeroizing<Vec<u8>>> {
+    if wallet.is_plaintext_dev() {
+        if !bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
+            return Err(anyhow!(
+                "Plaintext wallet unlock requires BLEEP_WALLET_PLAINTEXT_DEV=1 on a dev/test network"
+            ));
+        }
+        return wallet.unlock("").map_err(Into::into);
+    }
+
+    let password = wallet_password(false)?;
+    wallet.unlock(&password).map_err(Into::into)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -105,22 +143,34 @@ async fn run(cmd: Commands) -> Result<()> {
 
             match action {
                 WalletCommand::Create => {
-                    // Sprint 5: Generate SPHINCS+ keypair, encrypt SK with AES-256-GCM
                     let (pk, sk) = generate_tx_keypair();
+                    let sk = Zeroizing::new(sk);
                     let kyber_pk = pk.clone();
-                    // Use empty password by default; users can re-lock with `wallet lock`
-                    let wallet =
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
-                            pk, &sk, kyber_pk, "",
+                    let wallet = if bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_plaintext_dev(
+                            pk, &sk, kyber_pk,
                         )
-                        .map_err(|e| anyhow!("Key encryption failed: {}", e))?;
+                    } else {
+                        let password = wallet_password(true)?;
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
+                            pk, &sk, kyber_pk, &password,
+                        )
+                    }
+                    .map_err(|e| anyhow!("Wallet key protection failed: {}", e))?;
                     manager
                         .save_wallet(wallet.clone())
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
                     println!("✅ Wallet created");
                     println!("   Address: {}", wallet.address());
                     println!("   Type:    Quantum-secure (SPHINCS+-SHAKE-256)");
-                    println!("   Signing: ✅ ready (SK encrypted with AES-256-GCM)");
+                    println!(
+                        "   Signing: ✅ ready ({})",
+                        if wallet.is_plaintext_dev() {
+                            "plaintext dev mode"
+                        } else {
+                            "Argon2id + AES-256-GCM"
+                        }
+                    );
                     println!("   ⚠️  Back up your key material in a safe location.");
 
                     // Automatically request faucet funds for the new wallet
@@ -180,19 +230,32 @@ async fn run(cmd: Commands) -> Result<()> {
                     }
                 }
                 WalletCommand::Import { phrase } => {
-                    // Sprint 5: Real BIP-39 derivation + AES-256-GCM SK encryption
+                    let phrase = Zeroizing::new(phrase);
+                    // Derive the signing material and protect it before persistence.
                     validate_mnemonic(&phrase).map_err(|e| anyhow!("Invalid mnemonic: {}", e))?;
-                    let seed_32 = mnemonic_to_bleep_seed(&phrase, "")
-                        .map_err(|e| anyhow!("BIP-39 derivation failed: {}", e))?;
+                    let seed_32 = Zeroizing::new(
+                        mnemonic_to_bleep_seed(&phrase, "")
+                            .map_err(|e| anyhow!("BIP-39 derivation failed: {}", e))?,
+                    );
                     use sha3::{Digest, Sha3_256};
-                    let pk: Vec<u8> = Sha3_256::digest(seed_32).to_vec();
-                    let sk: Vec<u8> = seed_32.to_vec();
+                    let pk: Vec<u8> = Sha3_256::digest(seed_32.as_ref()).to_vec();
                     let kyber_pk = pk.clone();
-                    let wallet =
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
-                            pk, &sk, kyber_pk, "",
+                    let wallet = if bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_plaintext_dev(
+                            pk,
+                            seed_32.as_ref(),
+                            kyber_pk,
                         )
-                        .map_err(|e| anyhow!("Key encryption failed: {}", e))?;
+                    } else {
+                        let password = wallet_password(true)?;
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
+                            pk,
+                            seed_32.as_ref(),
+                            kyber_pk,
+                            &password,
+                        )
+                    }
+                    .map_err(|e| anyhow!("Wallet key protection failed: {}", e))?;
                     manager
                         .save_wallet(wallet.clone())
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
@@ -201,7 +264,14 @@ async fn run(cmd: Commands) -> Result<()> {
                         wallet.address()
                     );
                     println!("   Mnemonic words: {}", phrase.split_whitespace().count());
-                    println!("   SK encrypted with AES-256-GCM at rest.");
+                    println!(
+                        "   Key protection: {}",
+                        if wallet.is_plaintext_dev() {
+                            "plaintext dev mode"
+                        } else {
+                            "Argon2id + AES-256-GCM"
+                        }
+                    );
                 }
                 WalletCommand::Export => {
                     for w in manager.list_wallets() {
@@ -260,11 +330,7 @@ async fn run(cmd: Commands) -> Result<()> {
                     match wallet_opt {
                         Some(w) if w.can_sign() => {
                             let payload = tx_payload(&chain_id, &sender, &to, amount, ts, nonce);
-                            // Decrypt SK (empty password = default; users who locked
-                            // with a custom password set BLEEP_WALLET_PASSWORD env var)
-                            let password =
-                                std::env::var("BLEEP_WALLET_PASSWORD").unwrap_or_default();
-                            let sk_plain = w.unlock(&password)
+                            let sk_plain = unlock_wallet_key(&w)
                                 .map_err(|e| anyhow!("Wallet unlock failed — set BLEEP_WALLET_PASSWORD if encrypted: {}", e))?;
                             let detached_sig = sign_tx_payload(&payload, &sk_plain)
                                 .map_err(|e| anyhow!("SPHINCS+ signing failed: {}", e))?;
