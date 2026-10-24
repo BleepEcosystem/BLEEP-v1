@@ -2,7 +2,7 @@
 // the active, registered committee snapshot.
 
 use crate::validator_identity::ValidatorRegistry;
-use bleep_core::block::{Block, ConsensusMode};
+use bleep_core::block::{Block, BlockHeader, ConsensusMode};
 use bleep_crypto::{DigitalSignature, PublicKey, SignatureScheme};
 use log::info;
 use serde::{Deserialize, Serialize};
@@ -51,40 +51,32 @@ impl FinalityHeader {
     }
 
     fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"BLEEP_BLOCK_HEADER_V1");
-        bytes.extend_from_slice(&self.height.to_le_bytes());
-        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
-        append_string(&mut bytes, &self.previous_hash);
-        append_string(&mut bytes, &self.merkle_root);
-        bytes.extend_from_slice(&self.epoch_id.to_le_bytes());
-        bytes.push(self.consensus_mode as u8);
-        bytes.extend_from_slice(&self.protocol_version.to_le_bytes());
-        append_string(&mut bytes, &self.shard_registry_root);
-        bytes.extend_from_slice(&self.shard_id.to_le_bytes());
-        append_string(&mut bytes, &self.shard_state_root);
-        bytes.extend_from_slice(&self.sig_commitment_root);
-        append_string(&mut bytes, &self.block_hash);
+        let mut bytes = self.as_block_header().canonical_hash_preimage();
+        let block_hash: [u8; 32] = Sha3_256::digest(self.block_hash.as_bytes()).into();
+        bytes.extend_from_slice(&block_hash);
         bytes
     }
 
     fn calculated_block_hash(&self) -> String {
-        let mut hasher = Sha3_256::new();
-        hasher.update(format!(
-            "{}{}{}{}{}{}{}{}{}{}",
-            self.height,
-            self.timestamp,
-            self.previous_hash,
-            self.merkle_root,
-            self.epoch_id,
-            self.consensus_mode as u8,
-            self.protocol_version,
-            self.shard_registry_root,
-            self.shard_id,
-            self.shard_state_root
-        ));
-        hasher.update(self.sig_commitment_root);
-        hex::encode(hasher.finalize())
+        self.as_block_header().canonical_hash()
+    }
+
+    fn as_block_header(&self) -> BlockHeader {
+        BlockHeader {
+            index: self.height,
+            timestamp: self.timestamp,
+            previous_hash: self.previous_hash.clone(),
+            merkle_root: self.merkle_root.clone(),
+            validator_signature: Vec::new(),
+            zk_proof: Vec::new(),
+            epoch_id: self.epoch_id,
+            consensus_mode: self.consensus_mode,
+            protocol_version: self.protocol_version,
+            shard_registry_root: self.shard_registry_root.clone(),
+            shard_id: self.shard_id,
+            shard_state_root: self.shard_state_root.clone(),
+            sig_commitment_root: self.sig_commitment_root,
+        }
     }
 
     fn verify_hash(&self) -> Result<(), String> {
@@ -93,11 +85,6 @@ impl FinalityHeader {
         }
         Ok(())
     }
-}
-
-fn append_string(bytes: &mut Vec<u8>, value: &str) {
-    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(value.as_bytes());
 }
 
 /// Cryptographic proof that a block was finalized by the registered committee.
