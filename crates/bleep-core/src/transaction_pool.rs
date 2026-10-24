@@ -244,7 +244,7 @@ mod tests {
             amount,
             timestamp,
             nonce,
-            signature: full_sig,
+            signature,
         }
     }
 

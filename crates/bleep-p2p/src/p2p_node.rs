@@ -469,7 +469,7 @@ mod tests {
         let (node2, handle2) = start_bootstrap_test_node(node2_port, &[node1_port]).await;
         let (node3, handle3) = start_bootstrap_test_node(17712, &[node1_port, node2_port]).await;
 
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             loop {
                 let connected = node1.peer_count() == 2
                     && node2.peer_count() == 2

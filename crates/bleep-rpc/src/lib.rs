@@ -1206,7 +1206,39 @@ pub fn rpc_routes_with_state(
         .or(layer3_intent_submit_route(Arc::clone(&state_inner)))
         .or(benchmark_result_route(Arc::clone(&state_inner)))
         .or(audit_report_route(Arc::clone(&state_inner)))
+        .recover(handle_rpc_rejection)
         .boxed()
+}
+
+async fn handle_rpc_rejection(
+    rejection: warp::Rejection,
+) -> Result<impl warp::Reply, std::convert::Infallible> {
+    let (status, error) = if let Some(AuthRejection(error)) = rejection.find::<AuthRejection>() {
+        let status = match error {
+            AuthError::Unauthorized(_) => warp::http::StatusCode::FORBIDDEN,
+            AuthError::InvalidSession | AuthError::ExpiredSession | AuthError::RevokedSession => {
+                warp::http::StatusCode::UNAUTHORIZED
+            }
+            _ => warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, error.to_string())
+    } else if rejection.is_not_found() {
+        (
+            warp::http::StatusCode::NOT_FOUND,
+            "Route not found".to_string(),
+        )
+    } else {
+        log::warn!("Unhandled RPC rejection: {rejection:?}");
+        (
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    };
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&ErrResp { error }),
+        status,
+    ))
 }
 
 /// Convenience wrapper with zero-state (stub / test mode).
@@ -4079,7 +4111,7 @@ mod tests {
     async fn dapp_token_cannot_mint_rotate_or_register_operators() {
         use bleep_auth::Role;
 
-        let auth_service = Arc::new(AuthService::new(vec![0x42; 32]).expect("auth service"));
+        let auth_service = Arc::new(AuthService::new((0u8..32).collect()).expect("auth service"));
         let token = auth_service
             .sessions
             .issue(
@@ -4148,11 +4180,18 @@ mod tests {
             .with_blockchain(Arc::clone(&blockchain));
 
         let routes = rpc_routes_with_state(rpc_state);
+        let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
+        std::env::set_var("BLEEP_NETWORK_MODE", "test");
         let resp = request()
             .method("POST")
             .path(&format!("/faucet/{}", address))
             .reply(&routes)
             .await;
+        if let Some(network_mode) = previous_network_mode {
+            std::env::set_var("BLEEP_NETWORK_MODE", network_mode);
+        } else {
+            std::env::remove_var("BLEEP_NETWORK_MODE");
+        }
 
         assert_eq!(resp.status(), 200);
 
