@@ -20,7 +20,10 @@ pub use blockchain_state::BlockchainState;
 pub use consensus::{BLEEPAdaptiveConsensus, ConsensusMode, Validator};
 pub use engine::{ConsensusEngine, ConsensusError};
 pub use epoch::{ConsensusMode as EpochConsensusMode, EpochConfig, EpochState};
-pub use finality::{FinalityProof, FinalizityManager, FinalizyCertificate, ValidatorSignature};
+pub use finality::{
+    FinalityHeader, FinalityManager, FinalityProof, FinalizityManager, FinalizyCertificate,
+    ValidatorSignature,
+};
 pub use networking::NetworkingModule;
 pub use orchestrator::ConsensusOrchestrator;
 pub use slashing_engine::{SlashingEngine, SlashingEvent, SlashingEvidence, SlashingPenalty};

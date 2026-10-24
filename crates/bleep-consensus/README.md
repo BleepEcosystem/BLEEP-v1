@@ -104,7 +104,7 @@ Each epoch (1,000 blocks on mainnet / 100 blocks on testnet):
 
 ## Finality
 
-`FinalityManager` finalises blocks when valid SPHINCS+-SHAKE-256f-simple signatures from precommits represent **>6,667 bps (66.67%) of total staked supply**. Each validator signature is verified before a certificate is accepted; signatures are stored individually because SPHINCS+ does not provide BLS-style aggregation. Finalisation is irreversible. Long-range reorgs are rejected regardless of claimed proof-of-work — verified in the adversarial test suite at depths of 10 and 50 blocks.
+`FinalityManager` accepts a certificate only when registered active validators provide **strictly more than two-thirds** of committee voting power. The committee hash commits to validator IDs, registered SPHINCS+ keys, and effective on-chain stake; signer entries contain no caller-supplied key or voting power. Each signature covers a domain-separated encoding of the complete semantic block header, finality epoch and timestamp, and committee hash. Signatures are stored individually because SPHINCS+ does not provide BLS-style aggregation. Finalisation is irreversible. Long-range reorgs are rejected regardless of claimed proof-of-work — verified in the adversarial test suite at depths of 10 and 50 blocks.
 
 ---
 
