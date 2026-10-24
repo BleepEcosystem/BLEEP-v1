@@ -85,6 +85,10 @@ use bleep_pat::launch_asset_token_logic;
 use bleep_wallet_core::init_wallet_services;
 
 // ── Economics ─────────────────────────────────────────────────────────────────
+use bleep_economics::distribution::{
+    INITIAL_CIRCULATING_SUPPLY, LAUNCH_COMMUNITY_UNLOCK, LAUNCH_ECOSYSTEM_UNLOCK,
+    LAUNCH_FOUNDATION_UNLOCK, LAUNCH_VALIDATOR_UNLOCK,
+};
 use bleep_economics::oracle_bridge::{OracleSource, PriceUpdate};
 use bleep_economics::{BleepEconomicsRuntime, EpochInput};
 
@@ -191,6 +195,28 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
+    let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "BLEEP_JWT_SECRET is required and must contain base64-encoded random key material",
+        )
+    })?;
+    let jwt_secret = general_purpose::STANDARD
+        .decode(&jwt_secret_b64)
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("BLEEP_JWT_SECRET is not valid base64: {e}"),
+            )
+        })?;
+    if jwt_secret.len() < 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "BLEEP_JWT_SECRET must decode to at least 32 bytes",
+        )
+        .into());
+    }
+
     // ── Step 1: Post-quantum keypair generation ───────────────────────────────
     info!("🔐 [1/16] Generating post-quantum keypairs…");
     let _qs = QuantumSecure::keygen();
@@ -256,28 +282,42 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // Mint genesis allocations only at height 0 (first start).
-    // mint() now returns Result — cap violations are logged and abort startup.
+    // Mint the canonical launch unlocks only into a fresh genesis state.
+    // Existing height-0 state with a different supply must be migrated or reset,
+    // never silently topped up with a second allocation.
     if state.block_height() == 0 {
-        state
-            .mint("bleep:genesis:foundation", 500_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint foundation failed: {}", e);
-                std::process::exit(1);
-            });
-        state
-            .mint("bleep:genesis:rewards", 100_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint rewards failed: {}", e);
-                std::process::exit(1);
-            });
-        state
-            .mint("bleep:genesis:validators", 50_000_000_000_000u128)
-            .unwrap_or_else(|e| {
-                error!("Genesis mint validators failed: {}", e);
-                std::process::exit(1);
-            });
-        info!("  ✅ Genesis allocations minted (650T µBLEEP).");
+        let existing_supply = state.total_supply();
+        if existing_supply == 0 {
+            for (address, amount) in [
+                ("bleep:genesis:foundation", LAUNCH_FOUNDATION_UNLOCK),
+                ("bleep:genesis:rewards", LAUNCH_VALIDATOR_UNLOCK),
+                ("bleep:genesis:community", LAUNCH_COMMUNITY_UNLOCK),
+                ("bleep:genesis:ecosystem", LAUNCH_ECOSYSTEM_UNLOCK),
+            ] {
+                state.mint(address, amount).unwrap_or_else(|e| {
+                    error!("Genesis mint for {address} failed: {e}");
+                    std::process::exit(1);
+                });
+            }
+        } else if existing_supply != INITIAL_CIRCULATING_SUPPLY {
+            error!(
+                "Height-0 state has {} microBLP; expected 0 (fresh genesis) or {} (already allocated). Reset or explicitly migrate this state before starting the updated testnet.",
+                existing_supply, INITIAL_CIRCULATING_SUPPLY
+            );
+            std::process::exit(1);
+        }
+        if state.total_supply() != INITIAL_CIRCULATING_SUPPLY {
+            error!(
+                "Genesis supply invariant failed: expected {} microBLP, got {}.",
+                INITIAL_CIRCULATING_SUPPLY,
+                state.total_supply()
+            );
+            std::process::exit(1);
+        }
+        info!(
+            "  ✅ Genesis allocations verified ({} BLP circulating; 200,000,000 BLP hard cap).",
+            INITIAL_CIRCULATING_SUPPLY / 100_000_000
+        );
     }
 
     // Rebuild the Sparse Merkle Trie from the persisted DB state
@@ -406,6 +446,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("💰 [9/16] Initialising BleepEconomicsRuntime (tokenomics + fee market + oracle)…");
     let economics_runtime = {
         let mut rt = BleepEconomicsRuntime::genesis();
+        let current_supply = state.lock().total_supply();
+        rt.initialize_genesis_supply(current_supply)
+            .map_err(|e| format!("Economics supply initialization failed: {e}"))?;
+        info!(
+            "  ✅ Economics supply initialized from persisted account balances ({} microBLP).",
+            current_supply
+        );
 
         // Register genesis validator with economics engine
         let genesis_val_id = hex::encode(&sphincs_pk[..8]);
@@ -576,8 +623,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 11: Scheduler + BlockProducer ───────────────────────────────────
     info!("⚖  [14/16] Wiring BlockProducer and task Scheduler…");
 
-    // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx
-    // GossipBridge subscribes to block_tx and handles P2P broadcast externally
+    // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx.
+    // It gossips complete serialized blocks directly through the P2P node.
     let (mut block_producer, block_rx) = BlockProducer::new_with_sig_availability(
         hex::encode(&sphincs_pk[..8]), // validator_id (first 8 bytes of SPHINCS+ PK)
         1_000_000u64,                  // stake weight
@@ -596,8 +643,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     block_producer.set_canonical_commit_lock(Arc::clone(&canonical_commit_lock));
     let block_producer = Arc::new(block_producer);
 
-    // Subscribe a second receiver for GossipBridge BEFORE the producer starts
-    let block_rx_gossip = block_producer.subscribe();
     let mut block_rx_sched = block_rx;
 
     // Build scheduler
@@ -639,6 +684,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_connect_orchestrator(Arc::clone(&connect_orchestrator))
         .with_pat_registry(Arc::clone(&pat_registry))
         .with_transaction_pool(Arc::clone(&tx_pool))
+        .with_p2p_node(Arc::clone(&p2p_node))
         .with_blockchain(Arc::clone(&blockchain))
         .with_auth_service(Arc::clone(&auth_service));
 
@@ -734,17 +780,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         BlockProducer::run_arc(producer_for_task).await;
     });
 
-    // GossipBridge: fan out FinalizedBlock events to connected P2P peers
-    let gossip_bridge = bleep_consensus::GossipBridge::new(Arc::clone(&p2p_node));
-    let gossip_handle = tokio::spawn(async move {
-        gossip_bridge.run(block_rx_gossip).await;
-    });
-
     // ── Inbound block handler ────────────────────────────────────────────────
     // Listens for gossip blocks from peers, validates them, and inserts
     // valid blocks into the local chain (sync-mode / light node path).
     let inbound_blockchain = Arc::clone(&blockchain);
     let inbound_p2p_node = Arc::clone(&p2p_node);
+    let inbound_tx_pool = Arc::clone(&tx_pool);
     let inbound_state = Arc::clone(&state);
     let inbound_validators = Arc::clone(&validator_registry);
     let inbound_chain_id = chain_id.clone();
@@ -756,8 +797,33 @@ async fn run() -> Result<(), Box<dyn Error>> {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
         loop {
             match inbound_p2p_node.recv_with_payload().await {
-                Some((_peer_id, mut msg, plaintext)) => {
+                Some((peer_id, mut msg, plaintext)) => {
                     msg.payload = plaintext;
+                    if msg.message_type == MessageType::Transaction {
+                        let transaction: bleep_core::transaction::ZKTransaction =
+                            match serde_json::from_slice(&msg.payload) {
+                                Ok(transaction) => transaction,
+                                Err(error) => {
+                                    warn!(
+                                        "[InboundBlockHandler] Bad transaction gossip payload: {}",
+                                        error
+                                    );
+                                    continue;
+                                }
+                            };
+                        if transaction.chain_id != inbound_chain_id {
+                            warn!(
+                                "[InboundBlockHandler] Rejecting transaction for chain {}",
+                                transaction.chain_id
+                            );
+                            continue;
+                        }
+                        if inbound_tx_pool.add_transaction(transaction).await {
+                            inbound_p2p_node.gossip.enqueue(msg, Some(peer_id));
+                        }
+                        continue;
+                    }
+
                     if msg.message_type == MessageType::SigAvailability {
                         sal_bridge.handle_inbound_message(msg);
                         continue;
@@ -784,6 +850,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 continue;
                             }
                         };
+                        let epoch_validator_keys = committee_keys
+                            .iter()
+                            .map(|(_, public_key)| public_key.clone())
+                            .collect::<Vec<_>>();
                         if !inbound_pbft_finality.matches_committee(&committee_keys) {
                             warn!(
                                 "[InboundBlockHandler] Ignoring PBFT message for a stale committee"
@@ -868,7 +938,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     continue;
                                 };
                                 if block.index != tip.index.saturating_add(1)
-                                    || !BlockValidator::validate_full_block(&tip, block, signer_pk)
+                                    || !BlockValidator::validate_full_block_with_validator_set(
+                                        &tip,
+                                        block,
+                                        &epoch_validator_keys,
+                                    )
                                 {
                                     false
                                 } else {
@@ -918,35 +992,40 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    let Some(signer_pk) = block
-                        .validator_signature
-                        .get(..bleep_core::block::SPHINCS_PK_LEN)
-                    else {
-                        warn!(
-                            "[InboundBlockHandler] Block {} has no validator signing key",
-                            block.index
-                        );
-                        continue;
+                    let epoch_validator_keys = {
+                        let registry = inbound_validators.lock();
+                        registry
+                            .get_active_validators()
+                            .into_iter()
+                            .filter(|validator| validator.can_participate())
+                            .map(|validator| {
+                                hex::decode(&validator.signing_key_id).map_err(|e| {
+                                    format!(
+                                        "Invalid signing key for active validator {}: {}",
+                                        validator.id, e
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
                     };
-                    let signer_pk = signer_pk.to_vec();
-                    let authorized_signer = inbound_validators
-                        .lock()
-                        .has_active_signing_key(&hex::encode(&signer_pk));
-                    if !authorized_signer {
-                        warn!(
-                            "[InboundBlockHandler] Block {} signer is not in the active validator set",
-                            block.index
-                        );
-                        continue;
-                    }
+                    let epoch_validator_keys = match epoch_validator_keys {
+                        Ok(keys) => keys,
+                        Err(e) => {
+                            warn!(
+                                "[InboundBlockHandler] Could not load epoch validator keys: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    };
 
-                    // Verify the signature against the key embedded by the signer,
-                    // then authorize that key against the local active validator set.
-                    let valid = BlockValidator::validate_block(&block, &signer_pk)
-                        && block
-                            .transactions
-                            .iter()
-                            .all(|tx| tx.chain_id == inbound_chain_id);
+                    let valid = BlockValidator::validate_block_with_validator_set(
+                        &block,
+                        &epoch_validator_keys,
+                    ) && block
+                        .transactions
+                        .iter()
+                        .all(|tx| tx.chain_id == inbound_chain_id);
                     if !valid {
                         warn!(
                             "[InboundBlockHandler] Block {} failed block-level validation — discarding",
@@ -978,7 +1057,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             continue;
                         };
                         if block.index != tip.index.saturating_add(1)
-                            || !BlockValidator::validate_full_block(&tip, &block, &signer_pk)
+                            || !BlockValidator::validate_full_block_with_validator_set(
+                                &tip,
+                                &block,
+                                &epoch_validator_keys,
+                            )
                         {
                             false
                         } else {
@@ -1009,9 +1092,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 &block.previous_hash,
                                 &inbound_chain_id,
                                 &inbound_genesis_hash,
+                                &block.shard_state_root,
                                 &transfers,
                             ) {
-                                Ok(()) => chain.add_block(block.clone(), &signer_pk),
+                                Ok(()) => chain.add_block_with_validator_set(
+                                    block.clone(),
+                                    &epoch_validator_keys,
+                                ),
                                 Err(e) => {
                                     warn!(
                                         "[InboundBlockHandler] Block {} state transition rejected: {}",
@@ -1179,7 +1266,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Abort background tasks
     producer_handle.abort();
     relay_handle.abort();
-    gossip_handle.abort();
     bridge_handle.abort();
     interval_handle.abort();
     block_sched_handle.abort();

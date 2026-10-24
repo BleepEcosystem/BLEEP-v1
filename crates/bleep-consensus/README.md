@@ -2,7 +2,7 @@
 
 **Post-Quantum BFT Consensus Engine — BLEEP Quantum Trust Network**
 
-`bleep-consensus` implements BLEEP's multi-mode proof-of-stake Byzantine fault-tolerant consensus. It produces SPHINCS+-signed blocks with embedded Winterfell STARK validity proofs, manages epoch transitions, enforces deterministic slashing, and coordinates across 10 shards — all under a strict safety-over-liveliness design principle.
+`bleep-consensus` implements BLEEP's multi-mode proof-of-stake Byzantine fault-tolerant consensus. It produces SPHINCS+-signed blocks with embedded Winterfell STARK proofs of bounded metadata constraints (not execution validity), manages epoch transitions, enforces deterministic slashing, and coordinates across 10 shards.
 
 ---
 
@@ -104,7 +104,7 @@ Each epoch (1,000 blocks on mainnet / 100 blocks on testnet):
 
 ## Finality
 
-`FinalityManager` finalises blocks when valid SPHINCS+-SHAKE-256f-simple signatures from precommits represent **>6,667 bps (66.67%) of total staked supply**. Each validator signature is verified before a certificate is accepted; signatures are stored individually because SPHINCS+ does not provide BLS-style aggregation. Finalisation is irreversible. Long-range reorgs are rejected regardless of claimed proof-of-work — verified in the adversarial test suite at depths of 10 and 50 blocks.
+`FinalityManager` accepts a certificate only when registered active validators provide **strictly more than two-thirds** of committee voting power. The committee hash commits to validator IDs, registered SPHINCS+ keys, and effective on-chain stake; signer entries contain no caller-supplied key or voting power. Each signature covers a domain-separated encoding of the complete semantic block header, finality epoch and timestamp, and committee hash. Signatures are stored individually because SPHINCS+ does not provide BLS-style aggregation. Finalisation is irreversible. Long-range reorgs are rejected regardless of claimed proof-of-work — verified in the adversarial test suite at depths of 10 and 50 blocks.
 
 ---
 
@@ -133,7 +133,7 @@ The following scenarios are covered in the 72-hour adversarial test suite:
 | `LongRangeReorg(50)` | Rejected at `FinalityManager` |
 | `DoubleSign(validator-0)` | 33% slashed; evidence committed; tombstoned |
 | `STARKProofTamper` | Tampered proof rejected at `BlockValidityVerifier` |
-| `LoadStress(10,000 TPS, 60s)` | Max throughput; STARK proofs generated within slot budget |
+| `LoadStress(10,000 TPS, 60s)` | Arithmetic block-capacity model check; not an executed load test or measured TPS |
 | SAL integration (Sprint 10) | `sig_commitment_root` verified in `validate_block()`; gossip-stripped blocks accepted via extended STARK proof |
 | SAL integration | `sig_commitment_root` verified in `validate_block()`; gossip-stripped blocks accepted |
 

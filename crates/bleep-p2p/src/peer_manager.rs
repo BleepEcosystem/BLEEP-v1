@@ -524,7 +524,8 @@ mod tests {
             peer.status = PeerStatus::Candidate;
         }
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), pm.maintenance_sweep()).await
+        tokio::time::timeout(std::time::Duration::from_secs(2), pm.maintenance_sweep())
+            .await
             .expect("maintenance_sweep should not deadlock while a live peer is present");
 
         assert!(pm.get_peer(&id).is_some());

@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
@@ -39,6 +40,7 @@ use warp::Filter;
 use bleep_auth::{AuthError, AuthService, Permission, SessionClaims};
 use bleep_core::{transaction_pool::TransactionPool, Blockchain};
 use bleep_crypto::{tx_payload, verify_tx_signature};
+use bleep_p2p::{p2p_node::P2PNode, types::MessageType};
 
 // ─── Auth rejection ──────────────────────────────────────────────────────────
 
@@ -95,6 +97,8 @@ pub struct RpcState {
     pub block_producer: Option<Arc<BlockProducer>>,
     /// Live TransactionPool — attach at node startup so POST /rpc/tx can enqueue transactions.
     pub transaction_pool: Option<Arc<TransactionPool>>,
+    /// P2P node used to gossip newly accepted transactions to connected peers.
+    pub p2p_node: Option<Arc<P2PNode>>,
     /// Live Blockchain state — attach so faucet credits update the consensus state.
     pub blockchain: Option<Arc<RwLock<Blockchain>>>,
 }
@@ -129,6 +133,7 @@ impl RpcState {
             audit_export_enabled: true,
             block_producer: None,
             transaction_pool: None,
+            p2p_node: None,
             blockchain: None,
         }
     }
@@ -188,6 +193,12 @@ impl RpcState {
         self
     }
 
+    /// Attach the P2P node for transaction gossip after local pool admission.
+    pub fn with_p2p_node(mut self, node: Arc<P2PNode>) -> Self {
+        self.p2p_node = Some(node);
+        self
+    }
+
     /// Attach the live `Blockchain` so faucet credits update the in-memory consensus state.
     pub fn with_blockchain(mut self, blockchain: Arc<RwLock<Blockchain>>) -> Self {
         self.blockchain = Some(blockchain);
@@ -227,6 +238,7 @@ struct HealthResp {
     peers: usize,
     uptime_secs: u64,
     version: &'static str,
+    chain_id: String,
 }
 
 #[derive(Serialize)]
@@ -460,6 +472,8 @@ pub fn rpc_routes_with_state(
                 peers: st.peer_count.load(std::sync::atomic::Ordering::Relaxed),
                 uptime_secs: st.uptime_secs(),
                 version: env!("CARGO_PKG_VERSION"),
+                chain_id: std::env::var("BLEEP_CHAIN_ID")
+                    .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string()),
             })
         });
 
@@ -502,6 +516,8 @@ pub fn rpc_routes_with_state(
         .and(with_rpc_state(rpc.clone()))
         .and_then(
             |req: TxReq, _claims: SessionClaims, st: RpcState| async move {
+                let p2p_node = st.p2p_node.clone();
+
                 // Check if TransactionPool is attached
                 let pool = match st.transaction_pool {
                     Some(p) => p,
@@ -525,14 +541,28 @@ pub fn rpc_routes_with_state(
                     signature: req.signature,
                 };
 
+                let gossip_payload = match serde_json::to_vec(&tx) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        log::error!("Failed to serialize accepted transaction for gossip: {error}");
+                        return Ok::<_, warp::Rejection>(warp::reply::json(&TxResp {
+                            tx_id: "error".to_string(),
+                            status: "serialization_failed",
+                        }));
+                    }
+                };
+                let tx_id = format!(
+                    "{}:{}:{}:{}",
+                    tx.sender, tx.receiver, tx.amount, tx.timestamp
+                );
+
                 // Try to add transaction to pool
                 let admitted = pool.add_transaction(tx).await;
 
                 if admitted {
-                    let tx_id = format!(
-                        "{}:{}:{}:{}",
-                        req.sender, req.receiver, req.amount, req.timestamp
-                    );
+                    if let Some(node) = p2p_node {
+                        node.broadcast(MessageType::Transaction, gossip_payload);
+                    }
                     let resp = warp::reply::json(&TxResp {
                         tx_id,
                         status: "accepted",
@@ -547,6 +577,43 @@ pub fn rpc_routes_with_state(
                 }
             },
         );
+
+    // GET /rpc/tx/nonce/{address}
+    let tx_nonce = warp::path!("rpc" / "tx" / "nonce" / String)
+        .and(warp::get())
+        .and(with_rpc_state(rpc.clone()))
+        .and_then(|address: String, st: RpcState| async move {
+            let response: Box<dyn warp::Reply + Send> = match (st.state_mgr, st.transaction_pool) {
+                (Some(state_mgr), Some(pool)) => {
+                    let committed_nonce = state_mgr.lock().get_nonce(&address);
+                    match pool.next_nonce(&address, committed_nonce).await {
+                        Some(nonce) => Box::new(warp::reply::json(&serde_json::json!({
+                            "address": address,
+                            "nonce": nonce,
+                        }))),
+                        None => Box::new(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Account nonce is exhausted".into(),
+                            }),
+                            warp::http::StatusCode::CONFLICT,
+                        )),
+                    }
+                }
+                (None, _) => Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "StateManager unavailable (stub mode)".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                )),
+                (_, None) => Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "TransactionPool unavailable".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                )),
+            };
+            Ok::<_, warp::Rejection>(response)
+        });
 
     // POST /rpc/mint — disabled by default. A non-mainnet dev/test network can
     // opt in with BLEEP_ENABLE_PUBLIC_MINT=true, but production mainnet never
@@ -1079,6 +1146,7 @@ pub fn rpc_routes_with_state(
         .or(wallet)
         .or(ai)
         .or(tx_submit)
+        .or(tx_nonce)
         .or(mint)
         .or(tx_history)
         .or(block_latest)
@@ -1113,6 +1181,7 @@ pub fn rpc_routes_with_state(
         // ── Sprint 8 ──────────────────────────────────────────────────────
         .or(faucet_drip(Arc::clone(&state_inner)))
         .or(faucet_status(Arc::clone(&state_inner)))
+        .or(auth_register_operator(Arc::clone(&state_inner)))
         .or(auth_register_dapp(Arc::clone(&state_inner)))
         .or(auth_login(Arc::clone(&state_inner)))
         .or(auth_logout(Arc::clone(&state_inner)))
@@ -1121,6 +1190,10 @@ pub fn rpc_routes_with_state(
         .or(auth_audit_export(Arc::clone(&state_inner)))
         .or(explorer_ui())
         .or(explorer_api_blocks(Arc::clone(&state_inner)))
+        .or(explorer_api_block(Arc::clone(&state_inner)))
+        .or(explorer_api_transactions(Arc::clone(&state_inner)))
+        .or(explorer_api_transaction(Arc::clone(&state_inner)))
+        .or(explorer_api_address(Arc::clone(&state_inner)))
         .or(explorer_api_validators(Arc::clone(&state_inner)))
         .or(metrics_prometheus(Arc::clone(&state_inner)))
         // ── Sprint 9 ──────────────────────────────────────────────────────
@@ -1133,7 +1206,39 @@ pub fn rpc_routes_with_state(
         .or(layer3_intent_submit_route(Arc::clone(&state_inner)))
         .or(benchmark_result_route(Arc::clone(&state_inner)))
         .or(audit_report_route(Arc::clone(&state_inner)))
+        .recover(handle_rpc_rejection)
         .boxed()
+}
+
+async fn handle_rpc_rejection(
+    rejection: warp::Rejection,
+) -> Result<impl warp::Reply, std::convert::Infallible> {
+    let (status, error) = if let Some(AuthRejection(error)) = rejection.find::<AuthRejection>() {
+        let status = match error {
+            AuthError::Unauthorized(_) => warp::http::StatusCode::FORBIDDEN,
+            AuthError::InvalidSession | AuthError::ExpiredSession | AuthError::RevokedSession => {
+                warp::http::StatusCode::UNAUTHORIZED
+            }
+            _ => warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, error.to_string())
+    } else if rejection.is_not_found() {
+        (
+            warp::http::StatusCode::NOT_FOUND,
+            "Route not found".to_string(),
+        )
+    } else {
+        log::warn!("Unhandled RPC rejection: {rejection:?}");
+        (
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    };
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&ErrResp { error }),
+        status,
+    ))
 }
 
 /// Convenience wrapper with zero-state (stub / test mode).
@@ -2816,6 +2921,14 @@ struct AuthRegisterDappReq {
 }
 
 #[derive(Deserialize)]
+struct AuthRegisterOperatorReq {
+    operator_handle: String,
+    display_name: String,
+    password: String,
+    kyber_public_key_b64: String,
+}
+
+#[derive(Deserialize)]
 struct AuthLoginReq {
     identity_id: String,
     password: String,
@@ -2974,6 +3087,72 @@ fn faucet_status(
                 total_drips,
             })
         })
+}
+
+// ── POST /rpc/auth/register/operator ──────────────────────────────────────────
+fn auth_register_operator(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "auth" / "register" / "operator")
+        .and(warp::post())
+        .and(warp::body::json::<AuthRegisterOperatorReq>())
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
+        .and(with_arc_state(state))
+        .and_then(
+            |req: AuthRegisterOperatorReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+                let auth_service = match &st.auth_service {
+                    Some(svc) => Arc::clone(svc),
+                    None => {
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Auth service not mounted in RPC state.".into(),
+                            }),
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
+                    }
+                };
+
+                let kyber_public_key = match STANDARD.decode(&req.kyber_public_key_b64) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: format!("Invalid kyber_public_key base64: {}", e),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        ));
+                    }
+                };
+
+                match auth_service
+                    .register_operator(
+                        req.operator_handle,
+                        req.display_name,
+                        req.password,
+                        kyber_public_key,
+                    )
+                    .await
+                {
+                    Ok((_identity, token)) => Ok(warp::reply::with_status(
+                        warp::reply::json(&AuthTokenResp {
+                            token: token.token,
+                            jti: token.jti,
+                            expires_at: token.expires_at.to_rfc3339(),
+                        }),
+                        warp::http::StatusCode::CREATED,
+                    )),
+                    Err(err) => Ok(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Auth registration failed: {}", err),
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    )),
+                }
+            },
+        )
 }
 
 fn auth_register_dapp(
@@ -3290,17 +3469,29 @@ fn auth_audit_export(
 
 // ── GET /explorer ─────────────────────────────────────────────────────────────
 //
-// Read-only block explorer web UI. Fetches live data from the node's own RPC
-// endpoints (/rpc/block/latest, /rpc/health, /rpc/validator/list).
-// Served as inline HTML + vanilla JS — no build step required.
+// Explorer UI and client assets are bundled into the node; no separate build
+// or third-party script host is required.
 fn explorer_ui() -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("explorer").and(warp::get()).map(|| {
         warp::http::Response::builder()
             .status(200)
             .header("content-type", "text/html; charset=utf-8")
-            .body(EXPLORER_HTML)
+            .header("x-content-type-options", "nosniff")
+            .header("x-frame-options", "DENY")
+            .header("referrer-policy", "no-referrer")
+            .header(
+                "content-security-policy",
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            )
+            .body(include_str!("explorer.html"))
             .unwrap()
     })
+}
+
+#[derive(Deserialize, Default)]
+struct ExplorerBlocksQuery {
+    limit: Option<usize>,
+    before: Option<u64>,
 }
 
 // ── GET /rpc/explorer/blocks ──────────────────────────────────────────────────
@@ -3309,25 +3500,251 @@ fn explorer_api_blocks(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "explorer" / "blocks")
         .and(warp::get())
+        .and(warp::query::<ExplorerBlocksQuery>())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            let blocks: Vec<serde_json::Value> = (0..10u64)
-                .filter_map(|i| height.checked_sub(i).map(|h| (i, h)))
-                .map(|(i, h)| {
-                    serde_json::json!({
-                        "height":    h,
-                        "hash":      format!("{:064x}", h ^ 0xb1ee_b1ee_b1ee_b1ee),
-                        "tx_count":  (h % 64) as u32,
-                        "epoch":     h / 100,
-                        "timestamp": now_secs().saturating_sub(i * 3),
-                        "proposer":  format!("validator-{}", h % 7),
-                        "size_bytes": 1024 + (h % 3072) as u32,
+        .map(
+            |query: ExplorerBlocksQuery, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable; explorer data cannot be served.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let latest_height = chain.height();
+                let limit = query.limit.unwrap_or(10).clamp(1, 100);
+                let blocks: Vec<_> = chain
+                    .chain
+                    .iter()
+                    .rev()
+                    .filter(|block| query.before.map_or(true, |before| block.index < before))
+                    .take(limit)
+                    .map(explorer_block_summary)
+                    .collect();
+                Box::new(warp::reply::json(
+                    &serde_json::json!({ "blocks": blocks, "latest_height": latest_height }),
+                ))
+            },
+        )
+}
+
+fn explorer_block_summary(block: &bleep_core::block::Block) -> serde_json::Value {
+    let proposer = block
+        .validator_signature
+        .get(..bleep_core::block::SPHINCS_PK_LEN)
+        .map(hex::encode);
+    serde_json::json!({
+        "height": block.index,
+        "hash": block.compute_hash(),
+        "previous_hash": block.previous_hash,
+        "tx_count": block.transactions.len(),
+        "epoch": block.epoch_id,
+        "timestamp": block.timestamp,
+        "proposer": proposer,
+        "merkle_root": block.merkle_root,
+        "consensus_mode": format!("{:?}", block.consensus_mode),
+        "protocol_version": block.protocol_version,
+        "shard_id": block.shard_id,
+    })
+}
+
+fn explorer_transaction(tx: &bleep_core::block::Transaction, height: u64) -> serde_json::Value {
+    serde_json::json!({
+        "hash": hex::encode(tx.tx_hash()),
+        "block_height": height,
+        "chain_id": tx.chain_id,
+        "sender": tx.sender,
+        "receiver": tx.receiver,
+        "amount": tx.amount.to_string(),
+        "timestamp": tx.timestamp,
+        "nonce": tx.nonce,
+    })
+}
+
+fn explorer_api_block(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "block" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |id: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let block = id
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|height| chain.get_block_by_index(height))
+                    .or_else(|| chain.get_block_by_hash(&id));
+                match block {
+                    Some(block) => {
+                        let transactions: Vec<_> = block
+                            .transactions
+                            .iter()
+                            .map(|tx| explorer_transaction(tx, block.index))
+                            .collect();
+                        Box::new(warp::reply::json(&serde_json::json!({
+                            "block": explorer_block_summary(&block),
+                            "transactions": transactions,
+                        })))
+                    }
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Block '{id}' not found."),
+                        }),
+                        warp::http::StatusCode::NOT_FOUND,
+                    )),
+                }
+            },
+        )
+}
+
+fn explorer_api_transactions(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "transactions")
+        .and(warp::get())
+        .and(warp::query::<HashMap<String, String>>())
+        .and(with_arc_state(state))
+        .map(
+            |query: HashMap<String, String>, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let address = query.get("address").map(String::as_str);
+                let limit = query
+                    .get("limit")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                let transactions: Vec<_> = chain
+                    .chain
+                    .iter()
+                    .rev()
+                    .flat_map(|block| {
+                        block.transactions.iter().filter_map(move |tx| {
+                            if address.is_some_and(|address| {
+                                tx.sender != address && tx.receiver != address
+                            }) {
+                                return None;
+                            }
+                            Some(explorer_transaction(tx, block.index))
+                        })
                     })
-                })
-                .collect();
-            warp::reply::json(&serde_json::json!({ "blocks": blocks, "latest_height": height }))
-        })
+                    .take(limit)
+                    .collect();
+                Box::new(warp::reply::json(
+                    &serde_json::json!({ "transactions": transactions }),
+                ))
+            },
+        )
+}
+
+fn explorer_api_transaction(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "transaction" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |hash: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(blockchain) = &st.blockchain else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let Ok(chain) = blockchain.read() else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Blockchain state is temporarily unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let found = chain.chain.iter().rev().find_map(|block| {
+                    block
+                        .transactions
+                        .iter()
+                        .find(|tx| hex::encode(tx.tx_hash()) == hash)
+                        .map(|tx| explorer_transaction(tx, block.index))
+                });
+                match found {
+                    Some(transaction) => Box::new(warp::reply::json(&transaction)),
+                    None => Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Transaction '{hash}' not found."),
+                        }),
+                        warp::http::StatusCode::NOT_FOUND,
+                    )),
+                }
+            },
+        )
+}
+
+fn explorer_api_address(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "explorer" / "address" / String)
+        .and(warp::get())
+        .and(with_arc_state(state))
+        .map(
+            |address: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+                let Some(state_mgr) = &st.state_mgr else {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Account state unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ));
+                };
+                let state = state_mgr.lock();
+                Box::new(warp::reply::json(&serde_json::json!({
+                    "address": address,
+                    "balance": state.get_balance(&address).to_string(),
+                    "nonce": state.get_nonce(&address),
+                    "block_height": state.block_height(),
+                })))
+            },
+        )
 }
 
 // ── GET /rpc/explorer/validators ─────────────────────────────────────────────
@@ -3337,32 +3754,37 @@ fn explorer_api_validators(
     warp::path!("rpc" / "explorer" / "validators")
         .and(warp::get())
         .and(with_arc_state(state))
-        .map(|st: Arc<RpcState>| {
-            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            // Return the 7-validator testnet set
-            let regions = [
-                "us-east-1",
-                "eu-west-1",
-                "ap-southeast-1",
-                "us-west-2",
-                "sa-east-1",
-                "af-south-1",
-                "ap-northeast-1",
-            ];
-            let validators: Vec<serde_json::Value> = (0..7usize)
-                .map(|i| {
-                    let region = regions[i];
+        .map(|st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+            let Some(registry) = &st.validator_registry else {
+                return Box::new(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "ValidatorRegistry unavailable.".into(),
+                    }),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                ));
+            };
+            let registry = registry.lock();
+            let validators: Vec<_> = registry
+                .get_active_validators()
+                .iter()
+                .map(|validator| {
                     serde_json::json!({
-                        "id":            format!("validator-{}", i),
-                        "stake":         10_000_000u64,
-                        "status":        "active",
-                        "blocks_signed": height.saturating_sub((i as u64) * 3),
-                        "uptime_pct":    99.5 - (i as f64) * 0.1,
-                        "region":        region,
+                        "id": validator.id,
+                        "stake": validator.stake.to_string(),
+                        "status": format!("{:?}", validator.state),
+                        "reputation": validator.reputation,
+                        "joined_epoch": validator.joined_epoch,
+                        "total_slashed": validator.total_slashed.to_string(),
+                        "can_participate": validator.can_participate(),
                     })
                 })
                 .collect();
-            warp::reply::json(&serde_json::json!({ "validators": validators, "count": 7 }))
+            let count = validators.len();
+            Box::new(warp::reply::json(&serde_json::json!({
+                "validators": validators,
+                "count": count,
+                "total_stake": registry.total_active_stake().to_string(),
+            })))
         })
 }
 
@@ -3628,6 +4050,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_tx_nonce_includes_contiguous_pending_transactions() {
+        let pool = TransactionPool::new(10);
+        let (public_key, secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&public_key);
+        let receiver = "BLEEP1nonce-recipient".to_string();
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
+        let timestamp = 1_700_000_000;
+        let nonce = 0;
+        let payload = tx_payload(&chain_id, &sender, &receiver, 1, timestamp, nonce);
+        let mut signature = public_key.clone();
+        signature.extend_from_slice(&sign_tx_payload(&payload, &secret_key).expect("sign payload"));
+        let tx = ZKTransaction {
+            chain_id,
+            sender: sender.clone(),
+            receiver,
+            amount: 1,
+            timestamp,
+            nonce,
+            signature,
+        };
+        assert!(pool.add_transaction(tx).await);
+
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_state_manager(state_mgr)
+                .with_transaction_pool(pool),
+        );
+        let response = request()
+            .method("GET")
+            .path(&format!("/rpc/tx/nonce/{sender}"))
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value =
+            serde_json::from_slice(response.body()).expect("valid nonce JSON");
+        assert_eq!(body["nonce"], 1);
+    }
+
+    #[tokio::test]
     async fn validator_stake_accepts_valid_sphincs_signature() {
         let (public_key, secret_key) = generate_tx_keypair();
         let payload = tx_payload(
@@ -3642,6 +4105,60 @@ mod tests {
 
         assert!(!proof.is_empty());
         assert!(verify_tx_signature(&payload, &proof, &public_key));
+    }
+
+    #[tokio::test]
+    async fn dapp_token_cannot_mint_rotate_or_register_operators() {
+        use bleep_auth::Role;
+
+        let auth_service = Arc::new(AuthService::new((0u8..32).collect()).expect("auth service"));
+        let token = auth_service
+            .sessions
+            .issue(
+                "test-dapp",
+                &[Role::DappDeveloper],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .expect("dapp token");
+        let bearer = format!("Bearer {}", token.token);
+        let routes =
+            rpc_routes_with_state(RpcState::new().with_auth_service(Arc::clone(&auth_service)));
+
+        let mint = request()
+            .method("POST")
+            .path("/rpc/mint")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({"address": "BLEEP1target", "amount": 1}))
+            .reply(&routes)
+            .await;
+        assert_eq!(mint.status(), warp::http::StatusCode::FORBIDDEN);
+
+        let rotate = request()
+            .method("POST")
+            .path("/rpc/auth/rotate")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({"new_secret_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}))
+            .reply(&routes)
+            .await;
+        assert_eq!(rotate.status(), warp::http::StatusCode::FORBIDDEN);
+
+        let register_operator = request()
+            .method("POST")
+            .path("/rpc/auth/register/operator")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({
+                "operator_handle": "attacker",
+                "display_name": "attacker",
+                "password": "long-enough-password",
+                "kyber_public_key_b64": "AA=="
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(
+            register_operator.status(),
+            warp::http::StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
@@ -3663,11 +4180,18 @@ mod tests {
             .with_blockchain(Arc::clone(&blockchain));
 
         let routes = rpc_routes_with_state(rpc_state);
+        let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
+        std::env::set_var("BLEEP_NETWORK_MODE", "test");
         let resp = request()
             .method("POST")
             .path(&format!("/faucet/{}", address))
             .reply(&routes)
             .await;
+        if let Some(network_mode) = previous_network_mode {
+            std::env::set_var("BLEEP_NETWORK_MODE", network_mode);
+        } else {
+            std::env::remove_var("BLEEP_NETWORK_MODE");
+        }
 
         assert_eq!(resp.status(), 200);
 
@@ -3686,227 +4210,63 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(core_bal, RpcState::FAUCET_DRIP_AMOUNT);
     }
-}
 
-// ── Block explorer HTML ───────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn explorer_routes_read_live_canonical_chain_data() {
+        let address = "BLEEP1explorer-address".to_string();
+        let tx = bleep_core::block::Transaction {
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+            sender: address.clone(),
+            receiver: "BLEEP1recipient".to_string(),
+            amount: 123,
+            timestamp: 1_700_000_000,
+            nonce: 4,
+            signature: vec![],
+        };
+        let block = Block::new(1, vec![tx], "genesis-hash".to_string());
+        let expected_block_hash = block.compute_hash();
+        let expected_tx_hash = hex::encode(block.transactions[0].tx_hash());
 
-static EXPLORER_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>BLEEP Testnet Explorer</title>
-  <style>
-    :root {
-      --bg: #0d0f14; --card: #151820; --border: #252a35;
-      --accent: #00e5c3; --accent2: #7b5ea7; --text: #e2e8f0;
-      --muted: #6b7280; --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; }
-    header {
-      display: flex; align-items: center; gap: 14px;
-      padding: 18px 32px; border-bottom: 1px solid var(--border);
-      background: linear-gradient(90deg, #0d0f14 0%, #12151f 100%);
-    }
-    .logo { font-size: 1.5rem; font-weight: 700; color: var(--accent); letter-spacing: 2px; }
-    .tag { font-size: 0.7rem; background: var(--accent2); color: #fff; padding: 2px 8px; border-radius: 10px; }
-    .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); margin-left: auto; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
-    main { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
-    .stat-card {
-      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-      padding: 20px; transition: border-color .2s;
-    }
-    .stat-card:hover { border-color: var(--accent); }
-    .stat-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-    .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
-    .stat-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
-    section { margin-bottom: 36px; }
-    h2 { font-size: 1rem; color: var(--text); margin-bottom: 14px; letter-spacing: 1px; text-transform: uppercase; }
-    table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
-    th { text-align: left; font-size: 0.72rem; color: var(--muted); text-transform: uppercase; padding: 12px 16px; border-bottom: 1px solid var(--border); }
-    td { padding: 11px 16px; font-size: 0.82rem; border-bottom: 1px solid var(--border); }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: rgba(0,229,195,0.04); }
-    .hash { color: var(--accent); font-size: 0.75rem; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 0.7rem; }
-    .badge-green { background: rgba(16,185,129,.15); color: var(--green); }
-    .badge-yellow { background: rgba(245,158,11,.15); color: var(--yellow); }
-    .refresh-btn {
-      float: right; background: transparent; border: 1px solid var(--accent);
-      color: var(--accent); padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 0.78rem;
-    }
-    .refresh-btn:hover { background: var(--accent); color: #000; }
-    footer { text-align: center; color: var(--muted); font-size: 0.72rem; padding: 24px; border-top: 1px solid var(--border); }
-    .err { color: var(--red); font-size: 0.8rem; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-<header>
-  <span class="logo">BLEEP</span>
-  <span class="tag">testnet-1</span>
-  <span style="color:var(--muted);font-size:.8rem">Block Explorer</span>
-  <span class="status-dot" id="statusDot" title="Chain live"></span>
-</header>
-<main>
-  <div class="stats-grid" id="statsGrid">
-    <div class="stat-card"><div class="stat-label">Chain Height</div><div class="stat-value" id="sHeight"><span class="spinner"></span></div><div class="stat-sub">Latest block</div></div>
-    <div class="stat-card"><div class="stat-label">Connected Peers</div><div class="stat-value" id="sPeers">—</div><div class="stat-sub">P2P network</div></div>
-    <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value" id="sUptime">—</div><div class="stat-sub">Node runtime</div></div>
-    <div class="stat-card"><div class="stat-label">Validators</div><div class="stat-value" id="sVals">7</div><div class="stat-sub">Active testnet set</div></div>
-    <div class="stat-card"><div class="stat-label">Faucet Balance</div><div class="stat-value" id="sFaucet">—</div><div class="stat-sub">BLEEP remaining</div></div>
-    <div class="stat-card"><div class="stat-label">Epoch</div><div class="stat-value" id="sEpoch">—</div><div class="stat-sub">100 blocks/epoch</div></div>
-  </div>
+        let tx_pool = TransactionPool::new(10);
+        let mut chain = Blockchain::new(Block::genesis(), CoreBlockchainState::default(), tx_pool);
+        chain.chain.push_back(block);
+        let blockchain = Arc::new(RwLock::new(chain));
+        let state_manager = Arc::new(Mutex::new(StateManager::new()));
+        state_manager.lock().set_balance(&address, 123);
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_blockchain(Arc::clone(&blockchain))
+                .with_state_manager(state_manager),
+        );
 
-  <section>
-    <h2>Latest Blocks <button class="refresh-btn" onclick="loadBlocks()">↻ Refresh</button></h2>
-    <table>
-      <thead><tr><th>Height</th><th>Hash</th><th>Proposer</th><th>Txs</th><th>Size</th><th>Epoch</th><th>Age</th></tr></thead>
-      <tbody id="blocksBody"><tr><td colspan="7" style="text-align:center;color:var(--muted)"><span class="spinner"></span> Loading…</td></tr></tbody>
-    </table>
-  </section>
+        let blocks = request()
+            .method("GET")
+            .path("/rpc/explorer/blocks?limit=2")
+            .reply(&routes)
+            .await;
+        assert_eq!(blocks.status(), 200);
+        let blocks: serde_json::Value = serde_json::from_slice(blocks.body()).unwrap();
+        assert_eq!(blocks["blocks"][0]["height"], 1);
+        assert_eq!(blocks["blocks"][0]["hash"], expected_block_hash);
 
-  <section>
-    <h2>Validator Set <button class="refresh-btn" onclick="loadValidators()">↻ Refresh</button></h2>
-    <table>
-      <thead><tr><th>ID</th><th>Region</th><th>Stake</th><th>Blocks Signed</th><th>Uptime</th><th>Status</th></tr></thead>
-      <tbody id="valsBody"><tr><td colspan="6" style="text-align:center;color:var(--muted)"><span class="spinner"></span> Loading…</td></tr></tbody>
-    </table>
-  </section>
-</main>
-<footer>BLEEP Testnet Explorer &mdash; Sprint 8 &mdash; Data refreshes every 6 s &mdash; All times UTC</footer>
+        let transaction = request()
+            .method("GET")
+            .path(&format!("/rpc/explorer/transaction/{expected_tx_hash}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(transaction.status(), 200);
+        let transaction: serde_json::Value = serde_json::from_slice(transaction.body()).unwrap();
+        assert_eq!(transaction["sender"], address);
+        assert_eq!(transaction["amount"], "123");
 
-<script>
-const BASE = '';
-const BLOCK_TIME = 3000;
-let lastBlock = 0;
-
-async function loadHealth() {
-  try {
-    const r = await fetch(BASE + '/rpc/health');
-    const d = await r.json();
-    document.getElementById('sHeight').textContent = d.height.toLocaleString();
-    document.getElementById('sPeers').textContent  = d.peers;
-    const u = d.uptime_secs;
-    const h = Math.floor(u/3600), m = Math.floor((u%3600)/60), s = u%60;
-    document.getElementById('sUptime').textContent = h + 'h ' + m + 'm';
-    document.getElementById('sEpoch').textContent  = Math.floor(d.height / 100).toLocaleString();
-    lastBlock = d.height;
-    document.getElementById('statusDot').title = 'Live — height ' + d.height;
-  } catch(e) {
-    document.getElementById('sHeight').innerHTML = '<span class="err">RPC err</span>';
-  }
-}
-
-async function loadFaucet() {
-  try {
-    const r = await fetch(BASE + '/faucet/status');
-    const d = await r.json();
-    document.getElementById('sFaucet').textContent = d.balance_bleep.toLocaleString() + ' BLEEP';
-  } catch(e) {}
-}
-
-async function loadBlocks() {
-  try {
-    const r = await fetch(BASE + '/rpc/explorer/blocks');
-    const d = await r.json();
-    const now = Math.floor(Date.now()/1000);
-    const rows = d.blocks.map(b => {
-      const age = now - b.timestamp;
-      const ageStr = age < 60 ? age + 's' : Math.floor(age/60) + 'm ' + (age%60) + 's';
-      return `<tr>
-        <td><strong>${b.height.toLocaleString()}</strong></td>
-        <td class="hash">${b.hash.slice(0,16)}…</td>
-        <td>${b.proposer}</td>
-        <td>${b.tx_count}</td>
-        <td>${(b.size_bytes/1024).toFixed(1)} KB</td>
-        <td>${b.epoch}</td>
-        <td>${ageStr} ago</td>
-      </tr>`;
-    }).join('');
-    document.getElementById('blocksBody').innerHTML = rows || '<tr><td colspan="7" style="color:var(--muted)">No blocks yet</td></tr>';
-  } catch(e) {
-    document.getElementById('blocksBody').innerHTML = '<tr><td colspan="7" class="err">Failed to load blocks</td></tr>';
-  }
-}
-
-async function loadValidators() {
-  try {
-    const r = await fetch(BASE + '/rpc/explorer/validators');
-    const d = await r.json();
-    const rows = d.validators.map(v => `<tr>
-      <td><strong>${v.id}</strong></td>
-      <td>${v.region}</td>
-      <td>${v.stake.toLocaleString()} BLEEP</td>
-      <td>${v.blocks_signed.toLocaleString()}</td>
-      <td>${v.uptime_pct.toFixed(1)}%</td>
-      <td><span class="badge badge-green">${v.status}</span></td>
-    </tr>`).join('');
-    document.getElementById('valsBody').innerHTML = rows;
-    document.getElementById('sVals').textContent  = d.count;
-  } catch(e) {
-    document.getElementById('valsBody').innerHTML = '<tr><td colspan="6" class="err">Failed to load validators</td></tr>';
-  }
-}
-
-function refresh() { loadHealth(); loadFaucet(); loadBlocks(); loadValidators(); }
-refresh();
-setInterval(refresh, 6000);
-</script>
-</body>
-</html>
-"#;
-
-// ── base64 shim (use the base64 crate already in scope via bleep-crypto) ──────
-mod base64 {
-    #[cfg(test)]
-    pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        // Base64 standard alphabet decoder (no padding required)
-        use std::collections::HashMap;
-        let alphabet: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut map = HashMap::new();
-        for (i, &c) in alphabet.iter().enumerate() {
-            map.insert(c, i as u8);
-        }
-        let s = s.trim_end_matches('=').as_bytes();
-        let mut out = Vec::with_capacity(s.len() * 3 / 4 + 1);
-        let mut i = 0;
-        while i + 3 < s.len() {
-            let (a, b, c, d) = (
-                *map.get(&s[i]).ok_or("bad char")?,
-                *map.get(&s[i + 1]).ok_or("bad char")?,
-                *map.get(&s[i + 2]).ok_or("bad char")?,
-                *map.get(&s[i + 3]).ok_or("bad char")?,
-            );
-            out.push((a << 2) | (b >> 4));
-            out.push((b << 4) | (c >> 2));
-            out.push((c << 6) | d);
-            i += 4;
-        }
-        match s.len() - i {
-            2 => {
-                let (a, b) = (
-                    *map.get(&s[i]).ok_or("bad char")?,
-                    *map.get(&s[i + 1]).ok_or("bad char")?,
-                );
-                out.push((a << 2) | (b >> 4));
-            }
-            3 => {
-                let (a, b, c) = (
-                    *map.get(&s[i]).ok_or("bad char")?,
-                    *map.get(&s[i + 1]).ok_or("bad char")?,
-                    *map.get(&s[i + 2]).ok_or("bad char")?,
-                );
-                out.push((a << 2) | (b >> 4));
-                out.push((b << 4) | (c >> 2));
-            }
-            _ => {}
-        }
-        Ok(out)
+        let account = request()
+            .method("GET")
+            .path(&format!("/rpc/explorer/address/{address}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(account.status(), 200);
+        let account: serde_json::Value = serde_json::from_slice(account.body()).unwrap();
+        assert_eq!(account["balance"], "123");
     }
 }
 
@@ -4039,13 +4399,13 @@ mod tests_sprint8 {
     #[test]
     fn base64_decode_valid() {
         // "hello" in base64 is "aGVsbG8="
-        let decoded = base64::decode("aGVsbG8=").unwrap();
+        let decoded = STANDARD.decode("aGVsbG8=").unwrap();
         assert_eq!(decoded, b"hello");
     }
 
     #[test]
     fn base64_short_secret_rejected() {
-        let short = base64::decode("aGVsbG8=").unwrap(); // "hello" = 5 bytes
+        let short = STANDARD.decode("aGVsbG8=").unwrap();
         assert!(short.len() < 32);
     }
 

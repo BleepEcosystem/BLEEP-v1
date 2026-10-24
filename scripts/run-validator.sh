@@ -58,12 +58,15 @@ doctor() {
   echo "validator doctor: ready"
 }
 install_service() {
-  command -v systemctl >/dev/null || fail "systemd is unavailable"; unit="$HOME/.config/systemd/user/bleep-validator-$NAME.service"; mkdir -p "$(dirname "$unit")"
+  command -v systemctl >/dev/null || fail "systemd is unavailable"; [[ -n "${BLEEP_JWT_SECRET:-}" ]] || fail "BLEEP_JWT_SECRET must be set before installing the service"
+  unit="$HOME/.config/systemd/user/bleep-validator-$NAME.service"; env_file="$BASE/$NAME/node.env"; mkdir -p "$(dirname "$unit")" "$(dirname "$env_file")"
+  (umask 077; printf 'BLEEP_JWT_SECRET=%s\n' "$BLEEP_JWT_SECRET" >"$env_file"; chmod 600 "$env_file")
   cat >"$unit" <<EOF
 [Unit]
 Description=BLEEP validator $NAME
 After=network-online.target
 [Service]
+EnvironmentFile="$env_file"
 ExecStart=$SCRIPT_DIR/run-validator.sh run --name $NAME
 Restart=on-failure
 RestartSec=10
@@ -74,6 +77,7 @@ EOF
 }
 init_validator() {
   [[ -n "$SEED" ]] || fail "a seed peer is required; use --seed HOST:PORT"; [[ -x "$NODE_BIN" ]] || fail "binary is not built: $NODE_BIN"
+  [[ -n "${BLEEP_ADMIN_TOKEN:-}" ]] || fail "BLEEP_ADMIN_TOKEN must be set to provision a validator operator"
   mkdir -p "$STATE_DIR"; [[ -x "$ROOT_DIR/target/release/bleep-validator-keygen" ]] || cargo build --release --bin bleep-validator-keygen >/dev/null
   "$ROOT_DIR/target/release/bleep-validator-keygen" "$STATE_DIR" >/dev/null
   if [[ ! -f "$STATE_DIR/validator-password" ]]; then umask 077; head -c 32 /dev/urandom | base64 >"$STATE_DIR/validator-password"; fi
@@ -86,11 +90,11 @@ init_validator() {
     fi
   fi
   kyber_b64=$(printf %s "$public_key" | xxd -r -p | base64 -w0)
-  token=$(curl -fsS -X POST "$RPC_URL/rpc/auth/register/operator" -H 'Content-Type: application/json' --data "{\"operator_handle\":\"$operator\",\"display_name\":\"$NAME\",\"password\":\"$password\",\"kyber_public_key_b64\":\"$kyber_b64\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token", ""))') || fail "RPC operator registration failed"
+  token=$(curl -fsS -X POST "$RPC_URL/rpc/auth/register/operator" -H 'Content-Type: application/json' -H "Authorization: Bearer $BLEEP_ADMIN_TOKEN" --data "{\"operator_handle\":\"$operator\",\"display_name\":\"$NAME\",\"password\":\"$password\",\"kyber_public_key_b64\":\"$kyber_b64\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token", ""))') || fail "RPC operator registration failed"
   [[ -n "$token" ]] || fail "RPC did not return an authentication token"; timestamp=$(date +%s); proof=$("$ROOT_DIR/target/release/bleep-validator-keygen" sign "$STATE_DIR" "$NAME" "$STAKE" "$timestamp")
   response=$(curl -fsS -X POST "$RPC_URL/rpc/validator/stake" -H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data "{\"tx_type\":\"stake\",\"amount\":$STAKE,\"label\":\"$NAME\",\"timestamp\":$timestamp,\"signing_public_key\":\"$signing_public_key\",\"kyber_public_key\":\"$public_key\",\"proof\":\"$proof\"}") || fail "validator registration failed"
   VALIDATOR_ID=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("validator_id", ""))'); [[ -n "$VALIDATOR_ID" ]] || fail "RPC did not return a validator ID"
   save_config; echo "IMPORTANT: back up $STATE_DIR/validator.key somewhere safe; losing it loses this validator identity and stake."; (( SERVICE )) && install_service; exec "$SCRIPT_DIR/run-validator.sh" run --name "$NAME"
 }
 status() { load_config; health=$(curl -fsS "$RPC_URL/rpc/health") || fail "RPC endpoint is unreachable: $RPC_URL"; echo "$health" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("state: " + ("active" if d.get("status")=="ok" else "inactive")); print("peer count: " + str(d.get("peers", 0))); print("last-proposed-block height: " + str(d.get("height", 0)))'; [[ -n "${VALIDATOR_ID:-}" ]] || fail "validator ID is not saved; run init first"; curl -fsS "$RPC_URL/rpc/validator/status/$VALIDATOR_ID" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("current stake: " + str(d.get("stake", 0)))'; }
-case "$COMMAND" in init) init_validator;; doctor) doctor;; status) status;; run) load_config; doctor; export BLEEP_VALIDATOR_NAME="$NAME" BLEEP_STATE_DIR="$STATE_DIR" BLEEP_P2P_LISTEN_ADDR="0.0.0.0:$P2P_PORT" BLEEP_RPC_LISTEN_ADDR="0.0.0.0:$RPC_PORT" BLEEP_P2P_SEEDS="$SEED"; exec "$NODE_BIN";; *) usage; exit 2;; esac
+case "$COMMAND" in init) init_validator;; doctor) doctor;; status) status;; run) load_config; [[ -n "${BLEEP_JWT_SECRET:-}" ]] || fail "BLEEP_JWT_SECRET must be set before starting the node"; doctor; export BLEEP_VALIDATOR_NAME="$NAME" BLEEP_STATE_DIR="$STATE_DIR" BLEEP_P2P_LISTEN_ADDR="0.0.0.0:$P2P_PORT" BLEEP_RPC_LISTEN_ADDR="0.0.0.0:$RPC_PORT" BLEEP_P2P_SEEDS="$SEED"; exec "$NODE_BIN";; *) usage; exit 2;; esac

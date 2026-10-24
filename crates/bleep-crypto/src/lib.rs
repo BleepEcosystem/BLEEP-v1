@@ -16,6 +16,6 @@ pub use bip39::{mnemonic_to_bleep_seed, mnemonic_to_seed, validate_mnemonic};
 pub use merkle_commitment::*;
 pub use pq_crypto::*;
 pub use tx_signer::{
-	derive_account_address, generate_tx_keypair, sign_tx_payload, tx_payload,
-	verify_tx_signature, DEFAULT_CHAIN_ID,
+    derive_account_address, generate_tx_keypair, sign_tx_payload, tx_payload, verify_tx_signature,
+    DEFAULT_CHAIN_ID,
 };

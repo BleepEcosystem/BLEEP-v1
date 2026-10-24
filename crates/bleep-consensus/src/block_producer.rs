@@ -368,7 +368,7 @@ impl BlockProducer {
             }
         };
 
-        if let Some(registry) = &self.validator_registry {
+        let epoch_validator_keys = if let Some(registry) = &self.validator_registry {
             let registry = registry.lock();
             let active_identities: Vec<_> = registry
                 .get_active_validators()
@@ -401,6 +401,10 @@ impl BlockProducer {
                         })
                 })
                 .collect::<Result<_, _>>()?;
+            let validator_keys = committee_keys
+                .iter()
+                .map(|(_, public_key)| public_key.clone())
+                .collect::<Vec<_>>();
             if !self
                 .pbft_finality
                 .as_ref()
@@ -436,7 +440,10 @@ impl BlockProducer {
                     selected
                 ));
             }
-        }
+            validator_keys
+        } else {
+            return Err("Epoch validator set is unavailable; refusing to produce a block".into());
+        };
 
         // ── 3: Epoch ──────────────────────────────────────────────────────────
         let epoch_id = next_height / BLOCKS_PER_EPOCH;
@@ -517,10 +524,16 @@ impl BlockProducer {
                 }
 
                 // Path 1: native transfer (sender → receiver, exact amount)
-                let ok = state.apply_transfer(&zt.sender, &zt.receiver, zt.amount as u128);
+                let ok = state.apply_transfer(
+                    &zt.sender,
+                    &zt.receiver,
+                    zt.amount as u128,
+                    zt.nonce,
+                    zt.timestamp,
+                );
                 if !ok {
                     warn!(
-                        "[BlockProducer] insufficient funds: {}→{} amt={}",
+                        "[BlockProducer] state transition rejected (funds, nonce, or timestamp): {}→{} amt={}",
                         zt.sender, zt.receiver, zt.amount
                     );
                     // Track this failed tx for removal from pool
@@ -661,7 +674,7 @@ impl BlockProducer {
                 .blockchain
                 .write()
                 .map_err(|e| format!("blockchain write lock: {}", e))?;
-            let accepted = chain.add_block(block.clone(), &self.config.validator_pk);
+            let accepted = chain.add_block_with_validator_set(block.clone(), &epoch_validator_keys);
             if accepted {
                 if let Err(e) = self.state.lock().persist_canonical_block(
                     &block,

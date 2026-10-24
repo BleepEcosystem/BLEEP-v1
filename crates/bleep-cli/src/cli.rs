@@ -19,6 +19,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 use bleep_cli::{
     AiCommand, BlockCommand, Cli, Commands, EconomicsCommand, FaucetCommand, GovernanceCommand,
@@ -26,7 +27,6 @@ use bleep_cli::{
 };
 
 // Real crate imports
-use base64::Engine;
 use bleep_ai::{
     ai_assistant::{AIRequest, BLEEPAIAssistant},
     analytics::BLEEPAnalytics,
@@ -39,8 +39,6 @@ use bleep_ai::{
     smart_contracts::SmartContractOptimizer,
     wallet::BLEEPWallet,
 };
-use bleep_auth::session::SessionManager;
-use bleep_auth::Role;
 use bleep_core::transaction::ZKTransaction;
 use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
 use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
@@ -53,6 +51,47 @@ use bleep_zkp::Verifier as ZkVerifier;
 /// Default RPC endpoint (override via BLEEP_RPC env var).
 const DEFAULT_RPC: &str = "http://127.0.0.1:8545";
 const DEFAULT_P2P_LISTEN_ADDR: &str = "0.0.0.0:7700";
+
+fn wallet_password(confirm: bool) -> Result<Zeroizing<String>> {
+    if let Ok(password) = std::env::var("BLEEP_WALLET_PASSWORD") {
+        if password.is_empty() {
+            return Err(anyhow!("BLEEP_WALLET_PASSWORD must not be empty"));
+        }
+        return Ok(Zeroizing::new(password));
+    }
+
+    let password = Zeroizing::new(rpassword::prompt_password("Wallet password: ")?);
+    if password.is_empty() {
+        return Err(anyhow!("Wallet password must not be empty"));
+    }
+    if confirm {
+        let confirmation = Zeroizing::new(rpassword::prompt_password("Confirm wallet password: ")?);
+        if *password != *confirmation {
+            return Err(anyhow!("Wallet passwords do not match"));
+        }
+    }
+    Ok(password)
+}
+
+fn unlock_wallet_key(
+    wallet: &bleep_wallet_core::wallet::EncryptedWallet,
+) -> Result<Zeroizing<Vec<u8>>> {
+    if wallet.is_plaintext_dev() {
+        if !bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
+            return Err(anyhow!(
+                "Plaintext wallet unlock requires BLEEP_WALLET_PLAINTEXT_DEV=1 on a dev/test network"
+            ));
+        }
+        return wallet
+            .unlock("")
+            .map_err(|error| anyhow!(error.to_string()));
+    }
+
+    let password = wallet_password(false)?;
+    wallet
+        .unlock(&password)
+        .map_err(|error| anyhow!(error.to_string()))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -108,22 +147,34 @@ async fn run(cmd: Commands) -> Result<()> {
 
             match action {
                 WalletCommand::Create => {
-                    // Sprint 5: Generate SPHINCS+ keypair, encrypt SK with AES-256-GCM
                     let (pk, sk) = generate_tx_keypair();
+                    let sk = Zeroizing::new(sk);
                     let kyber_pk = pk.clone();
-                    // Use empty password by default; users can re-lock with `wallet lock`
-                    let wallet =
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
-                            pk, &sk, kyber_pk, "",
+                    let wallet = if bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_plaintext_dev(
+                            pk, &sk, kyber_pk,
                         )
-                        .map_err(|e| anyhow!("Key encryption failed: {}", e))?;
+                    } else {
+                        let password = wallet_password(true)?;
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
+                            pk, &sk, kyber_pk, &password,
+                        )
+                    }
+                    .map_err(|e| anyhow!("Wallet key protection failed: {}", e))?;
                     manager
                         .save_wallet(wallet.clone())
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
                     println!("✅ Wallet created");
                     println!("   Address: {}", wallet.address());
                     println!("   Type:    Quantum-secure (SPHINCS+-SHAKE-256)");
-                    println!("   Signing: ✅ ready (SK encrypted with AES-256-GCM)");
+                    println!(
+                        "   Signing: ✅ ready ({})",
+                        if wallet.is_plaintext_dev() {
+                            "plaintext dev mode"
+                        } else {
+                            "Argon2id + AES-256-GCM"
+                        }
+                    );
                     println!("   ⚠️  Back up your key material in a safe location.");
 
                     // Automatically request faucet funds for the new wallet
@@ -183,19 +234,32 @@ async fn run(cmd: Commands) -> Result<()> {
                     }
                 }
                 WalletCommand::Import { phrase } => {
-                    // Sprint 5: Real BIP-39 derivation + AES-256-GCM SK encryption
+                    let phrase = Zeroizing::new(phrase);
+                    // Derive the signing material and protect it before persistence.
                     validate_mnemonic(&phrase).map_err(|e| anyhow!("Invalid mnemonic: {}", e))?;
-                    let seed_32 = mnemonic_to_bleep_seed(&phrase, "")
-                        .map_err(|e| anyhow!("BIP-39 derivation failed: {}", e))?;
+                    let seed_32 = Zeroizing::new(
+                        mnemonic_to_bleep_seed(&phrase, "")
+                            .map_err(|e| anyhow!("BIP-39 derivation failed: {}", e))?,
+                    );
                     use sha3::{Digest, Sha3_256};
-                    let pk: Vec<u8> = Sha3_256::digest(seed_32).to_vec();
-                    let sk: Vec<u8> = seed_32.to_vec();
+                    let pk: Vec<u8> = Sha3_256::digest(seed_32.as_ref()).to_vec();
                     let kyber_pk = pk.clone();
-                    let wallet =
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
-                            pk, &sk, kyber_pk, "",
+                    let wallet = if bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_plaintext_dev(
+                            pk,
+                            seed_32.as_ref(),
+                            kyber_pk,
                         )
-                        .map_err(|e| anyhow!("Key encryption failed: {}", e))?;
+                    } else {
+                        let password = wallet_password(true)?;
+                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
+                            pk,
+                            seed_32.as_ref(),
+                            kyber_pk,
+                            &password,
+                        )
+                    }
+                    .map_err(|e| anyhow!("Wallet key protection failed: {}", e))?;
                     manager
                         .save_wallet(wallet.clone())
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
@@ -204,7 +268,14 @@ async fn run(cmd: Commands) -> Result<()> {
                         wallet.address()
                     );
                     println!("   Mnemonic words: {}", phrase.split_whitespace().count());
-                    println!("   SK encrypted with AES-256-GCM at rest.");
+                    println!(
+                        "   Key protection: {}",
+                        if wallet.is_plaintext_dev() {
+                            "plaintext dev mode"
+                        } else {
+                            "Argon2id + AES-256-GCM"
+                        }
+                    );
                 }
                 WalletCommand::Export => {
                     for w in manager.list_wallets() {
@@ -245,14 +316,14 @@ async fn run(cmd: Commands) -> Result<()> {
                 let chain_id = std::env::var("BLEEP_CHAIN_ID")
                     .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
                 let nonce = http_client
-                    .get(format!("{}/rpc/state/{}", rpc, sender))
+                    .get(format!("{}/rpc/tx/nonce/{}", rpc, sender))
                     .send()
                     .await?
                     .error_for_status()?
                     .json::<serde_json::Value>()
                     .await?["nonce"]
                     .as_u64()
-                    .ok_or_else(|| anyhow!("RPC state response is missing account nonce"))?;
+                    .ok_or_else(|| anyhow!("RPC transaction nonce response is missing nonce"))?;
 
                 // Sprint 5: unlock AES-GCM encrypted SK, sign with SPHINCS+
                 let sig = {
@@ -263,28 +334,18 @@ async fn run(cmd: Commands) -> Result<()> {
                     match wallet_opt {
                         Some(w) if w.can_sign() => {
                             let payload = tx_payload(&chain_id, &sender, &to, amount, ts, nonce);
-                            // Decrypt SK (empty password = default; users who locked
-                            // with a custom password set BLEEP_WALLET_PASSWORD env var)
-                            let password =
-                                std::env::var("BLEEP_WALLET_PASSWORD").unwrap_or_default();
-                            let sk_plain = w.unlock(&password)
+                            let sk_plain = unlock_wallet_key(&w)
                                 .map_err(|e| anyhow!("Wallet unlock failed — set BLEEP_WALLET_PASSWORD if encrypted: {}", e))?;
                             let detached_sig = sign_tx_payload(&payload, &sk_plain)
                                 .map_err(|e| anyhow!("SPHINCS+ signing failed: {}", e))?;
 
-                            // Wire format: pk_bytes(64) || sphincs_detached_sig(49088)
+                            // Wire format: pk_bytes(64) || sphincs_detached_sig(49_856)
                             // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes
-                            eprintln!(
-                                "[DEBUG] Wallet falcon_keys size: {} bytes",
-                                w.falcon_keys.len()
-                            );
-                            eprintln!("[DEBUG] Signature size: {} bytes", detached_sig.len());
-
                             if w.falcon_keys.len() != 64 {
-                                eprintln!(
-                                    "[WARN] Expected 64-byte SPHINCS+ public key, got {} bytes",
+                                return Err(anyhow!(
+                                    "Expected a 64-byte SPHINCS+ public key, got {} bytes",
                                     w.falcon_keys.len()
-                                );
+                                ));
                             }
 
                             let mut full_sig =
@@ -312,31 +373,13 @@ async fn run(cmd: Commands) -> Result<()> {
                     signature: sig.clone(), // Wire format: pk(64) || SPHINCS+ detached sig
                 };
 
-                eprintln!("[DEBUG CLI] Final transaction:");
-                eprintln!("[DEBUG CLI]   Sender: {}", tx.sender);
-                eprintln!("[DEBUG CLI]   Receiver: {}", tx.receiver);
-                eprintln!("[DEBUG CLI]   Amount: {}", tx.amount);
-                eprintln!("[DEBUG CLI]   Timestamp: {}", tx.timestamp);
-                eprintln!("[DEBUG CLI]   Signature size: {} bytes", tx.signature.len());
-                eprintln!(
-                    "[DEBUG CLI]   PK (first 32 bytes hex): {}",
-                    hex::encode(&tx.signature[..tx.signature.len().min(32)])
-                );
-
                 // POST to RPC
-                match post_transaction(&rpc, &tx).await {
-                    Ok(tx_id) => {
-                        println!("✅ Transaction submitted");
-                        println!("   From:    {}", sender);
-                        println!("   To:      {}", to);
-                        println!("   Amount:  {} BLEEP", amount);
-                        println!("   Tx ID:   {}", tx_id);
-                    }
-                    Err(e) => {
-                        println!("⚠️  Could not reach node RPC ({}): {}", rpc, e);
-                        println!("   Is the node running? Try: ./bleep");
-                    }
-                }
+                let tx_id = post_transaction(&rpc, &tx).await?;
+                println!("✅ Transaction submitted");
+                println!("   From:    {}", sender);
+                println!("   To:      {}", to);
+                println!("   Amount:  {} BLEEP", amount);
+                println!("   Tx ID:   {}", tx_id);
             }
             TxCommand::History => match get_tx_history(&rpc).await {
                 Ok(history) => {
@@ -1125,34 +1168,17 @@ async fn get_block_by_id(rpc: &str, id: &str) -> Result<String> {
     Ok(resp)
 }
 
-/// Generate JWT token for RPC authentication
+/// Read the server-issued session token used for RPC authentication.
 async fn get_jwt_token_sync() -> Result<String> {
-    let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET")
-        .map_err(|_| anyhow!("BLEEP_JWT_SECRET must be set on every node"))?;
-
-    let base64_engine = base64::engine::general_purpose::STANDARD;
-    let jwt_secret = match base64_engine.decode(&jwt_secret_b64) {
-        Ok(secret) if secret.len() >= 32 => secret,
-        Ok(_) => return Err(anyhow!("BLEEP_JWT_SECRET must decode to at least 32 bytes")),
-        Err(e) => return Err(anyhow!("Failed to decode BLEEP_JWT_SECRET: {}", e)),
-    };
-
-    let session_mgr = SessionManager::new(jwt_secret)
-        .map_err(|e| anyhow!("Failed to create SessionManager: {}", e))?;
-
-    // Issue a session token valid for 1 hour
-    let token = session_mgr
-        .issue(
-            "bleep-cli",
-            &[Role::DappDeveloper],
-            chrono::Duration::hours(1),
+    let token = std::env::var("BLEEP_JWT_TOKEN").map_err(|_| {
+        anyhow!(
+            "BLEEP_JWT_TOKEN must contain a server-issued session token; register or log in through /rpc/auth"
         )
-        .await
-        .map_err(|e| anyhow!("Failed to issue session token: {}", e))?;
-
-    eprintln!("[DEBUG] JWT Token: {}", token.token);
-
-    Ok(token.token)
+    })?;
+    if token.trim().is_empty() {
+        return Err(anyhow!("BLEEP_JWT_TOKEN must not be empty"));
+    }
+    Ok(token)
 }
 
 /// Get JWT token from async context
@@ -1173,11 +1199,38 @@ async fn post_transaction(rpc: &str, tx: &ZKTransaction) -> Result<String> {
         .header("authorization", format!("Bearer {}", jwt_token))
         .json(tx)
         .send()
-        .await?
-        .text()
         .await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    parse_tx_response(status, &body)
+}
 
-    Ok(resp)
+fn parse_tx_response(status: reqwest::StatusCode, body: &str) -> Result<String> {
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Transaction submission failed (HTTP {status}): {body}"
+        ));
+    }
+
+    let response: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| anyhow!("Invalid transaction response from RPC: {e}"))?;
+    if response.get("status").and_then(serde_json::Value::as_str) != Some("accepted") {
+        return Err(anyhow!(
+            "Transaction was rejected by RPC: {}",
+            response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| response.get("status").and_then(serde_json::Value::as_str))
+                .unwrap_or("unexpected response")
+        ));
+    }
+
+    response
+        .get("tx_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|tx_id| !tx_id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("Accepted transaction response is missing tx_id"))
 }
 
 /// GET /rpc/tx/history
@@ -1202,6 +1255,41 @@ async fn get_account_state(rpc: &str, address: &str) -> Result<(String, u64, Str
     let url = format!("{}/rpc/state/{}", rpc, address);
     let resp = reqwest::get(&url).await?.json::<AccountStateResp>().await?;
     Ok((resp.balance, resp.nonce, resp.state_root))
+}
+
+#[cfg(test)]
+mod tx_response_tests {
+    use super::parse_tx_response;
+
+    #[test]
+    fn accepts_only_accepted_transaction_responses() {
+        let response = r#"{"tx_id":"tx-123","status":"accepted"}"#;
+        assert_eq!(
+            parse_tx_response(reqwest::StatusCode::OK, response).unwrap(),
+            "tx-123"
+        );
+    }
+
+    #[test]
+    fn reports_rpc_rejections_as_errors() {
+        let response = r#"{"tx_id":"rejected","status":"validation_failed"}"#;
+        let error = parse_tx_response(reqwest::StatusCode::OK, response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("validation_failed"));
+    }
+
+    #[test]
+    fn reports_http_failures_as_errors() {
+        let error = parse_tx_response(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":"invalid session"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("HTTP 401"));
+        assert!(error.contains("invalid session"));
+    }
 }
 
 // ── Local state query (no running node required) ───────────────────────────

@@ -45,8 +45,11 @@ pub const COL_RANGE_VALUE: usize = 38;
 pub const COL_RESERVED_START: usize = 39;
 pub const COL_RESERVED_END: usize = 47;
 
+#[cfg(test)]
 const EPOCH_REMAINDER_LIMB: usize = 20;
+#[cfg(test)]
 const EPOCH_REMAINDER_GAP_LIMB: usize = 21;
+#[cfg(test)]
 const TX_COUNT_GAP_LIMB: usize = 22;
 pub(crate) const NUM_RANGE_LIMBS: usize = 23;
 
@@ -154,11 +157,16 @@ impl Air for ExtendedBlockValidityAir {
         let epoch_remainder_gap = pub_inputs
             .blocks_per_epoch
             .saturating_sub(epoch_remainder.saturating_add(1));
-        let tx_count_gap = u64::from(MAX_BLOCK_TRANSACTIONS)
-            .saturating_sub(u64::from(pub_inputs.tx_count));
+        let tx_count_gap =
+            u64::from(MAX_BLOCK_TRANSACTIONS).saturating_sub(u64::from(pub_inputs.tx_count));
         Self {
             context: AirContext::new(trace_info, degrees, NUM_ASSERTIONS, options),
-            range_values: range_values(&pub_inputs, epoch_remainder, epoch_remainder_gap, tx_count_gap),
+            range_values: range_values(
+                &pub_inputs,
+                epoch_remainder,
+                epoch_remainder_gap,
+                tx_count_gap,
+            ),
             pub_inputs,
         }
     }
@@ -203,9 +211,7 @@ impl Air for ExtendedBlockValidityAir {
             - current[COL_EPOCH_ID] * current[COL_BLOCKS_PER_EPOCH]
             - current[COL_EPOCH_REMAINDER];
         index += 1;
-        result[index] = current[COL_EPOCH_REMAINDER]
-            + current[COL_EPOCH_REMAINDER_GAP]
-            + one
+        result[index] = current[COL_EPOCH_REMAINDER] + current[COL_EPOCH_REMAINDER_GAP] + one
             - current[COL_BLOCKS_PER_EPOCH];
         index += 1;
         let max_tx = E::from(BaseElement::new(u64::from(MAX_BLOCK_TRANSACTIONS) as u128));
@@ -215,9 +221,7 @@ impl Air for ExtendedBlockValidityAir {
         index += 1;
         result[index] = current[COL_BATCH_SEQ_ID] - current[COL_BLOCK_INDEX];
         index += 1;
-        result[index] = current[COL_BLOCKS_PER_EPOCH]
-            * current[COL_BLOCKS_PER_EPOCH_INVERSE]
-            - one;
+        result[index] = current[COL_BLOCKS_PER_EPOCH] * current[COL_BLOCKS_PER_EPOCH_INVERSE] - one;
         index += 1;
 
         for column in COL_RESERVED_START..=COL_RESERVED_END {

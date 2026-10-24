@@ -36,6 +36,14 @@ bleep-rpc
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/explorer` | Responsive live block explorer UI |
+| `GET` | `/rpc/explorer/blocks?limit=20&before=100` | Canonical blocks, newest first; `limit` is capped at 100 |
+| `GET` | `/rpc/explorer/block/{height-or-hash}` | Block summary and confirmed transactions |
+| `GET` | `/rpc/explorer/transactions?limit=25&address={address}` | Confirmed transactions, optionally filtered by address |
+| `GET` | `/rpc/explorer/transaction/{hash}` | Confirmed transaction details |
+| `GET` | `/rpc/explorer/address/{address}` | Live account balance, nonce, and node height |
+| `GET` | `/rpc/explorer/validators` | Active validators from the live validator registry |
+| `GET` | `/rpc/health` | Node status, height, and configured chain ID |
 | `GET` | `/rpc/state/{address}` | Live balance & nonce |
 | `GET` | `/rpc/proof/{address}` | Sparse Merkle inclusion proof |
 | `POST` | `/rpc/validator/stake` | Register / increase stake |
@@ -53,6 +61,35 @@ bleep-rpc
 | `GET` | `/rpc/connect/intent/{id}` | Intent status |
 | `POST` | `/rpc/pat/mint` | Mint PAT tokens |
 | `GET` | `/rpc/pat/balance/{address}` | PAT token balance |
+
+Explorer data is read from the attached live `Blockchain`, `StateManager`, and
+`ValidatorRegistry`. The explorer returns `503` when a required subsystem is
+not attached; it does not fabricate demo blocks or validators. Block and
+transaction history currently comes from the node's in-memory canonical chain,
+so a deployment that needs historical queries across restarts should connect a
+durable indexer/API before exposing the explorer publicly.
+
+### Wallet and transaction submission
+
+Transaction signing stays in the wallet. The explorer does not accept, store,
+or derive private keys. A BLEEP-compatible browser wallet injects
+`window.bleep.request` with these methods:
+
+- `bleep_requestAccounts` returns the active BLEEP address (or an array whose
+  first entry is the active address).
+- `bleep_signTransaction` receives one transaction object with `chain_id`,
+  `sender`, `receiver`, decimal-string `amount` in microBLEEP, `timestamp`, and
+  `nonce`. It returns the SPHINCS+ signature as a `0x`-prefixed hex string or a
+  byte array. The wallet must sign the canonical BLEEP transaction payload and
+  bind the sender to its signing public key.
+
+The explorer then submits the signed transaction to `POST /rpc/tx`. That RPC
+requires a bearer session with `SubmitTransaction` permission; authenticate
+with a provisioned DApp identity via `POST /rpc/auth/login`. The token remains
+in page memory and is not persisted. Ethereum-only injected providers are not
+compatible with BLEEP's SPHINCS+ account signatures. Deployments should serve
+the node and explorer over HTTPS, configure the intended `BLEEP_CHAIN_ID`, and
+protect the RPC listener with their normal network and rate-limiting controls.
 
 Full request/response schemas: [RPC API Specification](../docs/specs/rpc_api_spec.md).
 

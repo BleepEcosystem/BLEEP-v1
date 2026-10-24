@@ -434,6 +434,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "ark-ec"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1033,12 +1045,14 @@ dependencies = [
  "clap",
  "hex",
  "reqwest",
+ "rpassword",
  "serde",
  "serde_json",
  "sha3",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -1353,6 +1367,7 @@ dependencies = [
  "parking_lot",
  "rand 0.8.6",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
@@ -1582,6 +1597,7 @@ dependencies = [
  "bleep-economics",
  "bleep-governance",
  "bleep-interop",
+ "bleep-p2p",
  "bleep-pat",
  "bleep-state",
  "bleep-telemetry",
@@ -1733,6 +1749,7 @@ name = "bleep-wallet-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "async-trait",
  "bincode 2.0.1",
  "bip39",
@@ -1751,6 +1768,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sha3",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "uuid",
@@ -5370,6 +5388,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "pasta_curves"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5879,7 +5908,8 @@ dependencies = [
 [[package]]
 name = "proc-macro-error-attr2"
 version = "2.0.0"
-source = "git+https://github.com/GnomedDev/proc-macro-error-2.git?rev=b02d79c49898a8f4340aaa81ebd7cae3668ac6a9#b02d79c49898a8f4340aaa81ebd7cae3668ac6a9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5888,7 +5918,6 @@ dependencies = [
 [[package]]
 name = "proc-macro-error2"
 version = "2.0.1"
-source = "git+https://github.com/GnomedDev/proc-macro-error-2.git?rev=b02d79c49898a8f4340aaa81ebd7cae3668ac6a9#b02d79c49898a8f4340aaa81ebd7cae3668ac6a9"
 dependencies = [
  "proc-macro-error-attr2",
  "proc-macro2",
@@ -6482,7 +6511,6 @@ dependencies = [
  "enumn",
  "hashbrown 0.14.5",
  "hex",
- "once_cell",
  "serde",
 ]
 
@@ -6699,9 +6727,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -6794,9 +6822,9 @@ dependencies = [
 
 [[package]]
 name = "ruzstd"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 dependencies = [
  "twox-hash",
 ]

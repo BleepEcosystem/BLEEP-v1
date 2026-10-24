@@ -5,14 +5,13 @@
 BLEEP is an experimental distributed execution system investigating the practical viability of two
 properties that do not yet coexist in any production blockchain:
 
-1. **STARK-based block validity proofs** — every block carries a Winterfell STARK proof of its
-   own correctness, generated before broadcast and verified independently by each validator
-   before any vote is cast.
+1. **Bounded block-metadata STARK proofs** — the extended Winterfell AIR proves epoch arithmetic,
+   transaction/signature count equality and bounds, and batch sequence equality. It does not
+   prove transaction signatures, Merkle-root derivation, or state-transition execution.
 
-2. **NIST-finalized post-quantum cryptography from genesis** — SPHINCS+-SHAKE-256f-simple
-   (FIPS 205) and Kyber-1024/ML-KEM-1024 (FIPS 203) at Security Level 5, on every
-   signature, key encapsulation, and proof verification path, with no classical public-key
-   fallback.
+2. **Post-quantum algorithm implementations** — the code uses `pqcrypto` SPHINCS+-SHAKE-256f-simple
+   and legacy Kyber-1024 APIs. These are legacy/round-3 algorithm APIs; FIPS 205 or FIPS 203
+   implementation conformance or validation is not claimed.
 
 The implementation is a Rust workspace of 29 crates, currently in pre-testnet phase with a
 completed internal security audit. This document describes what has been built, what has been
@@ -25,19 +24,16 @@ measured, and what questions remain open.
 Ethereum's long-term trajectory involves two areas where BLEEP's implementation generates
 directly relevant empirical data.
 
-**Execution correctness proofs.** The move toward a provable EVM, STARK-based rollup
-verification, and eventual proof-of-execution at the consensus layer raises a fundamental
-engineering question: what does it actually cost to generate a STARK validity proof within a live
-consensus slot budget? BLEEP runs Winterfell STARK block validity proofs within a 3,000 ms
-PoS-BFT slot interval. The generation times, resource requirements, failure modes, and proof
-determinism properties measured here are empirical data points for anyone reasoning about
-STARK-based execution verification at the protocol layer.
+**Metadata consistency proofs.** The extended AIR proves bounded relationships among selected
+block metadata. It does not prove execution correctness. The code reports proof-generation and
+verification timings for this metadata proof; they are not timings for an execution-validity
+circuit.
 
 **Post-quantum migration.** Ethereum will eventually need to migrate away from secp256k1 and
-ECDSA. The practical cost of that migration — in signature sizes, bandwidth, latency, and system
-complexity — is an open empirical question. BLEEP has operated NIST-finalized post-quantum
-primitives at Security Level 5 on every sensitive path since genesis, accumulating concrete
-measurements of those costs in a live consensus environment.
+ECDSA. The practical cost of migration is an open empirical question. BLEEP's use of
+SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs provides implementation experience with
+post-quantum algorithm families; it does not establish FIPS implementation conformance or
+production-scale network measurements.
 
 **Ethereum-ecosystem artifact.** BLEEP's Tier 3 cross-chain bridge includes a SPHINCS+
 verifier Solidity contract deployed on Ethereum Sepolia — a post-quantum signature verifier
@@ -52,9 +48,10 @@ The following components are built, tested, and running at Protocol Version 5.
 
 ### Cryptographic Foundation
 
-- SPHINCS+-SHAKE-256f-simple (FIPS 205, SL5) for all transaction signing, block signing, and
+- SPHINCS+-SHAKE-256f-simple (legacy/round-3 API; FIPS 205 conformance not claimed) for
+  transaction signing, block signing, and
   P2P message authentication. Crate: `pqcrypto-sphincsplus` v0.7.2.
-- Kyber-1024/ML-KEM-1024 (FIPS 203, SL5) for all key encapsulation: validator binding, peer
+- Kyber-1024 (legacy API; not FIPS 203 ML-KEM) for key encapsulation: validator binding, peer
   session establishment, and onion routing. Crate: `pqcrypto-kyber` v0.8.1.
 - AES-256-GCM for symmetric encryption of onion routing hop payloads.
 - SHA3-256 for state commitments, Merkle hashing, block hashing, and audit log chaining.
@@ -67,12 +64,13 @@ All secret key types are wrapped in `zeroize::Zeroizing<Vec<u8>>` and zeroed on 
 
 ### STARK Proof System
 
-- Winterfell STARK prover and verifier wired to `BlockValidityProver` and `BlockValidityVerifier`.
-- 48-column execution trace (`BlockValidityAir`) over five public inputs: `block_index`,
-  `epoch_id`, `tx_count`, `merkle_root_hash`, `validator_pk_hash`.
-- FRI-based construction over a 128-bit prime field. Security reduces to collision resistance of
-  BLAKE3 and SHA3-256.
-- No trusted setup, no structured reference string, no MPC ceremony of any kind.
+- The legacy `STARK_V1` block-validity API is disabled because its AIR does not constrain block
+  validity.
+- The active 48-column `ExtendedBlockValidityAir` proves bounded metadata relationships:
+  epoch arithmetic, transaction/signature count equality and limits, and batch sequence equality.
+- Hash preimages, signature verification, commitment-root derivation, and state-transition
+  execution are not constrained by this AIR; conventional validation performs separate checks.
+- FRI-based construction over a 128-bit prime field with no trusted setup.
 - Proof determinism verified: identical public inputs and witnesses produce byte-identical proof
   serializations across all testnet validators. Crate: `winterfell` v0.13.1.
 
@@ -147,24 +145,25 @@ empirical question to be measured during Phase 6 public testnet operation.
 
 ### Post-Quantum Signature Overhead
 
-| Parameter | SPHINCS+-SHAKE-256f-simple (FIPS 205, SL5) | secp256k1 / ECDSA |
+| Parameter | SPHINCS+-SHAKE-256f-simple (legacy/round-3 API) | secp256k1 / ECDSA |
 |---|---|---|
 | Public key | 64 bytes | 33 bytes (compressed) |
-| Signature | 49,088 bytes | ~64 bytes |
+| Signature | 49,856 bytes | ~64 bytes |
 | Overhead factor | ~780× | baseline |
 | Per-block aggregate (4,096 tx) | ~204 MB | ~262 KB |
 | Min. validator bandwidth (sigs only) | ~544 KB/s | ~0.7 KB/s |
 
-**Observation:** Hash-based post-quantum signatures at Security Level 5 impose approximately
+**Observation:** This hash-based post-quantum parameter set imposes approximately
 780× the per-signature bandwidth of ECDSA. At 4,096 transactions per full block, aggregate
-signature data is ~204 MB per block. This is the direct, unavoidable cost of NIST-level-5 security
-with no trusted setup. Signature aggregation — see Open Research Questions below — could
+signature data is about 204 MB per block. The parameter set is associated with the highest NIST
+security category, but this repository does not claim FIPS 205 implementation conformance or
+validation. Signature aggregation — see Open Research Questions below — could
 reduce this substantially if a hash-based multi-signature scheme compatible with SPHINCS+ can
 be made practical.
 
 ### Key Encapsulation Overhead
 
-| Parameter | Kyber-1024 / ML-KEM-1024 (FIPS 203, SL5) | x25519 / ECDH |
+| Parameter | Kyber-1024 legacy API (not FIPS 203 ML-KEM) | x25519 / ECDH |
 |---|---|---|
 | Public key | 1,568 bytes | 32 bytes |
 | Ciphertext | 1,568 bytes | 32 bytes |
@@ -201,9 +200,10 @@ hop key material — not in the block production critical path.
 | TxReplay | PASS | Rejected by nonce check |
 | InvalidBlockFlood(1000) | PASS | Rejected at SPHINCS+ gate; peer rate-limited |
 | STARKProofTamper | PASS | Tampered proof rejected at BlockValidityVerifier |
-| LoadStress(10,000 TPS, 60s) | PASS | STARK proofs within slot budget at peak load |
+| LoadStress(10,000 TPS, 60s) | Model check | Arithmetic capacity scenario; not an executed load test or measured TPS |
 
-*Run duration: 72 hours continuous. Validator count: 7.*
+*The chaos engine's LoadStress outcomes are arithmetic model checks, not transaction-load
+measurements. See [benchmark.md](benchmark.md) for measured local-node CLI workloads.*
 
 ### Projected Throughput (Simulated — Pre-Testnet)
 
@@ -216,9 +216,10 @@ hop key material — not in the block production critical path.
 | Full-capacity block ratio | 82.3% |
 
 **Caveat:** These figures are projections from a simulated workload: 7 validators, controlled
-network latency, geographically concentrated nodes, uniform transaction mix. They are included
-only for architectural reference. Measured throughput on a geographically distributed public
-testnet will be published during Phase 6.
+network latency, geographically concentrated nodes, uniform transaction mix. They are not
+achieved TPS. A separate single-node CLI benchmark measured 6.43 TPS sequentially and 26.33 TPS
+with 32 concurrent CLI workers; neither measures network-wide consensus or protocol capacity.
+See [benchmark.md](benchmark.md) for methodology and limitations.
 
 ---
 
@@ -263,7 +264,7 @@ feasible for the Tier 3 bridge security model at realistic mainnet gas prices?
 Classical BFT liveness analysis assumes message delivery within bounded latency. SPHINCS+-
 signed messages are ~780× larger than ECDSA-signed messages. Does this overhead materially
 affect BFT liveness under realistic network conditions — particularly at the block proposal
-broadcast step where a 49,088-byte block signature must propagate before validators can begin
+broadcast step where a 49,856-byte block signature must propagate before validators can begin
 verification? At what validator count or network condition does PQ signature overhead begin to
 threaten slot utilization?
 
@@ -382,9 +383,9 @@ or key is required to call it.
 
 | Primitive | Standard | Security Level | Sizes | Usage |
 |---|---|---|---|---|
-| SPHINCS+-SHAKE-256f-simple | FIPS 205 (SLH-DSA) | SL5 (≥256-bit PQ) | PK: 64B · SK: 128B · Sig: 49,088B | Transaction/block signing, P2P auth |
-| Kyber-1024 / ML-KEM-1024 | FIPS 203 (ML-KEM) | SL5 (≥256-bit PQ) | PK: 1,568B · SK: 3,168B · CT: 1,568B | Key encapsulation, onion routing |
-| Winterfell STARK (FRI) | Hash-based | PQ (BLAKE3/SHA3-256 collision resistance) | 48-col trace · No SRS | Block validity proofs, bridge verification |
+| SPHINCS+-SHAKE-256f-simple | Legacy/round-3 API; FIPS 205 conformance not claimed | Level-5 parameter set | PK: 64B · SK: 128B · Sig: 49,856B | Transaction/block signing, P2P auth |
+| Kyber-1024 | Legacy Kyber API; not FIPS 203 ML-KEM | Level-5 parameter set | PK: 1,568B · SK: 3,168B · CT: 1,568B | Key encapsulation, onion routing |
+| Winterfell STARK (FRI) | Hash-based | Hash security assumptions | 48-col trace · No SRS | Bounded block-metadata constraints |
 | SHA3-256 | FIPS 202 | Classical 256-bit | 32B output | State commitments, Merkle chain, audit log |
 
 ### Consensus Parameters

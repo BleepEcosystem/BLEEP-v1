@@ -26,7 +26,7 @@ This document describes the development trajectory for the BLEEP Quantum Trust N
 
 **Delivered:**
 - ✅ 19-crate Cargo workspace with acyclic dependency graph
-- ✅ `bleep-crypto`: SPHINCS+-SHAKE-256f-simple (FIPS 205), Kyber-1024 (FIPS 203), AES-256-GCM, SHA3-256, BLAKE3
+- ✅ `bleep-crypto`: SPHINCS+-SHAKE-256f-simple and legacy Kyber-1024 APIs (FIPS implementation conformance not claimed), AES-256-GCM, SHA3-256, BLAKE3
 - ✅ `bleep-core`: Block, ZKTransaction, mempool, networking stubs
 - ✅ Genesis configuration (`config/genesis.json`)
 - ✅ Constitutional parameters as Rust `const_assert!` — MAX_SUPPLY, MAX_INFLATION_RATE_BPS, FEE_BURN_BPS
@@ -77,7 +77,7 @@ This document describes the development trajectory for the BLEEP Quantum Trust N
 - ✅ `bleep-state`: Cross-shard 2PC (`TwoPhaseCommitCoordinator`); locking; recovery; safety invariants
 - ✅ `bleep-state`: Advanced fault detector; self-healing orchestrator (Healthy → Degraded → Critical → Recovering); rollback engine; snapshot engine
 - ✅ `bleep-state`: Shard lifecycle (create, activate, deactivate); epoch binding; checkpoint; healing
-- ✅ `bleep-zkp`: Winterfell STARK block validity circuit (`BlockValidityAir`, `BlockValidityProver`, `BlockValidityVerifier`) — 48-column trace, FRI backend, BLAKE3 commitment hashing, no trusted setup
+- ✅ `bleep-zkp`: Winterfell 48-column bounded metadata AIR; legacy `STARK_V1` block-validity prover/verifier disabled because its AIR does not constrain validity
 - ✅ `bleep-ai` Phase 4: feature extractor; AI decision module; governance integration; `DeterministicInferenceEngine` (ONNX, 6 invariants, SHA3-256 model hash)
 - ✅ `bleep-governance` Phase 5: Autonomous Protocol Improvement Proposals (APAIPs); safety constraints; deterministic activation
 - ✅ `bleep-economics` Phase 5: oracle bridge; game-theoretic safety proofs (`SafetyVerifier`)
@@ -200,8 +200,8 @@ These are honest gaps documented for contributors and researchers. See [`WHITEPA
 
 | Limitation | Impact | Mitigation Path |
 |---|---|---|
-| SPHINCS+ signatures are 49,088 bytes — no native aggregation | SAL reduces gossip to ~320 KB/block via Blake3 Merkle commitment over SHA3-256(sig_i); receivers verify via STARK-committed sig_commitment_root | ✅ Resolved (Sprint 10) — hash-based Merkle aggregation (O(log n) validator vote bandwidth) remains Phase 8 research |
-| TPS figures are simulated, not measured | Projected 10,921 avg TPS — actual performance unknown until public testnet | Public testnet measurement in Phase 6 |
+| SPHINCS+ signatures are 49,856 bytes — no native aggregation | SAL proposes compact gossip, but the STARK does not prove signature validity or commitment-root derivation | Full signature-fetch and conventional validation path required |
+| Projected TPS figures are simulated, not measured network capacity | Projections show 10,921 average TPS; local single-node CLI benchmark measured 6.43 sequential / 26.33 concurrent TPS | Multi-validator and public-testnet throughput measurement remains outstanding |
 | Ed25519 still present in Cargo.toml | Contradicts "no classical fallback" until Phase 9 sunset | Explicit sunset in Phase 9; quantum feature flag enforces PQ on sensitive paths now |
 | STARK proof size larger than SNARKs | ~100 KB per proof vs SNARKs; offset by no trusted setup requirement | Accepted design trade-off; documented in whitepaper |
 

@@ -12,6 +12,8 @@ cargo build --release --bin bleep
 
 Choose a seed peer supplied by the network operator. A seed is simply an existing BLEEP node address used to discover peers; it is not a private key or a special flag order.
 
+Before starting a node, provision a unique random JWT secret for it and export it as standard base64-encoded `BLEEP_JWT_SECRET` (at least 32 decoded bytes). Never reuse the repository's old development secret. Operator registration is restricted to a system administrator, so also set `BLEEP_ADMIN_TOKEN` to a valid administrator token before running `init`. For example, generate secret material with `openssl rand -base64 32` and store it in your deployment secret manager.
+
 ## First run
 
 ```bash
@@ -66,7 +68,7 @@ Install a per-user systemd unit during initialization:
 ./scripts/run-validator.sh init --name validator-1 --seed seed.example.org:7700 --install-service
 ```
 
-The unit restarts the validator after failures and survives terminal closure. On systems without systemd, run the launcher from the platform's service manager using the `run --name validator-1` command.
+The unit restarts the validator after failures and survives terminal closure. The launcher stores `BLEEP_JWT_SECRET` in a mode-0600 environment file for that unit; protect the validator state directory. On systems without systemd, configure `BLEEP_JWT_SECRET` in the platform's secret manager and run the launcher from the service manager using the `run --name validator-1` command.
 
 ## Configuration
 

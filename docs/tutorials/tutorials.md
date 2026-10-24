@@ -18,6 +18,12 @@ cargo run -p bleep-cli -- wallet create
 ```
 
 This prints a new `BLEEP1...` address and stores the encrypted signing key in `~/.bleep/wallets.json`.
+The CLI prompts for a password (and confirmation); signing prompts for it
+again. For non-interactive use, set `BLEEP_WALLET_PASSWORD` in the process
+environment. Wallet keys are protected with Argon2id and AES-256-GCM.
+
+Plaintext storage is only available for disposable dev/test wallets when both
+`BLEEP_WALLET_PLAINTEXT_DEV=1` and `BLEEP_NETWORK_MODE=dev` (or `test`) are set.
 
 ## 1. Create a BLEEP address
 

@@ -6,23 +6,53 @@
 mod phase1_integration_tests {
     use bleep_consensus::{
         ConsensusMode, EpochConfig, EpochState, FinalityManager, FinalizyCertificate,
-        SlashingEngine, SlashingEvidence, SlashingPenalty, ValidatorIdentity, ValidatorRegistry,
-        ValidatorState,
+        FinalityHeader, SlashingEngine, SlashingEvidence, SlashingPenalty, ValidatorIdentity,
+        ValidatorRegistry, ValidatorState,
     };
     use bleep_crypto::SignatureScheme;
+    use std::collections::HashMap;
 
-    fn add_test_signature(cert: &mut FinalizyCertificate, validator_id: &str, voting_power: u128) {
-        let (public_key, secret_key) = SignatureScheme::keygen().expect("SPHINCS+ keygen failed");
+    fn finality_committee(
+        stakes: &[(&str, u128)],
+    ) -> (ValidatorRegistry, HashMap<String, Vec<u8>>) {
+        let mut registry = ValidatorRegistry::new();
+        let mut secret_keys = HashMap::new();
+        for (id, stake) in stakes {
+            let (public_key, secret_key) = SignatureScheme::keygen().expect("SPHINCS+ keygen");
+            let identity = ValidatorIdentity::new(
+                (*id).to_string(),
+                vec![0; 1568],
+                hex::encode(public_key.as_bytes()),
+                *stake,
+                0,
+            )
+            .expect("validator identity");
+            registry.register_validator(identity).expect("register");
+            registry.activate_validator(id).expect("activate");
+            secret_keys.insert((*id).to_string(), secret_key.as_bytes().to_vec());
+        }
+        (registry, secret_keys)
+    }
+
+    fn finality_certificate(registry: &ValidatorRegistry, parent: &str) -> FinalizyCertificate {
+        let mut block = bleep_core::block::Block::new(100, Vec::new(), parent.to_string());
+        block.epoch_id = 1;
+        FinalizyCertificate::new(
+            FinalityHeader::from_block(&block),
+            1,
+            block.timestamp + 1,
+            registry,
+        )
+        .expect("certificate")
+    }
+
+    fn add_test_signature(cert: &mut FinalizyCertificate, validator_id: &str, secret_key: &[u8]) {
+        let secret_key = bleep_crypto::SecretKey::from_bytes(secret_key).expect("secret key");
         let signature = SignatureScheme::sign(&cert.signature_message(), &secret_key)
             .expect("SPHINCS+ signing failed")
             .as_bytes();
-        cert.add_validator_signature(
-            validator_id.to_string(),
-            public_key.to_vec(),
-            signature,
-            voting_power,
-        )
-        .unwrap();
+        cert.add_validator_signature(validator_id.to_string(), signature)
+            .unwrap();
     }
 
     /// Helper function to create a test validator
@@ -139,75 +169,32 @@ mod phase1_integration_tests {
 
     #[test]
     fn test_phase1_finality_certificate_and_quorum() {
-        // Simulate block finality with 3 validators, 1000 stake each
-        let total_stake = 3000;
-
-        let mut cert = FinalizyCertificate::new(
-            100,
-            "block_hash_100".to_string(),
-            1,
-            "POS".to_string(),
-            "merkle_root_100".to_string(),
-            1000,
-            1,
-        )
-        .unwrap();
-
-        // Add signatures from 2 validators (only 2000 stake)
-        cert.add_validator_signature("v1".to_string(), vec![0; 64], vec![1, 2, 3], 1000)
-            .unwrap();
-        cert.add_validator_signature("v2".to_string(), vec![0; 64], vec![4, 5, 6], 1000)
-            .unwrap();
-
-        // Does not meet quorum yet (need >2/3 of 3000 = > 2000)
-        assert!(!cert.meets_quorum(total_stake));
-
-        // Add third validator (now have 3000 stake)
-        cert.add_validator_signature("v3".to_string(), vec![0; 64], vec![7, 8, 9], 1000)
-            .unwrap();
-
-        // Now meets quorum
-        assert!(cert.meets_quorum(total_stake));
+        let (registry, keys) = finality_committee(&[("v1", 1000), ("v2", 1000), ("v3", 1000)]);
+        let mut cert = finality_certificate(&registry, "parent");
+        add_test_signature(&mut cert, "v1", &keys["v1"]);
+        add_test_signature(&mut cert, "v2", &keys["v2"]);
+        assert!(!cert.meets_quorum(&registry).unwrap());
+        add_test_signature(&mut cert, "v3", &keys["v3"]);
+        assert!(cert.meets_quorum(&registry).unwrap());
     }
 
     #[test]
     fn test_phase1_finality_manager_immutability() {
-        let mut manager = FinalityManager::new(1000);
-
-        let mut cert = FinalizyCertificate::new(
-            100,
-            "block_100".to_string(),
-            1,
-            "POS".to_string(),
-            "merkle_100".to_string(),
-            1000,
-            1,
-        )
-        .unwrap();
-
-        add_test_signature(&mut cert, "v1", 700);
-
-        // Finalize the block
-        manager.finalize_block(cert).unwrap();
+        let (registry, keys) = finality_committee(&[("v1", 400), ("v2", 300), ("v3", 300)]);
+        let mut manager = FinalityManager::new();
+        let mut cert = finality_certificate(&registry, "parent");
+        for id in ["v1", "v2", "v3"] {
+            add_test_signature(&mut cert, id, &keys[id]);
+        }
+        manager.finalize_block(cert, &registry).unwrap();
         assert!(manager.is_finalized(100));
 
         // Try to finalize same block again - should fail
-        let mut cert2 = FinalizyCertificate::new(
-            100,
-            "block_100_different".to_string(), // Different hash!
-            1,
-            "POS".to_string(),
-            "merkle_100".to_string(),
-            1001,
-            1,
-        )
-        .unwrap();
-
-        cert2
-            .add_validator_signature("v2".to_string(), vec![0; 64], vec![1, 2, 3], 700)
-            .unwrap();
-
-        let result = manager.finalize_block(cert2);
+        let mut cert2 = finality_certificate(&registry, "different-parent");
+        for id in ["v1", "v2", "v3"] {
+            add_test_signature(&mut cert2, id, &keys[id]);
+        }
+        let result = manager.finalize_block(cert2, &registry);
         assert!(result.is_err()); // Cannot finalize same height twice
     }
 
@@ -338,24 +325,15 @@ mod phase1_integration_tests {
 
     #[test]
     fn test_phase1_finality_with_finality_proof() {
-        let mut manager = FinalityManager::new(1000);
-
-        // Create certificate with 700/1000 stake (meets >2/3 quorum)
-        let mut cert = FinalizyCertificate::new(
-            100,
-            "block_100".to_string(),
-            1,
-            "POS".to_string(),
-            "merkle_100".to_string(),
-            1000,
-            1,
-        )
-        .unwrap();
-
-        add_test_signature(&mut cert, "v1", 700);
+        let (registry, keys) = finality_committee(&[("v1", 700), ("v2", 300)]);
+        let mut manager = FinalityManager::new();
+        let mut cert = finality_certificate(&registry, "parent");
+        add_test_signature(&mut cert, "v1", &keys["v1"]);
 
         // Finalize block
-        manager.finalize_block(cert.clone()).unwrap();
+        manager
+            .finalize_block(cert.clone(), &registry)
+            .expect("finalize");
 
         // Create finality proof
         let mut proof = bleep_consensus::FinalityProof::new(cert);
@@ -363,10 +341,10 @@ mod phase1_integration_tests {
         proof.add_dependent_block(101);
 
         // Verify proof
-        assert!(proof.verify(1000).is_ok());
+        assert!(proof.verify(&registry).is_ok());
 
         // Record proof
-        manager.record_proof(proof).unwrap();
+        manager.record_proof(proof, &registry).unwrap();
 
         // Verify through manager
         assert!(manager.is_proven_finalized(100));

@@ -53,7 +53,7 @@ impl BlockchainState {
 
     /// Query balance without mutating state.
     pub fn balance_of(&self, address: &str) -> u64 {
-        self.balances.get(address).copied().unwrap_or(1_000_000_000) // 10 BLEEP default for testnet
+        self.balances.get(address).copied().unwrap_or(0)
     }
 
     /// Apply a single confirmed transaction to the balance table.
@@ -104,7 +104,7 @@ impl BlockchainState {
 
     /// Revert a previously-applied block.  Used by `Blockchain::rollback()`.
     pub fn revert_block(&mut self, block: &Block) {
-        for tx in &block.transactions {
+        for tx in block.transactions.iter().rev() {
             // Reverse: credit sender, debit receiver
             self.credit(&tx.sender, tx.amount);
             if let Some(b) = self.balances.get_mut(&tx.receiver) {
@@ -176,6 +176,27 @@ impl Blockchain {
     /// Returns `true` on success.  `public_key` is the expected validator key;
     /// genesis uses `&[]` and is always accepted without signature check.
     pub fn add_block(&mut self, block: Block, public_key: &[u8]) -> bool {
+        self.add_block_inner(block, |previous, block| {
+            BlockValidator::validate_full_block(previous, block, public_key)
+        })
+    }
+
+    /// Validate, apply, drain pool, and append a block whose proposer key must
+    /// belong to the validator set for the block's epoch.
+    pub fn add_block_with_validator_set(
+        &mut self,
+        block: Block,
+        validator_keys: &[Vec<u8>],
+    ) -> bool {
+        self.add_block_inner(block, |previous, block| {
+            BlockValidator::validate_full_block_with_validator_set(previous, block, validator_keys)
+        })
+    }
+
+    fn add_block_inner<F>(&mut self, block: Block, validate: F) -> bool
+    where
+        F: FnOnce(&Block, &Block) -> bool,
+    {
         let last_block = match self.chain.back() {
             Some(b) => b,
             None => {
@@ -185,9 +206,7 @@ impl Blockchain {
         };
 
         // ── 1. Full structural + signature validation ─────────────────────
-        if (!block.transactions.is_empty() || block.index != 0)
-            && !BlockValidator::validate_full_block(last_block, &block, public_key)
-        {
+        if (!block.transactions.is_empty() || block.index != 0) && !validate(last_block, &block) {
             log::error!("Block {} failed validation", block.index);
             return false;
         }
@@ -280,16 +299,83 @@ impl Blockchain {
         true
     }
 
-    /// Fork resolution: adopt the longer valid chain.
-    pub fn handle_fork(&mut self, new_chain: VecDeque<Block>) {
-        if new_chain.len() > self.chain.len() {
-            log::warn!(
-                "Fork detected — adopting chain of length {} (was {})",
-                new_chain.len(),
-                self.chain.len()
-            );
-            self.chain = new_chain;
+    /// Validate and adopt a longer fork, using the validator set for each
+    /// candidate block's epoch.
+    ///
+    /// State changes are staged on a clone: orphaned blocks are reverted to the
+    /// common ancestor, then candidate blocks are applied. Neither chain nor
+    /// state is changed unless the complete transition succeeds.
+    pub fn handle_fork(
+        &mut self,
+        new_chain: VecDeque<Block>,
+        validator_sets: &HashMap<u64, Vec<Vec<u8>>>,
+    ) -> Result<(), String> {
+        if new_chain.len() <= self.chain.len() {
+            return Ok(());
         }
+        if new_chain.is_empty() || self.chain.is_empty() {
+            return Err("Cannot resolve a fork without a genesis block".into());
+        }
+        if new_chain.front().map(Block::compute_hash) != self.chain.front().map(Block::compute_hash)
+        {
+            return Err("Candidate fork does not share the canonical genesis block".into());
+        }
+
+        for index in 1..new_chain.len() {
+            let previous = &new_chain[index - 1];
+            let block = &new_chain[index];
+            let Some(validator_keys) = validator_sets.get(&block.epoch_id) else {
+                return Err(format!(
+                    "No validator set provided for candidate block epoch {}",
+                    block.epoch_id
+                ));
+            };
+            if block.index != previous.index.saturating_add(1)
+                || !BlockValidator::validate_full_block_with_validator_set(
+                    previous,
+                    block,
+                    validator_keys,
+                )
+            {
+                return Err(format!(
+                    "Candidate fork failed validation at block {}",
+                    block.index
+                ));
+            }
+        }
+
+        let common_prefix_len = self
+            .chain
+            .iter()
+            .zip(new_chain.iter())
+            .take_while(|(current, candidate)| current.compute_hash() == candidate.compute_hash())
+            .count();
+        if common_prefix_len == 0 {
+            return Err("Candidate fork has no common ancestor".into());
+        }
+
+        let mut state = self.state.write().unwrap();
+        let mut staged_state = state.clone();
+        for orphaned in self.chain.iter().skip(common_prefix_len).rev() {
+            staged_state.revert_block(orphaned);
+        }
+        for block in new_chain.iter().skip(common_prefix_len) {
+            staged_state.apply_block(block).map_err(|error| {
+                format!(
+                    "Candidate fork state transition failed at block {}: {}",
+                    block.index, error
+                )
+            })?;
+        }
+
+        log::warn!(
+            "Fork detected — adopting validated chain of length {} (was {})",
+            new_chain.len(),
+            self.chain.len()
+        );
+        *state = staged_state;
+        self.chain = new_chain;
+        Ok(())
     }
 
     /// Roll back the tip of the chain, reverting its state changes.

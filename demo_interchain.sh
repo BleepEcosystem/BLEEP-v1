@@ -38,14 +38,19 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 if [[ -z "${BLEEP_JWT_SECRET:-}" ]]; then
-    echo "⚠️  BLEEP_JWT_SECRET not set. Using default dev auth secret."
-    export BLEEP_JWT_SECRET=UtQcXNbNejElXUMcGocAuRh+YLiIgR9onZ1+PUJtJiU=
+    echo "❌ BLEEP_JWT_SECRET must be set to the node's base64-encoded JWT secret."
+    exit 1
 fi
 
 JWT_TOKEN=$("$PYTHON_BIN" - <<'PY'
-import base64, json, hmac, hashlib, os, secrets, time
+import base64, binascii, json, hmac, hashlib, os, secrets, time
 secret_b64 = os.environ["BLEEP_JWT_SECRET"]
-secret = base64.b64decode(secret_b64)
+try:
+    secret = base64.b64decode(secret_b64, validate=True)
+except binascii.Error as exc:
+    raise SystemExit(f"BLEEP_JWT_SECRET is not valid base64: {exc}")
+if len(secret) < 32:
+    raise SystemExit("BLEEP_JWT_SECRET must decode to at least 32 bytes")
 now = int(time.time())
 header = {"alg": "HS256", "typ": "JWT"}
 payload = {

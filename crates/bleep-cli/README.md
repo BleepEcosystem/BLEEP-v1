@@ -54,9 +54,16 @@ bleep-cli wallet create
 # ✅ Wallet created
 #    Address: BLEEP1a3f7b2c9d4e8f1a0b5c6d7e9f2a3b4c5d6e7f8
 #    Type:    Quantum-secure (SPHINCS+-SHAKE-256)
-#    Signing: ✅ ready (SK encrypted with AES-256-GCM)
+#    Signing: ✅ ready (Argon2id + AES-256-GCM)
 #    ⚠️  Back up your key material in a safe location.
 ```
+
+Wallet creation and import prompt for a password twice. For non-interactive
+use, set `BLEEP_WALLET_PASSWORD` in the process environment. To opt into
+plaintext storage for a disposable dev/test wallet only, set both
+`BLEEP_WALLET_PLAINTEXT_DEV=1` and `BLEEP_NETWORK_MODE=dev` (or `test`).
+Plaintext wallets cannot be unlocked unless that explicit dev/test setting is
+also present.
 
 ---
 
@@ -76,6 +83,11 @@ bleep-cli tx send --to BLEEP1f4d2c8e... --amount 100
 # Set wallet password via env if wallet is encrypted
 BLEEP_WALLET_PASSWORD="passphrase" bleep-cli tx send --to BLEEP1... --amount 50
 ```
+
+Write commands require `BLEEP_JWT_TOKEN` to contain a session token issued by
+the target node. Obtain one from `/rpc/auth/register/dapp` or `/rpc/auth/login`.
+Do not use `BLEEP_JWT_SECRET` in the CLI: that secret configures the node and
+does not create a session recognized by its RPC server.
 
 ---
 
@@ -183,7 +195,10 @@ BLEEP_RPC_URL=http://my-node:8545 bleep-cli wallet balance BLEEP1...
 
 ## Wallet Storage
 
-Wallet key material is stored at `~/.bleep/wallets.json`. Private keys are AES-256-GCM encrypted at rest. The encryption password is read from the `BLEEP_WALLET_PASSWORD` environment variable or prompted interactively.
+Wallet key material is stored at `~/.bleep/wallets.json` with Unix file
+permissions set to `0600`. Private keys are encrypted at rest with AES-256-GCM
+and an Argon2id-derived key using a random per-wallet salt. The password is
+read from `BLEEP_WALLET_PASSWORD` or prompted interactively when signing.
 
 ---
 

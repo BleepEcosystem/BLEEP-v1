@@ -317,7 +317,7 @@ mod tests {
     use super::*;
 
     fn secret() -> Vec<u8> {
-        b"a-production-grade-32byte-secret!".to_vec()
+        (0u8..32).collect()
     }
     fn kyber_key() -> Vec<u8> {
         vec![0xABu8; 1568]

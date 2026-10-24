@@ -173,6 +173,50 @@ impl BlockHeader {
             sig_commitment_root: block.sig_commitment_root,
         }
     }
+
+    /// Encode the semantic header fields in a versioned, fixed-width format.
+    ///
+    /// String-backed hash fields are SHA3-256 normalized to 32 bytes; integer
+    /// fields use little-endian encoding and consensus mode has an explicit
+    /// stable discriminant. Signature and proof payloads are authentication
+    /// artifacts and are intentionally excluded.
+    pub fn canonical_hash_preimage(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(BLOCK_HEADER_HASH_PREIMAGE_LEN);
+        bytes.extend_from_slice(BLOCK_HEADER_HASH_DOMAIN);
+        bytes.extend_from_slice(&self.index.to_le_bytes());
+        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        append_fixed_hash_field(&mut bytes, &self.previous_hash);
+        append_fixed_hash_field(&mut bytes, &self.merkle_root);
+        bytes.extend_from_slice(&self.epoch_id.to_le_bytes());
+        bytes.push(consensus_mode_discriminant(self.consensus_mode));
+        bytes.extend_from_slice(&self.protocol_version.to_le_bytes());
+        append_fixed_hash_field(&mut bytes, &self.shard_registry_root);
+        bytes.extend_from_slice(&self.shard_id.to_le_bytes());
+        append_fixed_hash_field(&mut bytes, &self.shard_state_root);
+        bytes.extend_from_slice(&self.sig_commitment_root);
+        debug_assert_eq!(bytes.len(), BLOCK_HEADER_HASH_PREIMAGE_LEN);
+        bytes
+    }
+
+    /// Compute the SHA3-256 hash of the canonical semantic header encoding.
+    pub fn canonical_hash(&self) -> String {
+        hex::encode(Sha3_256::digest(self.canonical_hash_preimage()))
+    }
+}
+
+const BLOCK_HEADER_HASH_DOMAIN: &[u8] = b"BLEEP_BLOCK_HEADER_V1";
+const BLOCK_HEADER_HASH_PREIMAGE_LEN: usize = BLOCK_HEADER_HASH_DOMAIN.len() + 197;
+
+fn append_fixed_hash_field(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&Sha3_256::digest(value.as_bytes()));
+}
+
+fn consensus_mode_discriminant(mode: ConsensusMode) -> u8 {
+    match mode {
+        ConsensusMode::PosNormal => 0,
+        ConsensusMode::PbftFastFinality => 1,
+        ConsensusMode::EmergencyPow => 2,
+    }
 }
 
 impl CompactBlock {
@@ -332,26 +376,9 @@ impl Block {
 
     // ── Hashing ───────────────────────────────────────────────────────────────
 
-    /// Compute a 32-byte block hash (SHA3-256 of all semantic fields).
+    /// Compute a 32-byte block hash (SHA3-256 of the canonical fixed-width header).
     pub fn compute_hash(&self) -> String {
-        let mut h = Sha3_256::new();
-        h.update(format!(
-            "{}{}{}{}{}{}{}{}{}{}",
-            self.index,
-            self.timestamp,
-            self.previous_hash,
-            self.merkle_root,
-            self.epoch_id,
-            self.consensus_mode as u8,
-            self.protocol_version,
-            self.shard_registry_root,
-            self.shard_id,
-            self.shard_state_root
-        ));
-        // Bind sig_commitment_root into the block hash so the SPHINCS+ signature
-        // commits to the SAL root. Non-zero only for blocks with real tx signatures.
-        h.update(self.sig_commitment_root);
-        hex::encode(h.finalize())
+        BlockHeader::from_block(self).canonical_hash()
     }
 
     /// Compute the block hash as raw bytes for SPHINCS+ signing.
@@ -816,5 +843,37 @@ mod tests {
         // Hashes may differ by timestamp — but within the same call they're stable
         assert_eq!(b1.compute_hash(), b1.compute_hash());
         let _ = b2;
+    }
+
+    #[test]
+    fn test_compute_hash_uses_fixed_width_header_encoding() {
+        let mut first = Block::new(1, vec![], "parent".to_string());
+        first.timestamp = 23;
+        let mut second = Block::new(12, vec![], "parent".to_string());
+        second.timestamp = 3;
+
+        // The old decimal concatenation encoded both pairs as "123".
+        assert_ne!(first.compute_hash(), second.compute_hash());
+        assert_eq!(
+            BlockHeader::from_block(&first)
+                .canonical_hash_preimage()
+                .len(),
+            BLOCK_HEADER_HASH_PREIMAGE_LEN
+        );
+        assert_eq!(
+            BlockHeader::from_block(&second)
+                .canonical_hash_preimage()
+                .len(),
+            BLOCK_HEADER_HASH_PREIMAGE_LEN
+        );
+    }
+
+    #[test]
+    fn test_compute_hash_excludes_signature_and_proof_artifacts() {
+        let mut block = Block::new(1, vec![], "parent".to_string());
+        let hash = block.compute_hash();
+        block.validator_signature = vec![1, 2, 3];
+        block.zk_proof = vec![4, 5, 6];
+        assert_eq!(block.compute_hash(), hash);
     }
 }

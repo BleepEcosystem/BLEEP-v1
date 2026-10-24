@@ -27,8 +27,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("missing challenge timestamp")?
             .parse()?;
         let secret = hex::decode(fs::read_to_string(state_dir.join("sphincs.secret"))?.trim())?;
-        let signature =
-            sign_tx_payload(&tx_payload(&label, "validator", amount, timestamp), &secret)?;
+        let signature = sign_tx_payload(
+            &tx_payload(
+                bleep_crypto::DEFAULT_CHAIN_ID,
+                &label,
+                "validator",
+                amount,
+                timestamp,
+                0,
+            ),
+            &secret,
+        )?;
         println!("{}", hex::encode(signature));
         return Ok(());
     }

@@ -3,7 +3,8 @@
 //! Production EVM engine powered by [`revm`] v3.5.
 //!
 //! * 100% EVM-compatible: Solidity, Vyper, Yul contracts work unchanged.
-//! * Supports Berlin, London, Shanghai, and Cancun hard-forks.
+//! * Supports Berlin, London, and Shanghai hard-forks.
+//! * Excludes the Cancun KZG point-evaluation precompile.
 //! * Isolated from other engines: a bug in EVM never touches WASM.
 //! * EIP-1559 base-fee, EIP-2929 access lists, EIP-3860 init-code limit.
 //! * All 9 EVM precompiles: ecRecover, SHA-256, RIPEMD-160, identity,

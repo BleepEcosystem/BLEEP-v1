@@ -2,9 +2,9 @@
 
 # BLEEP · Quantum Trust Network
 
-### Proven Execution. Quantum Foundation. Intent Native.
+### Bounded Metadata Proofs. Post-Quantum Algorithms. Intent Native.
 
-*The first execution network where every block ships with a mathematical proof of its own correctness — built post-quantum from genesis, no migration required.*
+*An experimental distributed execution protocol with transparent STARK proofs for bounded block-metadata constraints.*
 
 **[Website](https://www.bleepecosystem.com) · [Whitepaper](WHITEPAPER.md) · [Roadmap](ROADMAP.md) · [Discord](https://discord.gg/bleepecosystem) · [Telegram](https://t.me/bleepecosystem) · [Build Guide](BUILDING.md)**
 
@@ -14,11 +14,10 @@
 
 ## What is BLEEP?
 
-BLEEP is a distributed execution protocol built on three invariants: every block ships with a cryptographic proof of its own correctness, every instruction is expressed as intent rather than bytecode, and the entire cryptographic foundation survives a quantum computer — by construction, from genesis.
-Every block produced by BLEEP includes a Winterfell STARK proof of its own validity — generated before broadcast, verified independently by every validator, requiring no trusted setup and no privileged operator. Transaction signing, block and finality-certificate signing, peer authentication, key encapsulation, and zero-knowledge proof verification are each secured exclusively by NIST-finalised post-quantum standards — FIPS 205 (SPHINCS+) and FIPS 203 (Kyber-1024/ML-KEM-1024) — at Security Level 5.
+BLEEP is an experimental distributed execution protocol with an intent-oriented runtime and post-quantum algorithm implementations.
+Its extended Winterfell STARK proves bounded metadata relationships, including epoch arithmetic, transaction/signature count equality and limits, and batch sequence equality. It does **not** prove transaction signatures, derive the Merkle or signature-commitment roots, or prove state-transition execution. Those checks are performed separately by conventional block validation and execution code. The proof is transparent and requires no trusted setup.
 
-
-BLEEP is post-quantum from genesis. There is no classical fallback. There is no migration path needed — because the problem was solved before the protocol accumulated economic value and ecosystem dependencies.
+The code uses the `pqcrypto` SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs. These are legacy/round-3 algorithm APIs, not a claim that the implementation is validated or conformant to FIPS 205 (SLH-DSA) or FIPS 203 (ML-KEM). See the [cryptographic model](#cryptographic-model) for details.
 
 
 | The harvest-now, decrypt-later threat is real and accumulating. Every signed transaction on a classically secured blockchain is a permanent public record. An adversary can archive those records today and apply quantum decryption retroactively when capable hardware arrives. BLEEP's historical record carries no such liability — by design.|
@@ -27,10 +26,10 @@ BLEEP is post-quantum from genesis. There is no classical fallback. There is no 
 
 | Property | What it means | How it's implemented |
 |---|---|---|
-| **Proven Execution** | Every block ships with a cryptographic proof of correctness | Winterfell STARK `BlockValidityProof` — generated pre-broadcast, verified pre-vote |
+| **Bounded Metadata Proofs** | Selected block metadata relationships are proven | Winterfell extended STARK — epoch arithmetic, transaction/signature counts and bounds, and batch sequence |
 | **Intent Native** | Users and agents express outcomes, not instructions | PAT engine + 7-tier VM router — intent resolved to optimal execution path automatically |
-| **Quantum Foundation** | No classical public-key primitive on any sensitive path | SPHINCS+ (FIPS 205) + Kyber-1024 (FIPS 203) at Security Level 5 — from block zero |
-| **Constitutional Integrity** | Supply cap, inflation ceiling, finality threshold cannot be changed by anyone | Rust `const_assert!` — violations do not compile |
+| **Post-Quantum Algorithms** | Post-quantum signature and KEM algorithms are used on configured sensitive paths | SPHINCS+-SHAKE-256f-simple and legacy Kyber-1024 APIs; FIPS conformance is not claimed |
+| **Supply Limit** | Maximum supply is 200,000,000 BLEEP | `MAX_SUPPLY` in `bleep-economics`; runtime invariant checks |
 
 ---
 
@@ -38,22 +37,22 @@ BLEEP is post-quantum from genesis. There is no classical fallback. There is no 
 
 | Property | Non-PQ chains | Naoris Protocol | BLEEP |
 |---|---|---|---|
-| Transaction signing | ECDSA — broken by Shor's | Dilithium-5 overlay | SPHINCS+-SHAKE-256f (FIPS 205, SL5) — native |
-| Key encapsulation | ECDH / x25519 — broken by Shor's | Additive layer | Kyber-1024 / ML-KEM-1024 (FIPS 203, SL5) — native |
+| Transaction signing | ECDSA — broken by Shor's | Dilithium-5 overlay | SPHINCS+-SHAKE-256f-simple legacy/round-3 API; FIPS 205 conformance not claimed |
+| Key encapsulation | ECDH / x25519 — broken by Shor's | Additive layer | Kyber-1024 legacy API; not FIPS 203 ML-KEM |
 | ZK proof system | Groth16 / PLONK — trusted setup | Not applicable | Winterfell STARK — transparent, no ceremony |
-| Block validity | Assumed | Not proven | **Proven — STARK proof per block** |
+| Block validity | Conventional validation | Not proven | Conventional validation; the STARK proves selected metadata constraints, not execution validity |
 | Intent execution | Not supported | Not supported | **Native — PAT engine + 7-tier VM** |
-| Quantum migration | Required (coordination risk) | Overlay — doesn't fix base chain | **Not needed — PQ from genesis** |
-| Supply cap enforcement | Governance-changeable | Governance-changeable | **Compile-time `const_assert`** |
+| Quantum migration | Required (coordination risk) | Overlay — doesn't fix base chain | PQ algorithms used from genesis; migration to standardized/conformant implementations is not established |
+| Supply cap enforcement | Governance-changeable | Governance-changeable | **200,000,000 BLEEP; guarded by runtime issuance and supply-invariant checks** |
 | Trusted operators | Bridge multisigs | Centralised nodes | **None — 4-tier trustless bridge** |
 
 ---
 
 ## Why Not Migrate Later?
 
-A protocol that launches with classical cryptography and plans a post-quantum migration inherits a coordination problem that history shows cannot be cleanly solved. Validators, wallets, bridges, indexers, and all tooling must upgrade simultaneously. HTTPS migration took over a decade and is still incomplete.
+A protocol that launches with classical cryptography and plans a post-quantum migration inherits a coordination problem: validators, wallets, bridges, indexers, and tooling must upgrade together.
 
-**BLEEP eliminates this problem by not having it.** Post-quantum from genesis means no migration coordination, no ecosystem split, no retroactive cryptographic liability.
+BLEEP uses post-quantum algorithm APIs from genesis, avoiding a classical-key migration today. The current Kyber and SPHINCS+ APIs are legacy/round-3 variants; FIPS 203/205 conformance is not established, so standardization and production-readiness work may still require migration.
 
 ---
 
@@ -78,14 +77,25 @@ source "$HOME/.cargo/env"
 ```bash
 git clone https://github.com/BleepEcosystem/BLEEP-v1.git
 cd BLEEP-v1
+
+# Generate a high-entropy JWT signing secret (32 random bytes, Base64-encoded).
+# Keep this secret private and reuse it when restarting this node.
+export BLEEP_JWT_SECRET="$(openssl rand -base64 32)"
+
 cargo run --release
 ```
+
+The node will refuse to start unless `BLEEP_JWT_SECRET` is set to valid standard
+Base64 that decodes to at least 32 bytes of high-entropy material. Configure the
+same secret on every node that needs to accept the same JWTs. Store it in your
+deployment's secret manager in production; do not commit it to the repository
+or share it publicly.
 
 **16-step startup sequence (Protocol Version 5):**
 
 ```
-[1/16]  ✅ SPHINCS+-SHAKE-256f-simple keypair (PK=64 bytes, SK=128 bytes — FIPS 205 SL5)
-[1/16]  ✅ Kyber-1024 keypair (PK=1,568 bytes — FIPS 203 SL5)
+[1/16]  ✅ SPHINCS+-SHAKE-256f-simple keypair (PK=64 bytes, SK=128 bytes)
+[1/16]  ✅ Kyber-1024 legacy API keypair (PK=1,568 bytes)
 [2/16]  ✅ Genesis block #0 — blockchain, mempool, tx-pool ready
 [3/16]  ✅ Wallet services online
 [4/16]  ✅ PAT engine running (6-layer intent-driven architecture)
@@ -126,6 +136,24 @@ bash ./demo_interchain.sh
 ```bash
 bash ./test_tps.sh
 ```
+
+For a multi-node run, point `BLEEP_TPS_PEERS` at every additional node RPC.
+The harness records peer counts, active validators, and each node's processed
+transaction delta. To require the full workload to be processed on every
+monitored node:
+
+```bash
+BLEEP_RPC=http://127.0.0.1:18540 \
+BLEEP_TPS_PEERS=http://127.0.0.1:18541,http://127.0.0.1:18542 \
+BLEEP_TPS_MIN_PEERS=2 \
+BLEEP_TPS_REQUIRE_ALL_PEERS=1 \
+BLEEP_TPS_COUNT=10000 \
+bash ./test_tps.sh
+```
+
+The benchmark obtains a temporary session through the RPC authentication
+registration endpoint. The CLI itself requires a server-issued
+`BLEEP_JWT_TOKEN`; never pass a node's `BLEEP_JWT_SECRET` to clients.
 
 ---
 
@@ -209,7 +237,7 @@ graph TB
 crates/
 ├── bleep-core            # Block types, ZKTransaction, mempool, shared data structures
 ├── bleep-crypto          # SPHINCS+, Kyber-1024, AES-256-GCM, SHA3-256, BLAKE3
-├── bleep-zkp             # Winterfell STARK block validity circuit — BlockValidityProver/Verifier
+├── bleep-zkp             # Winterfell STARK metadata AIR; legacy block-validity API disabled
 ├── bleep-consensus       # PoS-BFT (primary), PBFT, PoW fallback; slashing; epoch management
 ├── bleep-state           # Sparse Merkle Trie (256-level), RocksDB, cross-shard 2PC, self-healing
 ├── bleep-vm              # 7-tier intent-driven VM: Native/Router/EVM/WASM/STARK/AI/Cross-Chain
@@ -262,12 +290,12 @@ All cryptography on sensitive paths is post-quantum. No classical fallback exist
 graph LR
     subgraph PQ["Post-Quantum Secure ✅"]
         direction TB
-        TX_SIGN["Transaction Signing\nSPHINCS+-SHAKE-256f\nFIPS 205 · SL5"]
-        BLK_SIGN["Block Signing\nSPHINCS+-SHAKE-256f\nFIPS 205 · SL5"]
-        P2P_AUTH["P2P Authentication\nSPHINCS+-SHAKE-256f\nFIPS 205 · SL5"]
-        KEM["Key Encapsulation\nKyber-1024 / ML-KEM-1024\nFIPS 203 · SL5"]
+        TX_SIGN["Transaction Signing\nSPHINCS+-SHAKE-256f-simple\nlegacy API"]
+        BLK_SIGN["Block Signing\nSPHINCS+-SHAKE-256f-simple\nlegacy API"]
+        P2P_AUTH["P2P Authentication\nSPHINCS+-SHAKE-256f-simple\nlegacy API"]
+        KEM["Key Encapsulation\nKyber-1024\nlegacy API; not ML-KEM"]
         ONION["Onion Routing\nKyber-1024 per-hop\n+ AES-256-GCM"]
-        ZKP_BLOCK["Block Validity Proofs\nWinterfell STARK\nHash-based · No ECC"]
+        ZKP_BLOCK["Bounded Metadata Proof\nWinterfell STARK\nHash-based · No trusted setup"]
         ZKP_BRIDGE["Cross-Chain Bridge Proofs\nSPHINCS+-bound STARK\ntranscripts"]
         AUDIT["Audit Log\nSHA3-256 Merkle chain\nsync=true · RocksDB"]
         SMT["Identity Proofs\nSHA3-256 Sparse Merkle Trie\n256-level · fixed-size paths"]
@@ -287,32 +315,30 @@ graph LR
     style CLASSICAL fill:#2f0a0a,color:#f87171,stroke:#ef4444
 ```
 
-### Signature Scheme — SPHINCS+-SHAKE-256f-simple (FIPS 205 / SLH-DSA)
+### Signature Scheme — SPHINCS+-SHAKE-256f-simple
 
 | Parameter | Value |
 |---|---|
-| NIST Standard | FIPS 205 (SLH-DSA) |
-| Security Level | 5 — ≥256-bit post-quantum security |
-| Security Assumption | One-wayness of SHAKE-256 (hash-based) |
+| Standard status | Legacy/round-3 SPHINCS+ API; FIPS 205 conformance is not claimed |
+| Parameter set | SHAKE-256f-simple |
 | Public Key | **64 bytes** |
 | Secret Key | **128 bytes** (`Zeroizing<Vec<u8>>` — zeroed on drop) |
-| Signature | **49,088 bytes** |
+| Signature | **49,856 bytes** |
 | Crate | `pqcrypto-sphincsplus` v0.7.2 |
 | Usage | Transaction signing, block signing, P2P message authentication |
 
-> **Bandwidth:** SPHINCS+ signatures are 49,088 bytes each. Raw per-block signature data at 512 tx/block is ~24.3 MB. The **Signature Availability Layer** (live in Protocol Version 5) reduces block-gossip bandwidth to **~320 KB per block (~98.7% reduction)** by replacing per-transaction signature propagation with a Blake3 Merkle commitment (`sig_commitment_root`) bound into the SPHINCS+ block signature and the 68-column extended STARK proof. Individual signatures are available on demand from the SAL gossip store.
+> **Bandwidth:** These SPHINCS+ signatures are 49,856 bytes each. At 512 transactions, raw signatures total about 24.3 MiB. The Signature Availability Layer commits to signature hashes; the extended STARK proves bounded metadata constraints, not signature validity or commitment-root derivation.
 
-### Key Encapsulation — Kyber-1024 / ML-KEM-1024 (FIPS 203)
+### Key Encapsulation — Kyber-1024
 
 | Parameter | Value |
 |---|---|
-| NIST Standard | FIPS 203 (ML-KEM) |
-| Security Level | 5 — ≥256-bit post-quantum security |
-| Security Assumption | Hardness of Module-LWE (lattice-based) |
+| Standard status | Legacy Kyber API; FIPS 203 ML-KEM conformance is not claimed |
+| Parameter set | Kyber-1024 |
 | Public Key | 1,568 bytes |
 | Secret Key | 3,168 bytes (`Zeroizing<Vec<u8>>` — zeroed on drop) |
 | Ciphertext | 1,568 bytes + 32-byte shared secret |
-| Crate | `pqcrypto-kyber` v0.8.1 |
+| Crate | `pqcrypto-kyber` |
 | Usage | Validator binding, peer KEM, wallet key management, onion routing |
 
 ### Zero-Knowledge Proofs — Winterfell STARK (FRI-based)
@@ -321,14 +347,13 @@ graph LR
 |---|---|
 | Construction | FRI-based STARK over 128-bit prime field |
 | Trusted Setup | **None** — fully transparent |
-| Post-Quantum Secure | Yes — reduces to collision resistance of BLAKE3 / SHA3-256 |
+| Proof assumptions | Hash-based Winterfell STARK; no trusted setup |
 | Trace Width | 48 columns |
-| Public Inputs | `block_index`, `epoch_id`, `tx_count`, `merkle_root_hash`, `validator_pk_hash` |
-| Proof Generation | ~850 ms on reference hardware (8-core, 32 GB RAM) |
-| Proof Verification | ~12 ms |
-| Slot Budget | 3,000 ms — proof generation fits within one slot |
+| Constraints | Epoch arithmetic, transaction/signature counts and bounds, batch sequence |
+| Execution validity | Not proved; transaction and state checks run separately |
+| Reported timing | ~850 ms generation / ~12 ms verification for the metadata proof; reference hardware |
 | Crate | `winterfell` v0.13.1 |
-| Usage | Block validity proofs, cross-chain bridge verification (Tier 3) |
+| Usage | Bounded block-metadata constraints; separate validation handles transaction and state-transition checks |
 
 ---
 
@@ -387,7 +412,7 @@ sequenceDiagram
     BP->>MEM: select up to 4,096 txs (fee-descending)
     BP->>ST: compute SMT root
     BP->>ZK: BlockValidityProver.prove()<br/>(~850ms on ref hardware)
-    ZK-->>BP: BlockValidityProof (48-col trace)
+    ZK-->>BP: Extended metadata STARK proof (48-col trace)
     BP->>BP: SPHINCS+ sign completed block
     BP->>VAL: broadcast (block + STARK proof + SPHINCS+ sig)
     VAL->>ZK: BlockValidityVerifier.verify() — ~12ms
@@ -419,8 +444,8 @@ flowchart LR
         direction TB
         SEL["Proposer Selection\nStake-proportional VRF"]
         BP["BlockProducer\nSelect ≤4,096 txs\nCompute SMT root"]
-        STARK["STARK Prover\n~850ms · 48-col trace\n5 public inputs"]
-        SIGN["SPHINCS+ Block Sign\n49,088-byte signature"]
+        STARK["STARK Prover\nbounded metadata AIR\n48-col trace"]
+        SIGN["SPHINCS+ Block Sign\n49,856-byte signature"]
         BCAST["P2P Broadcast\nGossip fanout=8"]
     end
 
@@ -579,15 +604,15 @@ flowchart TB
 
 ## Economics and Tokenomics
 
-### Constitutional Parameters
+### Tokenomics Parameters
 
-These four parameters are enforced by Rust `const_assert!`. A code change that violates them **does not compile**. They cannot be altered by governance vote, software upgrade, or validator supermajority.
+The implementation sets a 200,000,000 BLEEP maximum supply and checks minting and supply invariants at runtime. These checks do not make the parameter immutable to a software change.
 
 | Parameter | Value | Source |
 |---|---|---|
-| Maximum supply | **200,000,000 BLEEP** | `MAX_SUPPLY` in `tokenomics.rs` |
-| Maximum per-epoch inflation | **500 bps (5%)** | `MAX_INFLATION_RATE_BPS` |
-| Fee burn floor | **2,500 bps (25%)** | `FEE_BURN_BPS` in `distribution.rs` |
+| Maximum supply | **200,000,000 BLEEP** | `MAX_SUPPLY`; minting and supply invariant checks |
+| Maximum per-epoch inflation | **500 bps (5%)** | `MAX_INFLATION_RATE_BPS`; runtime emission check |
+| Fee burn allocation | **2,500 bps (25%)** | `FEE_BURN_BPS`; fee-split invariant |
 | Minimum finality threshold | **>6,667 bps** | `FinalityManager` |
 
 ### Token Distribution
@@ -669,7 +694,7 @@ Votes are cast as `EncryptedBallot` structs. `EligibilityProof` establishes voti
 
 ### Constitutional Constraints
 
-Four parameters are constitutionally immutable, enforced by Rust `const_assert!`. A code change that violates them does not compile. They cannot be altered by any governance vote, software upgrade, or validator supermajority.
+The current build enforces configured tokenomics and finality limits through runtime checks and compile-time invariants where applicable. These implementation rules can be changed by a future software update; they are not an immutable protocol constitution.
 
 ### Forkless Upgrades
 
@@ -708,7 +733,7 @@ Full report: [`docs/SECURITY_AUDIT_SPRINT9.md`](docs/SECURITY_AUDIT_SPRINT9.md) 
 | `TxReplay` | ✅ Pass | Rejected by nonce check |
 | `InvalidBlockFlood(1000)` | ✅ Pass | Rejected at SPHINCS+ gate; peer rate-limited |
 | `STARKProofTamper` | ✅ Pass | Tampered proof rejected at `BlockValidityVerifier` |
-| `LoadStress(10,000 TPS, 60s)` | ✅ Pass | Max throughput; STARK proofs within slot budget |
+| `LoadStress(10,000 TPS, 60s)` | ✅ Model check | Arithmetic block-capacity scenario; not an executed load test or measured TPS |
 
 ### Game-Theoretic Safety
 
@@ -725,7 +750,13 @@ Full report: [`docs/SECURITY_AUDIT_SPRINT9.md`](docs/SECURITY_AUDIT_SPRINT9.md) 
 
 ## Scalability
 
-### Projected Performance — Simulated, Pre-Testnet
+### Throughput — Projection and Local-Node Measurements
+
+The figures below are simulation projections, not measured network throughput. A separate
+[local-node benchmark](benchmark.md) measured 6.43 TPS for sequential CLI submissions and
+26.33 TPS with 32 concurrent CLI workers on a single node with no peers. Those end-to-end
+measurements include process startup, wallet loading, signing, and RPC overhead; they do not
+establish protocol capacity or multi-validator throughput.
 
 | Metric | Value |
 |---|---|
@@ -737,7 +768,7 @@ Full report: [`docs/SECURITY_AUDIT_SPRINT9.md`](docs/SECURITY_AUDIT_SPRINT9.md) 
 | STARK proof generation (avg) | ~850 ms per block |
 | STARK proof verification (avg) | ~12 ms per block |
 
-> **Note:** These are projections from simulated workloads — 7 validators, controlled network latency, geographically concentrated nodes, uniform transaction mix. Actual throughput on a geographically distributed public testnet will be measured and published during Phase 6. STARK timings on reference 8-core, 32 GB RAM hardware.
+> **Projection caveat:** These are simulated-workload projections (7 validators, controlled network latency, geographically concentrated nodes, uniform transaction mix), not achieved TPS. Public-testnet throughput, multi-validator propagation, and finality measurements remain outstanding. STARK timing figures refer to the bounded metadata proof, not an execution-validity proof.
 
 ### Sharding
 
@@ -845,9 +876,9 @@ DevNet UI
 
 | Parameter | Value | Source |
 |---|---|---|
-| SPHINCS+ signature size | **49,088 bytes** | `pqcrypto-sphincsplus` v0.7.2 |
-| SPHINCS+ public key | **64 bytes** | `pqcrypto-sphincsplus` v0.7.2 |
-| SPHINCS+ secret key | **128 bytes** | `pqcrypto-sphincsplus` v0.7.2 |
+| SPHINCS+ signature size | **49,856 bytes** | `pqcrypto-sphincsplus` |
+| SPHINCS+ public key | **64 bytes** | `pqcrypto-sphincsplus` |
+| SPHINCS+ secret key | **128 bytes** | `pqcrypto-sphincsplus` |
 | Kyber-1024 public key | 1,568 bytes | `pqcrypto-kyber` |
 | Kyber-1024 secret key | 3,168 bytes | `pqcrypto-kyber` |
 | State trie depth | 256 levels | `TRIE_DEPTH` |

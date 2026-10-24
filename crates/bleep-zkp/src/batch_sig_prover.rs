@@ -65,13 +65,13 @@ use winterfell::{
 
 use crate::extended_air::{
     range_values, ExtendedBlockPublicInputs, ExtendedBlockValidityAir, COL_BATCH_SEQ_ID,
-    COL_BLOCK_HASH_HI, COL_BLOCK_HASH_LO, COL_BLOCK_INDEX,
-    COL_BLOCKS_PER_EPOCH, COL_BLOCKS_PER_EPOCH_INVERSE, COL_EPOCH_ID, COL_EPOCH_REMAINDER,
-    COL_EPOCH_REMAINDER_GAP, COL_MERKLE_ROOT_HI, COL_MERKLE_ROOT_LO, COL_RANGE_BITS_END,
-    COL_RANGE_BITS_START, COL_RANGE_VALUE, COL_RESERVED_END, COL_RESERVED_START, COL_SIG_COUNT,
-    COL_SIG_ROOT_HI, COL_SIG_ROOT_LO, COL_SK_SEED_HASH_HI, COL_SK_SEED_HASH_LO, COL_SMT_ROOT_HI,
-    COL_SMT_ROOT_LO, COL_TX_COUNT, COL_TX_COUNT_GAP, COL_VALIDATOR_PK_HI, COL_VALIDATOR_PK_LO,
-    MIN_TRACE_LENGTH, NUM_RANGE_LIMBS, TRACE_WIDTH,
+    COL_BLOCKS_PER_EPOCH, COL_BLOCKS_PER_EPOCH_INVERSE, COL_BLOCK_HASH_HI, COL_BLOCK_HASH_LO,
+    COL_BLOCK_INDEX, COL_EPOCH_ID, COL_EPOCH_REMAINDER, COL_EPOCH_REMAINDER_GAP,
+    COL_MERKLE_ROOT_HI, COL_MERKLE_ROOT_LO, COL_RANGE_BITS_END, COL_RANGE_BITS_START,
+    COL_RANGE_VALUE, COL_RESERVED_END, COL_RESERVED_START, COL_SIG_COUNT, COL_SIG_ROOT_HI,
+    COL_SIG_ROOT_LO, COL_SK_SEED_HASH_HI, COL_SK_SEED_HASH_LO, COL_SMT_ROOT_HI, COL_SMT_ROOT_LO,
+    COL_TX_COUNT, COL_TX_COUNT_GAP, COL_VALIDATOR_PK_HI, COL_VALIDATOR_PK_LO, MIN_TRACE_LENGTH,
+    NUM_RANGE_LIMBS, TRACE_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +259,8 @@ impl ParallelBatchSigProver {
         debug_assert_eq!(range_values.len(), NUM_RANGE_LIMBS);
         let inverse = BaseElement::new(pub_inputs.blocks_per_epoch as u128).inv();
 
-        let trace_len = next_power_of_two(pub_inputs.tx_count.max(1).max(MIN_TRACE_LENGTH as u32) as usize);
+        let trace_len =
+            next_power_of_two(pub_inputs.tx_count.max(1).max(MIN_TRACE_LENGTH as u32) as usize);
         let mut trace = TraceTable::<BaseElement>::new(TRACE_WIDTH, trace_len);
 
         trace.fill(
@@ -302,8 +303,7 @@ impl ParallelBatchSigProver {
         state[COL_RANGE_VALUE] = value;
         let raw = value.as_int();
         for bit in 0..16 {
-            state[COL_RANGE_BITS_START + bit] =
-                BaseElement::from(((raw >> bit) & 1) as u64);
+            state[COL_RANGE_BITS_START + bit] = BaseElement::from(((raw >> bit) & 1) as u64);
         }
         debug_assert_eq!(COL_RANGE_BITS_START + 15, COL_RANGE_BITS_END);
     }

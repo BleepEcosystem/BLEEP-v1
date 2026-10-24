@@ -127,7 +127,7 @@ BLEEP uses Cargo feature flags to control build configuration.
 
 | Flag | Default | Description |
 |---|---|---|
-| `quantum` | ✅ enabled | SPHINCS+-SHAKE-256f-simple + Kyber-1024 post-quantum crypto (FIPS 203, FIPS 205) |
+| `quantum` | ✅ enabled | SPHINCS+-SHAKE-256f-simple + legacy Kyber-1024 APIs; FIPS 203/205 conformance is not claimed |
 | `mainnet` | ✅ enabled | Mainnet genesis parameters and constitutional constants |
 | `pretestnet` | disabled | Pre-testnet genesis parameters — reduced epoch length, test faucet active |
 | `ml` | disabled | Phase 4 AI inference via `DeterministicInferenceEngine` (requires trained ONNX models) |

@@ -18,8 +18,8 @@
 
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
-use sha3::{Digest, Sha3_256};
 use sha2::Sha256;
+use sha3::{Digest, Sha3_256};
 
 const TX_DOMAIN: &[u8] = b"BLEEP:TRANSACTION:V1\0";
 const ACCOUNT_DOMAIN: &[u8] = b"BLEEP:ACCOUNT:ADDRESS:V1\0";
@@ -159,8 +159,14 @@ mod tests {
     #[test]
     fn test_tx_payload_binds_chain_and_nonce() {
         let baseline = tx_payload("BLEEP-PreTestnet", "alice", "bob", 1000, 99999, 0);
-        assert_ne!(baseline, tx_payload("BLEEP-Mainnet", "alice", "bob", 1000, 99999, 0));
-        assert_ne!(baseline, tx_payload("BLEEP-PreTestnet", "alice", "bob", 1000, 99999, 1));
+        assert_ne!(
+            baseline,
+            tx_payload("BLEEP-Mainnet", "alice", "bob", 1000, 99999, 0)
+        );
+        assert_ne!(
+            baseline,
+            tx_payload("BLEEP-PreTestnet", "alice", "bob", 1000, 99999, 1)
+        );
     }
 
     #[test]

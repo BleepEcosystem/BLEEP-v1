@@ -48,10 +48,12 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
             continue;
         }
         pending_txs.push(Transaction {
+            chain_id: tx.chain_id,
             sender: tx.sender,
             receiver: tx.receiver,
             amount: tx.amount,
             timestamp: tx.timestamp,
+            nonce: tx.nonce,
             signature: tx.signature,
         });
     }

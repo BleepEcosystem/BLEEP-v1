@@ -2,7 +2,7 @@
 
 **Zero-Knowledge Proof Primitives for BLEEP**
 
-`bleep-zkp` provides STARK-based block validity proofs and post-quantum ZKP constructions used throughout the BLEEP ecosystem for governance voting, cross-chain verification, and validator attestation.
+`bleep-zkp` provides Winterfell STARK machinery. The active extended block AIR proves bounded metadata relationships; it does not prove transaction signatures, Merkle-root derivation, or state-transition execution. Conventional validation must continue to check those properties.
 
 ---
 
@@ -17,9 +17,9 @@ Copyright © 2025 Muhammad Attahir.
 
 ```
 bleep-zkp
-├── stark_proofs      — Base block validity AIR + STARK prover/verifier (Winterfell, 5-column)
-├── extended_air      — 68-column ExtendedBlockValidityAir with sig_commitment_root (Sprint 10)
-├── batch_sig_prover  — ParallelBatchSigProver: rayon-parallel SAL commitment + STARK prove/verify
+├── stark_proofs      — Disabled legacy block-validity prover/verifier (underconstrained AIR)
+├── extended_air      — 48-column AIR for bounded metadata constraints
+├── batch_sig_prover  — ParallelBatchSigProver for metadata proof generation and verification
 └── pq_proofs         — Post-quantum ZKP constructions (governance votes, cross-chain relay)
 ```
 
@@ -27,56 +27,20 @@ bleep-zkp
 
 ## Modules
 
-### `stark_proofs` — Block Validity Circuit
+### `stark_proofs` — Disabled Legacy Block Circuit
 
-Proves, in zero knowledge and without a trusted setup, that a BLEEP block is valid:
+The legacy `STARK_V1` block-validity API is disabled: its AIR does not constrain block validity, and its prover/verifier reject proofs. It must not be used as evidence of block correctness.
 
-**Circuit inputs:**
+### `extended_air` — Bounded Metadata AIR
 
-| Slot | Public Input | Description |
-|------|-------------|-------------|
-| `x[0]` | `block_index` | Block number as `BaseElement` |
-| `x[1]` | `epoch_id` | Epoch identifier |
-| `x[2]` | `tx_count` | Number of transactions |
-| `x[3]` | `merkle_root_hash` | SHA3-256 of the Merkle root (lower 31 bytes) |
-| `x[4]` | `validator_pk_hash` | SHA3-256 of the validator public key |
+The active 48-column `ExtendedBlockValidityAir` constrains:
 
-**Private witnesses (known only to the prover):**
-- `block_hash_witness` — the 32-byte block hash
-- `sk_seed_witness` — the 32-byte validator secret key seed
+- Epoch arithmetic (`epoch_id == block_index / blocks_per_epoch`)
+- Equality of transaction count and signature count
+- The configured transaction-count bound (4,096)
+- Batch sequence equality (`batch_seq_id == block_index`)
 
-**What the circuit proves:**
-1. The block hash is the SHA3-256 of its public fields.
-2. The validator knows the secret key whose hash equals the embedded public key hash.
-3. The `epoch_id` is consistent with `block_index` and `blocks_per_epoch`.
-4. The Merkle root commitment is non-zero (block has been committed).
-
-**Key types:** `StarkProof`, `BlockValidityAir`, `BlockValidityProver`, `BlockValidityVerifier`.
-
-```rust
-use bleep_zkp::{BlockValidityProver, BlockValidityVerifier, StarkProof};
-
-let prover = BlockValidityProver::new(block_witness);
-let proof: StarkProof = prover.prove()?;
-
-let verifier = BlockValidityVerifier::new(public_inputs);
-verifier.verify(&proof)?;
-```
-
-STARKs require **no trusted setup**. Proofs are transparent and post-quantum secure (hash-based, not ECC-based).
-
-### `extended_air` — Extended Block Validity Circuit (Sprint 10)
-
-A 68-column extension of `BlockValidityAir` that commits to the Signature Availability Layer root alongside all standard block fields.
-
-**Additional columns (48–67):**
-
-| Columns | Purpose |
-|---------|---------|
-| 48–49 | `sig_commitment_root` (Blake3 Merkle root over SHA3-256(sig_i)) |
-| 50–51 | `batch_seq_id` (monotonic, equals `block.index`) |
-| 52–53 | `smt_root` (SHA3-256 of `shard_state_root`) |
-| 54–67 | Signature count tracking and active-batch state |
+Block hashes, Merkle roots, signature-commitment roots, and state roots are public inputs, not values whose derivation is proved by this AIR. It does not verify signatures or execute transactions.
 
 **Public inputs (`ExtendedBlockPublicInputs`):**
 
@@ -107,20 +71,20 @@ pub struct ExtendedBlockPublicInputs {
 
 `Block::verify_zkp()` dispatches on the `EXTSTARK1` prefix automatically.
 
-### `batch_sig_prover` — Parallel Batch Signature Prover
+### `batch_sig_prover` — Metadata Proof Prover
 
-`ParallelBatchSigProver` orchestrates the full SAL prove/verify pipeline:
+`ParallelBatchSigProver` generates and verifies proofs for the bounded metadata AIR:
 
 ```rust
 use bleep_zkp::{ParallelBatchSigProver, bleep_proof_options};
 
 let prover = ParallelBatchSigProver::new(blocks_per_epoch, bleep_proof_options());
 let trace  = prover.build_trace(&pub_inputs, &sig_hashes);
-let proof  = prover.prove(trace)?;  // ~850–950 ms, within 3,000 ms slot budget
+let proof  = prover.prove(trace)?;
 ParallelBatchSigProver::verify_block(pub_inputs, proof, &options)?;
 ```
 
-Hashing is rayon-parallelised: SHA3-256(sig_i) for all transactions runs concurrently, then the Blake3 Merkle tree is built from the resulting hashes. The commitment is deterministic — given identical transaction signatures, all honest validators produce identical `sig_commitment_root` values.
+Signature commitment hashing is performed outside the AIR. The AIR does not prove the hashes or the derivation of `sig_commitment_root`; those checks must be performed separately.
 
 ### `pq_proofs` — Post-Quantum ZKP Constructions
 
@@ -133,16 +97,14 @@ Additional ZKP constructions designed for quantum-adversarial environments, used
 
 ## Properties
 
-| Property | Base circuit | Extended circuit (Sprint 10) |
-|----------|-------------|------------------------------|
-| Trusted setup | ❌ None | ❌ None |
-| Post-quantum secure | ✅ | ✅ |
-| Trace width | 5 columns | 68 columns |
-| Proof size | ~100 KB | ~100 KB + 232-byte pub_inputs header |
-| Proof format | `STARK_V1` prefix | `EXTSTARK1` prefix |
-| SAL root committed | ✗ | ✅ `sig_commitment_root` in circuit |
-| Prover time | ~850 ms | ~850–950 ms (rayon-parallel hashing) |
-| Verifier time | ~12 ms | ~12 ms |
+| Property | Legacy `STARK_V1` | Extended metadata proof |
+|----------|--------------------|-------------------------|
+| Status | Disabled; underconstrained AIR | Active bounded metadata AIR |
+| Trusted setup | None | None |
+| Trace width | Legacy | 48 columns |
+| Proof format | `STARK_V1` (rejected) | `EXTSTARK1` prefix |
+| Execution validity proved | No | No |
+| Metadata constraints proved | No | Epoch arithmetic, counts/bounds, batch sequence |
 
 ---
 
@@ -152,7 +114,7 @@ Additional ZKP constructions designed for quantum-adversarial environments, used
 
 | Consumer | Purpose |
 |----------|---------|
-| `bleep-consensus` | Block validity attestation (base + extended circuits) |
+| `bleep-consensus` | Extended bounded-metadata proof pipeline |
 | `bleep-core` | `Block::verify_extended_stark_zkp()` — called from `verify_zkp()` on `EXTSTARK1` prefix |
 | `bleep-governance` | Anonymous ZK vote verification |
 | `bleep-interop` | Cross-chain STARK proof relay (Layer 3) |
