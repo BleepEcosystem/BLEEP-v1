@@ -2,68 +2,37 @@
 //!
 //! ## Hash strategy
 //!
-//! | Layer        | Function  | Rationale                                              |
-//! |--------------|-----------|--------------------------------------------------------|
-//! | Leaf hashing | SHA3-256  | External-facing; BLEEP's canonical PQ-safe hash        |
-//! | Tree nodes   | Blake3    | STARK-friendly; used by Winterfell internally          |
+//! | Layer        | Function                                                   |
+//! |--------------|------------------------------------------------------------|
+//! | Leaf hashing | Domain-separated SHA3-256                                  |
+//! | Tree nodes   | Position-bound, domain-separated Blake3                    |
+//! | Root         | Domain-separated Blake3 with the shared format version byte |
 //!
 //! The root produced here is the `sig_commitment_root` bound into the extended
 //! `BlockValidityAir` as a public input. Validators reconstruct it from the
 //! gossiped `sig_hashes` vector and reject any block whose header root differs.
 
-use blake3::Hasher as Blake3Hasher;
+use bleep_crypto::{
+    merkle_empty_leaf, merkle_hash_leaf, merkle_hash_node, verify_merkle_path, version_merkle_root,
+};
 use rayon::prelude::*;
-use sha3::{Digest, Sha3_256};
 
 use crate::types::{SigCommitmentRoot, SigHash};
 
-// Domain separators prevent second-preimage attacks across layers.
-const DOMAIN_LEAF: &[u8] = b"bleep_sal_leaf_v1";
-const DOMAIN_NODE: &[u8] = b"bleep_sal_node_v1";
-const DOMAIN_EMPTY: &[u8] = b"bleep_sal_empty_v1";
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Leaf hashing — SHA3-256
+// Leaf hashing — shared BLEEP Merkle format
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Compute `SHA3-256(DOMAIN_LEAF || sig_bytes)` — the canonical per-transaction
-/// commitment that travels over the gossip mesh in place of the full 49,088-byte
-/// SPHINCS+ signature.
+/// Hash a transaction signature with the canonical domain-separated leaf hash.
 #[inline]
 pub fn hash_sig(sig_bytes: &[u8]) -> SigHash {
-    let mut h = Sha3_256::new();
-    h.update(DOMAIN_LEAF);
-    h.update(sig_bytes);
-    h.finalize().into()
+    merkle_hash_leaf(sig_bytes)
 }
 
 /// Parallel variant — hashes all signatures in `sigs` using Rayon.
 /// Allocation cost: one `Vec<SigHash>` with `sigs.len()` elements.
 pub fn hash_sigs_parallel(sigs: &[Vec<u8>]) -> Vec<SigHash> {
     sigs.par_iter().map(|s| hash_sig(s.as_slice())).collect()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal node hashing — Blake3
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `Blake3(DOMAIN_NODE || left || right)` for internal tree nodes.
-#[inline]
-fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut h = Blake3Hasher::new();
-    h.update(DOMAIN_NODE);
-    h.update(left);
-    h.update(right);
-    *h.finalize().as_bytes()
-}
-
-/// Canonical padding leaf — all-zero input hashed with domain separator so the
-/// padded tree is distinguishable from one with a genuine empty-signature leaf.
-#[inline]
-fn empty_leaf() -> [u8; 32] {
-    let mut h = Blake3Hasher::new();
-    h.update(DOMAIN_EMPTY);
-    *h.finalize().as_bytes()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,13 +83,14 @@ impl SigCommitmentTree {
             nodes[padded_n + i] = *h;
         }
         // Pad remaining leaf slots with the canonical empty leaf
-        let empty = empty_leaf();
+        let empty = merkle_empty_leaf();
         for i in leaf_count..padded_n {
             nodes[padded_n + i] = empty;
         }
         // Build internal nodes bottom-up (level-order 1-based indexing)
         for i in (1..padded_n).rev() {
-            nodes[i] = hash_node(&nodes[2 * i], &nodes[2 * i + 1]);
+            let level_start = 1usize << (usize::BITS - 1 - i.leading_zeros());
+            nodes[i] = merkle_hash_node(&nodes[2 * i], &nodes[2 * i + 1], (i - level_start) as u64);
         }
 
         Self {
@@ -130,10 +100,10 @@ impl SigCommitmentTree {
         }
     }
 
-    /// Root of the Merkle tree — the value bound into the STARK proof.
+    /// Versioned root — the value bound into the STARK proof.
     #[inline]
     pub fn root(&self) -> SigCommitmentRoot {
-        self.nodes[1]
+        version_merkle_root(&self.nodes[1])
     }
 
     /// Generate an inclusion proof for the leaf at `leaf_idx` (0-based,
@@ -169,20 +139,13 @@ impl SigCommitmentTree {
 
     /// Verify that `proof` is a valid inclusion proof against `root`.
     pub fn verify_proof(root: &SigCommitmentRoot, proof: &MerkleProof) -> bool {
-        let mut current = proof.leaf;
-        let mut pos = proof.padded_n + proof.leaf_index;
-
-        for sibling in &proof.path {
-            let (left, right) = if pos.is_multiple_of(2) {
-                (&current, sibling)
-            } else {
-                (sibling, &current)
-            };
-            current = hash_node(left, right);
-            pos /= 2;
-        }
-
-        &current == root
+        verify_merkle_path(
+            root,
+            &proof.leaf,
+            proof.leaf_index,
+            proof.padded_n,
+            &proof.path,
+        )
     }
 }
 
@@ -317,10 +280,30 @@ mod tests {
         // A genuine all-zero signature must NOT collide with the empty-pad leaf.
         let genuine_zero_sig = vec![0u8; 49_856];
         let genuine_hash = hash_sig(&genuine_zero_sig);
-        let canonical_empty = empty_leaf();
+        let canonical_empty = merkle_empty_leaf();
         assert_ne!(
             genuine_hash, canonical_empty,
             "genuine zero-sig must be distinguishable from canonical empty leaf"
         );
+    }
+
+    #[test]
+    fn root_uses_shared_versioned_merkle_format() {
+        let sigs = fake_sigs(7, 0x45);
+        let hashes: Vec<_> = sigs.iter().map(|signature| hash_sig(signature)).collect();
+        let shared_root = bleep_crypto::merkle_root_from_hashes(&hashes).unwrap();
+        let tree_root = SigCommitmentTree::new(hashes).root();
+        assert_eq!(tree_root, shared_root);
+    }
+
+    #[test]
+    fn proof_rejects_wrong_leaf_position() {
+        let sigs = fake_sigs(4, 0x65);
+        let (_, hashes) = compute_sig_commitment(&sigs);
+        let tree = SigCommitmentTree::new(hashes);
+        let root = tree.root();
+        let mut proof = tree.generate_proof(0);
+        proof.leaf_index = 1;
+        assert!(!SigCommitmentTree::verify_proof(&root, &proof));
     }
 }

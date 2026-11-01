@@ -8,6 +8,7 @@
 /// - Transaction batch commitments
 ///
 /// SAFETY GUARANTEES:
+/// - Versioned, domain-separated and position-bound roots
 /// - Deterministic proof generation
 /// - Inclusion/exclusion proofs are verifiable
 /// - Tree structure is immutable once finalized
@@ -15,6 +16,97 @@
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
+
+/// Version of the shared BLEEP Merkle commitment format.
+pub const MERKLE_FORMAT_VERSION: u8 = 1;
+const MERKLE_LEAF_DOMAIN: &[u8] = b"bleep_sal_leaf_v1";
+const MERKLE_NODE_DOMAIN: &[u8] = b"bleep_sal_node_v1";
+const MERKLE_EMPTY_DOMAIN: &[u8] = b"bleep_sal_empty_v1";
+const MERKLE_ROOT_DOMAIN: &[u8] = b"bleep_merkle_root_v1";
+
+/// Hash a leaf using the canonical BLEEP Merkle format.
+pub fn merkle_hash_leaf(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(MERKLE_LEAF_DOMAIN);
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+/// Hash an internal node, binding its position within the current tree level.
+pub fn merkle_hash_node(left: &[u8; 32], right: &[u8; 32], parent_position: u64) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(MERKLE_NODE_DOMAIN);
+    hasher.update(&[(parent_position & 1) as u8]);
+    hasher.update(left);
+    hasher.update(right);
+    *hasher.finalize().as_bytes()
+}
+
+/// Hash the canonical padding leaf, distinct from any genuine data leaf.
+pub fn merkle_empty_leaf() -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(MERKLE_EMPTY_DOMAIN);
+    *hasher.finalize().as_bytes()
+}
+
+/// Add the format version to the root commitment.
+pub fn version_merkle_root(root: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(MERKLE_ROOT_DOMAIN);
+    hasher.update(&[MERKLE_FORMAT_VERSION]);
+    hasher.update(root);
+    *hasher.finalize().as_bytes()
+}
+
+/// Build the canonical versioned root from already-hashed leaves.
+pub fn merkle_root_from_hashes(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
+    let padded_len = leaves.len().checked_next_power_of_two()?;
+    if leaves.is_empty() {
+        return None;
+    }
+
+    let mut level = Vec::with_capacity(padded_len);
+    level.extend_from_slice(leaves);
+    level.resize(padded_len, merkle_empty_leaf());
+    while level.len() > 1 {
+        level = level
+            .chunks_exact(2)
+            .enumerate()
+            .map(|(position, pair)| merkle_hash_node(&pair[0], &pair[1], position as u64))
+            .collect();
+    }
+    Some(version_merkle_root(&level[0]))
+}
+
+/// Verify an inclusion path under the canonical versioned BLEEP Merkle format.
+pub fn verify_merkle_path(
+    root: &[u8; 32],
+    leaf_hash: &[u8; 32],
+    leaf_index: usize,
+    padded_len: usize,
+    path: &[[u8; 32]],
+) -> bool {
+    if padded_len == 0
+        || !padded_len.is_power_of_two()
+        || leaf_index >= padded_len
+        || path.len() != padded_len.trailing_zeros() as usize
+    {
+        return false;
+    }
+
+    let mut current = *leaf_hash;
+    let mut position = leaf_index;
+    for sibling in path {
+        let parent_position = position / 2;
+        current = if position.is_multiple_of(2) {
+            merkle_hash_node(&current, sibling, parent_position as u64)
+        } else {
+            merkle_hash_node(sibling, &current, parent_position as u64)
+        };
+        position = parent_position;
+    }
+    version_merkle_root(&current) == *root
+}
 
 // ==================== ERROR TYPES ====================
 
@@ -69,18 +161,14 @@ pub struct MerkleLeaf {
     /// Raw data
     pub data: Vec<u8>,
 
-    /// SHA3-256 hash of data
+    /// Canonical domain-separated hash of data
     pub hash: [u8; 32],
 }
 
 impl MerkleLeaf {
     /// Create a new leaf
     pub fn new(index: u64, data: Vec<u8>) -> Self {
-        let mut hasher = Sha3_256::new();
-        hasher.update(&data);
-        let hash_result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_result);
+        let hash = merkle_hash_leaf(&data);
         Self { index, data, hash }
     }
 }
@@ -113,14 +201,8 @@ impl MerkleNode {
     }
 
     /// Create an internal node from two children
-    pub fn branch(left: MerkleNode, right: MerkleNode) -> Self {
-        let mut hasher = Sha3_256::new();
-        hasher.update(left.hash);
-        hasher.update(right.hash);
-        let hash_result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_result);
-
+    pub fn branch(left: MerkleNode, right: MerkleNode, parent_position: u64) -> Self {
+        let hash = merkle_hash_node(&left.hash, &right.hash, parent_position);
         Self {
             hash,
             left: Some(Box::new(left)),
@@ -141,6 +223,8 @@ pub struct MerkleProof {
 
     /// Path from leaf to root (siblings at each level)
     pub path: Vec<[u8; 32]>,
+    /// Padded tree width used to derive position and expected proof depth.
+    pub padded_len: usize,
 
     /// Root hash that this proof verifies against
     pub root: [u8; 32],
@@ -154,18 +238,17 @@ impl MerkleProof {
                 "Proof root does not match expected root".to_string(),
             ));
         }
+        let leaf_index = usize::try_from(self.leaf_index).map_err(|_| {
+            MerkleError::InvalidProof("Leaf index does not fit this platform".to_string())
+        })?;
 
-        // Recompute the path
-        let mut current_hash = self.leaf_hash;
-        for sibling in &self.path {
-            let mut hasher = Sha3_256::new();
-            hasher.update(current_hash);
-            hasher.update(sibling);
-            let hash_result = hasher.finalize();
-            current_hash.copy_from_slice(&hash_result);
-        }
-
-        if current_hash == self.root {
+        if verify_merkle_path(
+            root,
+            &self.leaf_hash,
+            leaf_index,
+            self.padded_len,
+            &self.path,
+        ) {
             Ok(())
         } else {
             Err(MerkleError::ProofVerificationFailed(
@@ -237,35 +320,30 @@ impl MerkleTree {
             return Err(MerkleError::EmptyTree);
         }
 
-        // Build tree from bottom up
+        let padded_len = self
+            .leaves
+            .len()
+            .checked_next_power_of_two()
+            .ok_or_else(|| MerkleError::InvalidProof("Tree is too large".to_string()))?;
         let mut nodes: Vec<MerkleNode> = self
             .leaves
             .iter()
             .map(|leaf| MerkleNode::leaf(leaf.hash))
             .collect();
+        nodes.resize_with(padded_len, || MerkleNode::leaf(merkle_empty_leaf()));
 
-        // Iteratively pair up nodes
         while nodes.len() > 1 {
-            let mut next_level = Vec::new();
-
-            for i in (0..nodes.len()).step_by(2) {
-                if i + 1 < nodes.len() {
-                    let left = nodes[i].clone();
-                    let right = nodes[i + 1].clone();
-                    next_level.push(MerkleNode::branch(left, right));
-                } else {
-                    // Odd node out: pair with itself
-                    let left = nodes[i].clone();
-                    let right = nodes[i].clone();
-                    next_level.push(MerkleNode::branch(left, right));
-                }
-            }
-
-            nodes = next_level;
+            nodes = nodes
+                .chunks_exact(2)
+                .enumerate()
+                .map(|(position, pair)| {
+                    MerkleNode::branch(pair[0].clone(), pair[1].clone(), position as u64)
+                })
+                .collect();
         }
 
         let root = nodes.into_iter().next().unwrap();
-        let root_hash = root.hash;
+        let root_hash = version_merkle_root(&root.hash);
         self.root = Some(root);
         self.root_hash = Some(root_hash);
         self.finalized = true;
@@ -292,65 +370,20 @@ impl MerkleTree {
         let leaf = &self.leaves[*leaf_position];
         let root = self.root_hash.unwrap();
 
-        // Build path from leaf to root
+        let padded_len = self.leaves.len().next_power_of_two();
+        let mut current_level: Vec<[u8; 32]> = self.leaves.iter().map(|leaf| leaf.hash).collect();
+        current_level.resize(padded_len, merkle_empty_leaf());
         let mut path = Vec::new();
         let mut current_index = *leaf_position;
 
-        // Reconstruct tree to find siblings
-        let mut current_level: Vec<(usize, [u8; 32])> = self
-            .leaves
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (i, l.hash))
-            .collect();
-
         while current_level.len() > 1 {
-            let mut next_level = Vec::new();
-
-            for i in (0..current_level.len()).step_by(2) {
-                let left_idx = current_level[i].0;
-                let left_hash = current_level[i].1;
-
-                if i + 1 < current_level.len() {
-                    let right_idx = current_level[i + 1].0;
-                    let right_hash = current_level[i + 1].1;
-
-                    // Check if current_index is on this level
-                    if current_index == left_idx {
-                        path.push(right_hash);
-                        current_index = i; // Move to parent level position
-                    } else if current_index == right_idx {
-                        path.push(left_hash);
-                        current_index = i;
-                    }
-
-                    // Hash for next level
-                    let mut hasher = Sha3_256::new();
-                    hasher.update(left_hash);
-                    hasher.update(right_hash);
-                    let hash_result = hasher.finalize();
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&hash_result);
-
-                    next_level.push((i, hash));
-                } else {
-                    if current_index == left_idx {
-                        path.push(left_hash);
-                        current_index = i;
-                    }
-
-                    let mut hasher = Sha3_256::new();
-                    hasher.update(left_hash);
-                    hasher.update(left_hash);
-                    let hash_result = hasher.finalize();
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&hash_result);
-
-                    next_level.push((i, hash));
-                }
-            }
-
-            current_level = next_level;
+            path.push(current_level[current_index ^ 1]);
+            current_level = current_level
+                .chunks_exact(2)
+                .enumerate()
+                .map(|(position, pair)| merkle_hash_node(&pair[0], &pair[1], position as u64))
+                .collect();
+            current_index /= 2;
         }
 
         Ok(MerkleProof {
@@ -358,6 +391,7 @@ impl MerkleTree {
             leaf_hash: leaf.hash,
             path,
             root,
+            padded_len,
         })
     }
 
@@ -498,6 +532,35 @@ mod tests {
 
         let proof = tree.prove_inclusion(0).unwrap();
         proof.verify(&root).unwrap();
+    }
+
+    #[test]
+    fn test_merkle_root_commits_to_leaf_order_and_version() {
+        let mut forward = MerkleTree::new();
+        forward.add_leaf(vec![1]).unwrap();
+        forward.add_leaf(vec![2]).unwrap();
+        let forward_root = forward.finalize().unwrap();
+
+        let mut reversed = MerkleTree::new();
+        reversed.add_leaf(vec![2]).unwrap();
+        reversed.add_leaf(vec![1]).unwrap();
+        let reversed_root = reversed.finalize().unwrap();
+
+        assert_ne!(forward_root, reversed_root);
+        assert_eq!(
+            forward_root,
+            merkle_root_from_hashes(&[merkle_hash_leaf(&[1]), merkle_hash_leaf(&[2])]).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_merkle_nodes_commit_to_parent_position() {
+        let left = [1u8; 32];
+        let right = [2u8; 32];
+        assert_ne!(
+            merkle_hash_node(&left, &right, 0),
+            merkle_hash_node(&left, &right, 1)
+        );
     }
 
     #[test]

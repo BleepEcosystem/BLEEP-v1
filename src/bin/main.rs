@@ -33,9 +33,9 @@
 //! **Recent additions:**
 //!   - BleepEconomicsRuntime: live epoch-end emission, fee burns, oracle price
 //!   - 3 new `/rpc/economics/*` endpoints (supply, fee, epoch)
-//!   - 2 new `/rpc/oracle/*` endpoints (price query, price submit)
+//!   - 3 `/rpc/oracle/*` endpoints (price query, operator register, signed submit)
 //!   - 2 new `/rpc/connect/*` endpoints (intents/pending, submit intent)
-//!   - OracleBridgeEngine: 5 oracle operators, 3-of-5 BLEEP/USD quorum
+//!   - OracleBridgeEngine: signed oracle updates; operators register explicitly
 //!   - Standalone `bleep-executor` binary for Layer 4 intent market
 
 use parking_lot::Mutex;
@@ -89,7 +89,6 @@ use bleep_economics::distribution::{
     INITIAL_CIRCULATING_SUPPLY, LAUNCH_COMMUNITY_UNLOCK, LAUNCH_ECOSYSTEM_UNLOCK,
     LAUNCH_FOUNDATION_UNLOCK, LAUNCH_VALIDATOR_UNLOCK,
 };
-use bleep_economics::oracle_bridge::{OracleSource, PriceUpdate};
 use bleep_economics::{BleepEconomicsRuntime, EpochInput};
 
 // ── Interop ───────────────────────────────────────────────────────────────────
@@ -500,37 +499,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let genesis_val_id = hex::encode(&sphincs_pk[..8]);
         let _ = rt.register_validator(genesis_val_id.as_bytes().to_vec(), 1_000_000u128);
 
-        // Register 5 oracle operators for 3-of-5 BLEEP/USD quorum
-        for i in 0u8..5 {
-            let op_id = vec![0xAA, i, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-            if let Err(e) = rt.register_oracle_operator(op_id, 10_000_000u128) {
-                warn!("  ⚠️  Oracle operator {} registration: {}", i, e);
-            }
-        }
-
-        // Seed initial BLEEP/USD price from devnet genesis price ($0.10)
-        // Uses empty signature (genesis bootstrap — no signing keys available yet).
-        // After mainnet launch, all oracle updates must carry a valid SPHINCS+ signature.
-        let ts_now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        for i in 0u8..3 {
-            let update = PriceUpdate {
-                source: OracleSource::Custom(vec![0xAA, i, 0, 0, 0, 0, 0, 0]),
-                asset: "BLEEP/USD".to_string(),
-                price: 10_000_000u128, // $0.10 with 8 decimals
-                timestamp: ts_now,
-                confidence_bps: 100,
-                operator_id: vec![0xAA, i, 0, 0, 0, 0, 0, 0],
-                // Empty signature = genesis bootstrap (accepted); all-zero placeholder REMOVED.
-                signature: vec![],
-            };
-            let _ = rt.submit_price_update(update);
-        }
-
-        info!("  ✅ EconomicsRuntime: genesis supply=0, base_fee={} µBLEEP, 5 oracle operators, 3 initial price seeds",
-              rt.current_base_fee());
+        info!(
+            "  ✅ EconomicsRuntime: genesis supply=0, base_fee={} µBLEEP; oracle operators must be registered with a valid public key",
+            rt.current_base_fee()
+        );
         rt
     };
     let economics_runtime = Arc::new(Mutex::new(economics_runtime));

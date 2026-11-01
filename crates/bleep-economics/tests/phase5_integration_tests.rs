@@ -11,6 +11,33 @@
 mod phase5_integration_tests {
     use bleep_economics::integration::*;
     use bleep_economics::*;
+    use pqcrypto_sphincsplus::sphincsshake256fsimple;
+    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+
+    fn signed_price_update(
+        source: oracle_bridge::OracleSource,
+        price: u128,
+        timestamp: u64,
+        public_key: &[u8],
+        secret_key: &sphincsshake256fsimple::SecretKey,
+    ) -> oracle_bridge::PriceUpdate {
+        let mut update = oracle_bridge::PriceUpdate {
+            source,
+            asset: "ETH/USD".to_string(),
+            price,
+            timestamp,
+            confidence_bps: 100,
+            operator_id: public_key.to_vec(),
+            signature: Vec::new(),
+        };
+        update.signature = sphincsshake256fsimple::detached_sign(
+            &oracle_bridge::oracle_signing_message(&update),
+            secret_key,
+        )
+        .as_bytes()
+        .to_vec();
+        update
+    }
 
     #[test]
     fn test_inflation_bounds() {
@@ -196,9 +223,12 @@ mod phase5_integration_tests {
     fn test_oracle_corruption_resistance() {
         let mut econ = BleepEconomics::genesis();
 
-        let op1 = vec![1];
-        let op2 = vec![2];
-        let op3 = vec![3];
+        let (pk1, sk1) = sphincsshake256fsimple::keypair();
+        let (pk2, sk2) = sphincsshake256fsimple::keypair();
+        let (pk3, sk3) = sphincsshake256fsimple::keypair();
+        let op1 = pk1.as_bytes().to_vec();
+        let op2 = pk2.as_bytes().to_vec();
+        let op3 = pk3.as_bytes().to_vec();
 
         econ.oracle_bridge
             .register_operator(op1.clone(), 1000)
@@ -214,40 +244,34 @@ mod phase5_integration_tests {
 
         // Honest operators
         econ.oracle_bridge
-            .submit_price_update(oracle_bridge::PriceUpdate {
-                source: oracle_bridge::OracleSource::Chainlink("ETH/USD".to_string()),
-                asset: "ETH/USD".to_string(),
-                price: 1800 * 10u128.pow(8),
-                timestamp: ts,
-                confidence_bps: 100,
-                operator_id: op1.clone(),
-                signature: vec![],
-            })
+            .submit_price_update(signed_price_update(
+                oracle_bridge::OracleSource::Chainlink("ETH/USD".to_string()),
+                1800 * 10u128.pow(8),
+                ts,
+                &op1,
+                &sk1,
+            ))
             .unwrap();
 
         econ.oracle_bridge
-            .submit_price_update(oracle_bridge::PriceUpdate {
-                source: oracle_bridge::OracleSource::Pyth("ETH/USD".to_string()),
-                asset: "ETH/USD".to_string(),
-                price: 1800 * 10u128.pow(8),
-                timestamp: ts,
-                confidence_bps: 100,
-                operator_id: op2.clone(),
-                signature: vec![],
-            })
+            .submit_price_update(signed_price_update(
+                oracle_bridge::OracleSource::Pyth("ETH/USD".to_string()),
+                1800 * 10u128.pow(8),
+                ts,
+                &op2,
+                &sk2,
+            ))
             .unwrap();
 
         // Malicious operator tries extreme price
         econ.oracle_bridge
-            .submit_price_update(oracle_bridge::PriceUpdate {
-                source: oracle_bridge::OracleSource::Custom(vec![99]),
-                asset: "ETH/USD".to_string(),
-                price: 100 * 10u128.pow(8), // Way off
-                timestamp: ts,
-                confidence_bps: 100,
-                operator_id: op3.clone(),
-                signature: vec![],
-            })
+            .submit_price_update(signed_price_update(
+                oracle_bridge::OracleSource::Custom(vec![99]),
+                100 * 10u128.pow(8), // Way off
+                ts,
+                &op3,
+                &sk3,
+            ))
             .unwrap();
 
         // Aggregate should use median (not mean), so median is still honest

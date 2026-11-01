@@ -354,6 +354,15 @@ pub enum OracleCommand {
         /// Asset pair, e.g. BLEEP/USD
         asset: String,
     },
+    /// Register an operator's SPHINCS+ public key with the node.
+    Register {
+        /// Operator public key (hex-encoded)
+        #[arg(long)]
+        operator_id: String,
+        /// Slashing balance reserved for this operator
+        #[arg(long, default_value = "0")]
+        slashing_balance: u128,
+    },
     /// Submit a price update as an oracle operator
     Submit {
         /// Asset pair

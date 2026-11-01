@@ -16,7 +16,8 @@
 //! - `GET  /rpc/economics/epoch/{epoch}`   — epoch output: emissions, burns, base fee
 //! - `GET  /rpc/economics/fee`             — current base fee
 //! - `GET  /rpc/oracle/price/{asset}`      — latest aggregated oracle price
-//! - `POST /rpc/oracle/update`             — submit oracle price update
+//! - `POST /rpc/oracle/operator/register` — register a SPHINCS+ oracle public key
+//! - `POST /rpc/oracle/update`             — submit a signed oracle price update
 //! - `GET  /rpc/connect/intents/pending`   — pending Layer 4 intents
 //! - `POST /rpc/connect/intent`            — submit a new Layer 4 instant intent
 //! - `GET  /rpc/connect/intent/{id}`       — intent status
@@ -1294,6 +1295,7 @@ pub fn rpc_routes_with_state(
         .or(economics_epoch(Arc::clone(&state_inner)))
         .or(economics_fee(Arc::clone(&state_inner)))
         .or(oracle_price(Arc::clone(&state_inner)))
+        .or(oracle_operator_register(Arc::clone(&state_inner)))
         .or(oracle_update(Arc::clone(&state_inner)))
         .or(connect_intents_pending(Arc::clone(&state_inner)))
         .or(connect_submit_intent(Arc::clone(&state_inner)))
@@ -1428,6 +1430,13 @@ struct OracleUpdateReq {
     timestamp: u64,
     confidence_bps: u16,
     operator_id: String, // hex-encoded
+    signature: String,   // hex-encoded SPHINCS+ detached signature
+}
+
+#[derive(Deserialize)]
+struct OracleOperatorRegisterReq {
+    operator_id: String, // hex-encoded SPHINCS+ public key
+    slashing_balance: u128,
 }
 
 #[derive(Serialize)]
@@ -1724,9 +1733,30 @@ fn oracle_update(
         .and(with_arc_state(state))
         .map(
             |req: OracleUpdateReq, _claims: SessionClaims, st: Arc<RpcState>| {
+                let operator_bytes = match hex::decode(&req.operator_id) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: format!("Invalid operator_id hex: {error}"),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        )
+                    }
+                };
+                let signature = match hex::decode(&req.signature) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        return warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: format!("Invalid signature hex: {error}"),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        )
+                    }
+                };
                 match &st.economics_runtime {
                     Some(rt) => {
-                        let operator_bytes = hex::decode(&req.operator_id).unwrap_or_default();
                         let update = PriceUpdate {
                             source: OracleSource::Custom(operator_bytes.clone()),
                             asset: req.asset.clone(),
@@ -1734,7 +1764,7 @@ fn oracle_update(
                             timestamp: req.timestamp,
                             confidence_bps: req.confidence_bps,
                             operator_id: operator_bytes,
-                            signature: vec![0u8; 64], // Signature verification Sprint 9
+                            signature,
                         };
                         let mut rt = rt.lock();
                         match rt.submit_price_update(update) {
@@ -1750,6 +1780,58 @@ fn oracle_update(
                             ),
                         }
                     }
+                    None => warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "EconomicsRuntime not initialised".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ),
+                }
+            },
+        )
+}
+
+fn oracle_operator_register(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "oracle" / "operator" / "register")
+        .and(warp::post())
+        .and(warp::body::json::<OracleOperatorRegisterReq>())
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::ConfigureNode),
+        ))
+        .and(with_arc_state(state))
+        .map(
+            |req: OracleOperatorRegisterReq, _claims: SessionClaims, st: Arc<RpcState>| {
+                let operator_id = match hex::decode(&req.operator_id) {
+                    Ok(operator_id) => operator_id,
+                    Err(error) => {
+                        return warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: format!("Invalid operator_id hex: {error}"),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        )
+                    }
+                };
+
+                match &st.economics_runtime {
+                    Some(rt) => match rt
+                        .lock()
+                        .register_oracle_operator(operator_id, req.slashing_balance)
+                    {
+                        Ok(()) => warp::reply::with_status(
+                            warp::reply::json(&OracleUpdateResp { ok: true }),
+                            warp::http::StatusCode::OK,
+                        ),
+                        Err(error) => warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: error.to_string(),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        ),
+                    },
                     None => warp::reply::with_status(
                         warp::reply::json(&ErrResp {
                             error: "EconomicsRuntime not initialised".into(),

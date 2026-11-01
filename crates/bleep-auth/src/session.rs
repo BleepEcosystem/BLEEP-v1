@@ -236,7 +236,10 @@ impl SessionManager {
     /// (by design — rotate only when all existing tokens have short remaining TTL).
     pub async fn validate(&self, token: &str) -> AuthResult<SessionClaims> {
         let mut v = Validation::new(Algorithm::HS256);
+        v.algorithms = vec![Algorithm::HS256];
         v.validate_exp = true;
+        v.leeway = 0;
+        v.set_required_spec_claims(&["exp", "sub"]);
 
         let dec_key = self.active_key.read().await;
         let data = decode::<SessionClaims>(token, &dec_key.1, &v).map_err(|e| {
@@ -413,6 +416,55 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            manager.validate(&token).await,
+            Err(AuthError::InvalidSession)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_token_is_rejected_even_when_correctly_signed() {
+        let secret: Vec<u8> = (0..32).collect();
+        let manager = SessionManager::new(secret.clone()).unwrap();
+        let claims = SessionClaims {
+            sub: "expired".into(),
+            jti: "expired-jti".into(),
+            iat: 1,
+            exp: 1,
+            roles: vec![Role::ReadOnly],
+            nonce: "expired-nonce".into(),
+        };
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(&secret),
+        )
+        .unwrap();
+        assert_eq!(
+            manager.validate(&token).await,
+            Err(AuthError::ExpiredSession)
+        );
+    }
+
+    #[tokio::test]
+    async fn token_signed_with_unconfigured_algorithm_is_rejected() {
+        let secret: Vec<u8> = (0..32).collect();
+        let manager = SessionManager::new(secret.clone()).unwrap();
+        let issued = manager
+            .issue(
+                "developer",
+                &[Role::DappDeveloper],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        let claims = manager.validate(&issued.token).await.unwrap();
+        let token = encode(
+            &Header::new(Algorithm::HS384),
+            &claims,
+            &EncodingKey::from_secret(&secret),
+        )
+        .unwrap();
         assert_eq!(
             manager.validate(&token).await,
             Err(AuthError::InvalidSession)

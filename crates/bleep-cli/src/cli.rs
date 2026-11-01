@@ -12,7 +12,7 @@
 //!   - `zkp`        → BLEEPZKPModule
 //!   - `info`       → node version + RPC health
 //!   - `pat`        → mint / burn / transfer / balance  (Sprint 7)
-//!   - `oracle`     → price / submit  (Sprint 7)
+//!   - `oracle`     → price / register / signed submit  (Sprint 7)
 //!   - `economics`  → supply / fee / epoch  (Sprint 7)
 
 use anyhow::{anyhow, Result};
@@ -44,6 +44,7 @@ use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
 use bleep_crypto::tx_signer::{
     generate_tx_keypair, sign_tx_payload, tx_payload, validator_stake_payload,
 };
+use bleep_economics::oracle_bridge::{oracle_signing_message, OracleSource, PriceUpdate};
 use bleep_governance::governance_core::{GovernanceEngine, Proposal, ProposalType, Vote};
 use bleep_p2p::p2p_node::{P2PNode, P2PNodeConfig};
 use bleep_state::state_manager::StateManager;
@@ -864,22 +865,81 @@ async fn run(cmd: Commands) -> Result<()> {
                     Err(e) => println!("❌ RPC unreachable ({}). Is the node running?", e),
                 }
             }
+            OracleCommand::Register {
+                operator_id,
+                slashing_balance,
+            } => {
+                let operator_bytes = hex::decode(&operator_id)
+                    .map_err(|error| anyhow!("Invalid operator_id hex: {error}"))?;
+                let body = serde_json::json!({
+                    "operator_id": hex::encode(operator_bytes),
+                    "slashing_balance": slashing_balance,
+                });
+                match http_client
+                    .post(format!("{}/rpc/oracle/operator/register", rpc))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        println!("✅ Oracle operator registered: {}", operator_id);
+                    }
+                    Ok(r) => println!(
+                        "❌ Oracle operator registration rejected: HTTP {}",
+                        r.status()
+                    ),
+                    Err(e) => println!("❌ RPC unreachable: {}", e),
+                }
+            }
             OracleCommand::Submit {
                 asset,
                 price,
                 confidence_bps,
                 operator_id,
             } => {
+                let operator_bytes = hex::decode(&operator_id)
+                    .map_err(|error| anyhow!("Invalid operator_id hex: {error}"))?;
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                let manager = WalletManager::load_or_create()
+                    .map_err(|error| anyhow!("Wallet load failed: {error}"))?;
+                let wallet = manager
+                    .list_wallets()
+                    .iter()
+                    .find(|wallet| wallet.falcon_keys == operator_bytes)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "No wallet matches operator_id {}; register a wallet's SPHINCS+ public key first",
+                            operator_id
+                        )
+                    })?;
+                if !wallet.can_sign() {
+                    return Err(anyhow!("The operator wallet has no signing key"));
+                }
+                let secret_key = unlock_wallet_key(&wallet)
+                    .map_err(|error| anyhow!("Oracle wallet unlock failed: {error}"))?;
+                let mut update = PriceUpdate {
+                    source: OracleSource::Custom(operator_bytes.clone()),
+                    asset: asset.clone(),
+                    price,
+                    timestamp: ts,
+                    confidence_bps,
+                    operator_id: operator_bytes,
+                    signature: Vec::new(),
+                };
+                update.signature =
+                    sign_tx_payload(&oracle_signing_message(&update), &secret_key)
+                        .map_err(|error| anyhow!("Oracle update signing failed: {error}"))?;
                 let body = serde_json::json!({
                     "asset": asset,
                     "price": price,
                     "timestamp": ts,
                     "confidence_bps": confidence_bps,
                     "operator_id": operator_id,
+                    "signature": hex::encode(update.signature),
                 });
                 match http_client
                     .post(format!("{}/rpc/oracle/update", rpc))
