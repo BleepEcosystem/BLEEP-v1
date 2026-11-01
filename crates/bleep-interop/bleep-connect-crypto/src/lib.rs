@@ -4,7 +4,7 @@
 //!
 //! ## Algorithms
 //! - **SPHINCS+**: Hash-based post-quantum signature scheme (signing/verification)
-//! - **Kyber1024**: Post-quantum key encapsulation mechanism (encryption)
+//! - **ML-KEM-1024**: Post-quantum key encapsulation mechanism (encryption)
 //! - **SPHINCS+**: Hash-based post-quantum signatures for all signing paths
 //! - **AES-256-GCM**: Authenticated symmetric encryption
 //! - **BLAKE2b / SHA-256 / SHA-3**: Hashing
@@ -15,7 +15,7 @@ use aes_gcm::{
 };
 use blake2::Blake2b512;
 use hkdf::Hkdf;
-use pqcrypto_kyber::kyber1024;
+use pqcrypto_mlkem::mlkem1024;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::kem::{Ciphertext, PublicKey as KemPk, SecretKey as KemSk, SharedSecret};
 use pqcrypto_traits::sign::{DetachedSignature, PublicKey as SignPk, SecretKey as SignSk};
@@ -48,19 +48,19 @@ pub enum CryptoError {
 pub type CryptoResult<T> = Result<T, CryptoError>;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QUANTUM KEY PAIR (SPHINCS+ signing + Kyber1024 KEM)
+// QUANTUM KEY PAIR (SPHINCS+ signing + ML-KEM-1024 KEM)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A post-quantum keypair: SPHINCS+ for signing, Kyber1024 for key encapsulation.
+/// A post-quantum keypair: SPHINCS+ for signing, ML-KEM-1024 for key encapsulation.
 #[derive(ZeroizeOnDrop)]
 pub struct QuantumKeyPair {
     /// SPHINCS+ signing secret key bytes
     sign_sk: Vec<u8>,
     /// SPHINCS+ signing public key bytes (kept with the pair for convenience)
     sign_pk: Vec<u8>,
-    /// Kyber1024 KEM secret key bytes
+    /// ML-KEM-1024 secret key bytes
     kem_sk: Vec<u8>,
-    /// Kyber1024 KEM public key bytes
+    /// ML-KEM-1024 public key bytes
     kem_pk: Vec<u8>,
 }
 
@@ -68,7 +68,7 @@ impl QuantumKeyPair {
     /// Generate a fresh quantum keypair using OS randomness.
     pub fn generate() -> Self {
         let (sign_pk, sign_sk) = sphincsshake256fsimple::keypair();
-        let (kem_pk, kem_sk) = kyber1024::keypair();
+        let (kem_pk, kem_sk) = mlkem1024::keypair();
         Self {
             sign_sk: sign_sk.as_bytes().to_vec(),
             sign_pk: sign_pk.as_bytes().to_vec(),
@@ -82,7 +82,7 @@ impl QuantumKeyPair {
         &self.sign_pk
     }
 
-    /// Return the Kyber1024 public key bytes (for sharing).
+    /// Return the ML-KEM-1024 public key bytes (for sharing).
     pub fn kem_public_key_bytes(&self) -> &[u8] {
         &self.kem_pk
     }
@@ -101,17 +101,17 @@ impl QuantumKeyPair {
         })
     }
 
-    /// Encrypt data using Kyber1024 KEM + AES-256-GCM hybrid encryption.
+    /// Encrypt data using ML-KEM-1024 + AES-256-GCM hybrid encryption.
     /// Returns (ciphertext, kem_ciphertext) where kem_ciphertext is the
-    /// Kyber encapsulation needed for decryption.
+    /// ML-KEM encapsulation needed for decryption.
     pub fn encrypt(&self, plaintext: &[u8]) -> CryptoResult<EncryptedPayload> {
-        let pk = kyber1024::PublicKey::from_bytes(&self.kem_pk).map_err(|_| {
+        let pk = mlkem1024::PublicKey::from_bytes(&self.kem_pk).map_err(|_| {
             CryptoError::InvalidKeyLength {
-                expected: kyber1024::public_key_bytes(),
+                expected: mlkem1024::public_key_bytes(),
                 got: self.kem_pk.len(),
             }
         })?;
-        let (shared_secret, kem_ciphertext) = kyber1024::encapsulate(&pk);
+        let (shared_secret, kem_ciphertext) = mlkem1024::encapsulate(&pk);
         let aes_key = derive_aes_key(shared_secret.as_bytes())?;
         let encrypted = aes_gcm_encrypt(&aes_key, plaintext)?;
         Ok(EncryptedPayload {
@@ -122,15 +122,15 @@ impl QuantumKeyPair {
 
     /// Decrypt a payload encrypted with our KEM public key.
     pub fn decrypt(&self, payload: &EncryptedPayload) -> CryptoResult<Vec<u8>> {
-        let sk = kyber1024::SecretKey::from_bytes(&self.kem_sk).map_err(|_| {
+        let sk = mlkem1024::SecretKey::from_bytes(&self.kem_sk).map_err(|_| {
             CryptoError::InvalidKeyLength {
-                expected: kyber1024::secret_key_bytes(),
+                expected: mlkem1024::secret_key_bytes(),
                 got: self.kem_sk.len(),
             }
         })?;
-        let ct = kyber1024::Ciphertext::from_bytes(&payload.kem_ciphertext)
+        let ct = mlkem1024::Ciphertext::from_bytes(&payload.kem_ciphertext)
             .map_err(|_| CryptoError::InvalidCiphertext)?;
-        let shared_secret = kyber1024::decapsulate(&ct, &sk);
+        let shared_secret = mlkem1024::decapsulate(&ct, &sk);
         let aes_key = derive_aes_key(shared_secret.as_bytes())?;
         aes_gcm_decrypt(&aes_key, &payload.aes_ciphertext)
     }
@@ -142,7 +142,7 @@ pub struct QuantumSignature {
     pub bytes: Vec<u8>,
 }
 
-/// Encrypted payload: Kyber KEM encapsulation + AES-256-GCM ciphertext.
+/// Encrypted payload: ML-KEM encapsulation + AES-256-GCM ciphertext.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedPayload {
     pub kem_ciphertext: Vec<u8>,

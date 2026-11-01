@@ -20,7 +20,7 @@ Copyright © 2026 Muhammad Attahir.
 ```
 bleep-interop/
 ├── bleep-connect-types              — Shared: ChainId, InstantIntent, AssetDescriptor
-├── bleep-connect-crypto             — SPHINCS+, Kyber-1024, AES-GCM cross-chain crypto
+├── bleep-connect-crypto             — SPHINCS+, ML-KEM-1024, AES-GCM cross-chain crypto
 ├── bleep-connect-commitment-chain   — BFT micro-chain anchoring cross-chain state commitments
 ├── bleep-connect-adapters           — Per-chain encode/verify adapters (Ethereum, Solana, …)
 ├── bleep-connect-executor           — Executor node: monitors intents, bids, executes

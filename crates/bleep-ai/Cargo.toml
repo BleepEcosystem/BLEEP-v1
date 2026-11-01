@@ -31,7 +31,7 @@ hex           = "0.4"
 sha2          = "0.10"
 sha3          = "0.10"
 blake3        = "1.5"
-pqcrypto-kyber = "0.8.1"
+pqcrypto-mlkem = "0.1.1"
 pqcrypto-sphincsplus = "0.7"
 pqcrypto-traits = "0.3.5"
 bincode = { version = "2.0.1", features = ["serde"] }

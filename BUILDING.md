@@ -127,7 +127,7 @@ BLEEP uses Cargo feature flags to control build configuration.
 
 | Flag | Default | Description |
 |---|---|---|
-| `quantum` | ✅ enabled | SPHINCS+-SHAKE-256f-simple + legacy Kyber-1024 APIs; FIPS 203/205 conformance is not claimed |
+| `quantum` | ✅ enabled | SPHINCS+-SHAKE-256f-simple + ML-KEM-1024; implementation conformance is not claimed |
 | `mainnet` | ✅ enabled | Mainnet genesis parameters and constitutional constants |
 | `pretestnet` | disabled | Pre-testnet genesis parameters — reduced epoch length, test faucet active |
 | `ml` | disabled | Phase 4 AI inference via `DeterministicInferenceEngine` (requires trained ONNX models) |
@@ -148,7 +148,7 @@ cargo build --workspace --no-default-features --features mainnet
 cargo build --workspace --features ml
 ```
 
-> **Important:** The `quantum` flag controls whether SPHINCS+ and Kyber-1024 are active on cryptographic paths. Builds without `quantum` are for development speed only and must never be deployed to any network.
+> **Important:** The `quantum` flag controls whether SPHINCS+ and ML-KEM-1024 are active on cryptographic paths. Builds without `quantum` are for development speed only and must never be deployed to any network.
 
 ---
 

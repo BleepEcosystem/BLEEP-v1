@@ -17,7 +17,7 @@
 BLEEP is an experimental distributed execution protocol with an intent-oriented runtime and post-quantum algorithm implementations.
 Its extended Winterfell STARK proves bounded metadata relationships, including epoch arithmetic, transaction/signature count equality and limits, and batch sequence equality. It does **not** prove transaction signatures, derive the Merkle or signature-commitment roots, or prove state-transition execution. Those checks are performed separately by conventional block validation and execution code. The proof is transparent and requires no trusted setup.
 
-The code uses the `pqcrypto` SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs. These are legacy/round-3 algorithm APIs, not a claim that the implementation is validated or conformant to FIPS 205 (SLH-DSA) or FIPS 203 (ML-KEM). See the [cryptographic model](#cryptographic-model) for details.
+The code uses `pqcrypto` SPHINCS+-SHAKE-256f-simple and `pqcrypto-mlkem` ML-KEM-1024 APIs. The algorithm is standardized by FIPS 203, but this implementation is not claimed to be validated or conformant. The ML-KEM C sources in `pqcrypto-mlkem` derive from PQClean, which has retired and archived its repository; see the [PQC implementation lifecycle](crates/bleep-crypto/README.md#pqclean-maintenance-status). See the [cryptographic model](#cryptographic-model) for details.
 
 
 | The harvest-now, decrypt-later threat is real and accumulating. Every signed transaction on a classically secured blockchain is a permanent public record. An adversary can archive those records today and apply quantum decryption retroactively when capable hardware arrives. BLEEP's historical record carries no such liability — by design.|
@@ -28,7 +28,7 @@ The code uses the `pqcrypto` SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs. The
 |---|---|---|
 | **Bounded Metadata Proofs** | Selected block metadata relationships are proven | Winterfell extended STARK — epoch arithmetic, transaction/signature counts and bounds, and batch sequence |
 | **Intent Native** | Users and agents express outcomes, not instructions | PAT engine + 7-tier VM router — intent resolved to optimal execution path automatically |
-| **Post-Quantum Algorithms** | Post-quantum signature and KEM algorithms are used on configured sensitive paths | SPHINCS+-SHAKE-256f-simple and legacy Kyber-1024 APIs; FIPS conformance is not claimed |
+| **Post-Quantum Algorithms** | Post-quantum signature and KEM algorithms are used on configured sensitive paths | SPHINCS+-SHAKE-256f-simple and ML-KEM-1024; implementation conformance is not claimed |
 | **Supply Limit** | Maximum supply is 200,000,000 BLEEP | `MAX_SUPPLY` in `bleep-economics`; runtime invariant checks |
 
 ---
@@ -38,7 +38,7 @@ The code uses the `pqcrypto` SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs. The
 | Property | Non-PQ chains | Naoris Protocol | BLEEP |
 |---|---|---|---|
 | Transaction signing | ECDSA — broken by Shor's | Dilithium-5 overlay | SPHINCS+-SHAKE-256f-simple legacy/round-3 API; FIPS 205 conformance not claimed |
-| Key encapsulation | ECDH / x25519 — broken by Shor's | Additive layer | Kyber-1024 legacy API; not FIPS 203 ML-KEM |
+| Key encapsulation | ECDH / x25519 — broken by Shor's | Additive layer | ML-KEM-1024 (FIPS 203 algorithm; implementation conformance not claimed) |
 | ZK proof system | Groth16 / PLONK — trusted setup | Not applicable | Winterfell STARK — transparent, no ceremony |
 | Block validity | Conventional validation | Not proven | Conventional validation; the STARK proves selected metadata constraints, not execution validity |
 | Intent execution | Not supported | Not supported | **Native — PAT engine + 7-tier VM** |
@@ -52,7 +52,7 @@ The code uses the `pqcrypto` SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs. The
 
 A protocol that launches with classical cryptography and plans a post-quantum migration inherits a coordination problem: validators, wallets, bridges, indexers, and tooling must upgrade together.
 
-BLEEP uses post-quantum algorithm APIs from genesis, avoiding a classical-key migration today. The current Kyber and SPHINCS+ APIs are legacy/round-3 variants; FIPS 203/205 conformance is not established, so standardization and production-readiness work may still require migration.
+BLEEP uses post-quantum algorithm APIs from genesis, avoiding a classical-key migration today. ML-KEM-1024 now replaces the legacy Kyber API. FIPS implementation validation is not established, and the PQClean implementation source is archived, so production readiness still requires an actively maintained upstream implementation.
 
 ---
 
@@ -95,7 +95,7 @@ or share it publicly.
 
 ```
 [1/16]  ✅ SPHINCS+-SHAKE-256f-simple keypair (PK=64 bytes, SK=128 bytes)
-[1/16]  ✅ Kyber-1024 legacy API keypair (PK=1,568 bytes)
+[1/16]  ✅ ML-KEM-1024 keypair (PK=1,568 bytes)
 [2/16]  ✅ Genesis block #0 — blockchain, mempool, tx-pool ready
 [3/16]  ✅ Wallet services online
 [4/16]  ✅ PAT engine running (6-layer intent-driven architecture)
@@ -195,7 +195,7 @@ graph TB
     end
 
     subgraph CRYPTO["Cryptographic Foundation"]
-        CRY["bleep-crypto\nSPHINCS+ · Kyber-1024 · AES-256-GCM"]
+        CRY["bleep-crypto\nSPHINCS+ · ML-KEM-1024 · AES-256-GCM"]
         WALLET["bleep-wallet-core\nKey Lifecycle · BIP-39"]
     end
 
@@ -236,7 +236,7 @@ graph TB
 ```
 crates/
 ├── bleep-core            # Block types, ZKTransaction, mempool, shared data structures
-├── bleep-crypto          # SPHINCS+, Kyber-1024, AES-256-GCM, SHA3-256, BLAKE3
+├── bleep-crypto          # SPHINCS+, ML-KEM-1024, AES-256-GCM, SHA3-256, BLAKE3
 ├── bleep-zkp             # Winterfell STARK metadata AIR; legacy block-validity API disabled
 ├── bleep-consensus       # PoS-BFT (primary), PBFT, PoW fallback; slashing; epoch management
 ├── bleep-state           # Sparse Merkle Trie (256-level), RocksDB, cross-shard 2PC, self-healing
@@ -293,8 +293,8 @@ graph LR
         TX_SIGN["Transaction Signing\nSPHINCS+-SHAKE-256f-simple\nlegacy API"]
         BLK_SIGN["Block Signing\nSPHINCS+-SHAKE-256f-simple\nlegacy API"]
         P2P_AUTH["P2P Authentication\nSPHINCS+-SHAKE-256f-simple\nlegacy API"]
-        KEM["Key Encapsulation\nKyber-1024\nlegacy API; not ML-KEM"]
-        ONION["Onion Routing\nKyber-1024 per-hop\n+ AES-256-GCM"]
+        KEM["Key Encapsulation\nML-KEM-1024\nFIPS 203; implementation not validated"]
+        ONION["Onion Routing\nML-KEM-1024 per-hop\n+ AES-256-GCM"]
         ZKP_BLOCK["Bounded Metadata Proof\nWinterfell STARK\nHash-based · No trusted setup"]
         ZKP_BRIDGE["Cross-Chain Bridge Proofs\nSPHINCS+-bound STARK\ntranscripts"]
         AUDIT["Audit Log\nSHA3-256 Merkle chain\nsync=true · RocksDB"]
@@ -329,16 +329,16 @@ graph LR
 
 > **Bandwidth:** These SPHINCS+ signatures are 49,856 bytes each. At 512 transactions, raw signatures total about 24.3 MiB. The Signature Availability Layer commits to signature hashes; the extended STARK proves bounded metadata constraints, not signature validity or commitment-root derivation.
 
-### Key Encapsulation — Kyber-1024
+### Key Encapsulation — ML-KEM-1024
 
 | Parameter | Value |
 |---|---|
-| Standard status | Legacy Kyber API; FIPS 203 ML-KEM conformance is not claimed |
-| Parameter set | Kyber-1024 |
+| Standard status | ML-KEM-1024 (FIPS 203 algorithm); implementation conformance is not claimed |
+| Parameter set | ML-KEM-1024 |
 | Public Key | 1,568 bytes |
 | Secret Key | 3,168 bytes (`Zeroizing<Vec<u8>>` — zeroed on drop) |
 | Ciphertext | 1,568 bytes + 32-byte shared secret |
-| Crate | `pqcrypto-kyber` |
+| Crate | `pqcrypto-mlkem` |
 | Usage | Validator binding, peer KEM, wallet key management, onion routing |
 
 ### Zero-Knowledge Proofs — Winterfell STARK (FRI-based)
@@ -431,7 +431,7 @@ sequenceDiagram
 
 Every validator carries:
 - A **SPHINCS+ verification key** — transaction and block signing
-- A **Kyber-1024 encapsulation key** — peer channels and onion routing
+- An **ML-KEM-1024 encapsulation key** — peer channels and onion routing
 - A **stake in microBLEEP** — determines vote weight and slashing exposure
 
 **Safety guaranteed when Byzantine stake `f < S/3`** (total staked supply S).
@@ -879,8 +879,8 @@ DevNet UI
 | SPHINCS+ signature size | **49,856 bytes** | `pqcrypto-sphincsplus` |
 | SPHINCS+ public key | **64 bytes** | `pqcrypto-sphincsplus` |
 | SPHINCS+ secret key | **128 bytes** | `pqcrypto-sphincsplus` |
-| Kyber-1024 public key | 1,568 bytes | `pqcrypto-kyber` |
-| Kyber-1024 secret key | 3,168 bytes | `pqcrypto-kyber` |
+| ML-KEM-1024 public key | 1,568 bytes | `pqcrypto-mlkem` |
+| ML-KEM-1024 secret key | 3,168 bytes | `pqcrypto-mlkem` |
 | State trie depth | 256 levels | `TRIE_DEPTH` |
 | Merkle proof size | 8,192 bytes (fixed) | `SparseMerkleTrie` |
 | Gossip max message size | 2,097,152 bytes (2 MiB) | `MAX_GOSSIP_MSG_BYTES` |

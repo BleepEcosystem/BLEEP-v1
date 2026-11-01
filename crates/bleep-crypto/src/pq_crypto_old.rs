@@ -162,11 +162,11 @@ impl KyberKem {
     /// Generate a Kyber1024 keypair
     /// Returns (public_key, secret_key)
     pub fn keygen() -> CryptoResult<(KyberPublicKey, KyberSecretKey)> {
-        use pqcrypto_kyber::kyber1024;
+        use pqcrypto_mlkem::mlkem1024;
         use pqcrypto_traits::kem::PublicKey as PQPublicKey;
         use pqcrypto_traits::kem::SecretKey as PQSecretKey;
         
-        let (pk, sk) = kyber1024::keypair();
+        let (pk, sk) = mlkem1024::keypair();
         
         let public_key = KyberPublicKey::from_bytes(pk.as_bytes().to_vec())?;
         let secret_key = KyberSecretKey::from_bytes(sk.as_bytes().to_vec())?;
@@ -177,15 +177,15 @@ impl KyberKem {
     /// Encapsulate: create shared secret and ciphertext
     /// Returns (shared_secret, ciphertext)
     pub fn encapsulate(public_key: &KyberPublicKey) -> CryptoResult<(SharedSecret, KyberCiphertext)> {
-        use pqcrypto_kyber::kyber1024;
+        use pqcrypto_mlkem::mlkem1024;
         use pqcrypto_traits::kem::PublicKey as PQPublicKey;
         use pqcrypto_traits::kem::SharedSecret as PQSharedSecret;
         use pqcrypto_traits::kem::Ciphertext as PQCiphertext;
         
-        let pk = kyber1024::PublicKey::from_bytes(public_key.as_bytes())
+        let pk = mlkem1024::PublicKey::from_bytes(public_key.as_bytes())
             .map_err(|_| CryptoError::EncapsulationFailed("Invalid public key".to_string()))?;
         
-        let (ss, ct) = kyber1024::encapsulate(&pk);
+        let (ss, ct) = mlkem1024::encapsulate(&pk);
         
         let mut shared_secret_bytes = [0u8; 32];
         shared_secret_bytes.copy_from_slice(&ss.as_bytes()[..32]);
@@ -200,16 +200,16 @@ impl KyberKem {
         secret_key: &KyberSecretKey,
         ciphertext: &KyberCiphertext,
     ) -> CryptoResult<SharedSecret> {
-        use pqcrypto_kyber::kyber1024;
+        use pqcrypto_mlkem::mlkem1024;
         use pqcrypto_traits::kem::SecretKey;
         
-        let sk = kyber1024::SecretKey::from_bytes(secret_key.as_bytes())
+        let sk = mlkem1024::SecretKey::from_bytes(secret_key.as_bytes())
             .map_err(|_| CryptoError::DecapsulationFailed("Invalid secret key".to_string()))?;
         
-        let ct = kyber1024::Ciphertext::from_bytes(ciphertext.as_bytes())
+        let ct = mlkem1024::Ciphertext::from_bytes(ciphertext.as_bytes())
             .map_err(|_| CryptoError::DecapsulationFailed("Invalid ciphertext".to_string()))?;
         
-        let ss = kyber1024::decapsulate(&ct, &sk);
+        let ss = mlkem1024::decapsulate(&ct, &sk);
         
         let mut shared_secret_bytes = [0u8; 32];
         shared_secret_bytes.copy_from_slice(&ss.as_bytes()[..32]);

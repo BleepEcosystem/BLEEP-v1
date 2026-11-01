@@ -42,7 +42,7 @@ chrono = { version = "0.4.34", features = ["serde"] }
 linfa = "0.7.1"
 linfa-clustering = "0.7.1"
 pqcrypto = { version = "0.18.1", optional = true }
-pqcrypto-kyber = { version = "0.8.1", optional = true }
+pqcrypto-mlkem = { version = "0.1.1", optional = true }
 pqcrypto-sphincsplus = "0.7.1"
 pqcrypto-traits = "0.3.5"
 linfa-nn = "0.7.2"
@@ -56,4 +56,3 @@ rayon = "1.9"
 tokio-test = "0.4.3"
 test-log = "0.2.14"
 proptest = "1.4.0"
-

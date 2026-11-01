@@ -1,6 +1,6 @@
 // src/bin/bleep_crypto.rs
 
-use bleep_crypto::quantum_resistance::{init_kyber, init_sphincs, run_keygen_tests};
+use bleep_crypto::quantum_resistance::{init_mlkem, init_sphincs, run_keygen_tests};
 use bleep_crypto::zkp_verification::{init_zkp_systems, test_zkp_proofs};
 
 use log::{error, info};
@@ -17,10 +17,10 @@ fn main() {
 }
 
 fn run_crypto_engine() -> Result<(), Box<dyn Error>> {
-    // Step 1: Initialize SPHINCS+ and Kyber post-quantum cryptosystems
+    // Step 1: Initialize SPHINCS+ and ML-KEM post-quantum cryptosystems
     init_sphincs()?;
-    init_kyber()?;
-    info!("✅ SPHINCS+ and Kyber initialized.");
+    init_mlkem()?;
+    info!("✅ SPHINCS+ and ML-KEM initialized.");
 
     // Step 2: Initialize zero-knowledge proof system (transparent/PQ proof engine)
     init_zkp_systems()?;

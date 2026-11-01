@@ -1,5 +1,5 @@
 use log::info;
-use pqcrypto_kyber::kyber1024;
+use pqcrypto_mlkem::mlkem1024;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::kem::{PublicKey as _, SecretKey as _};
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey};
@@ -17,8 +17,8 @@ pub fn generate_sphincs_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> 
     Ok((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()))
 }
 
-pub fn generate_kyber_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
-    let (pk, sk) = kyber1024::keypair();
+pub fn generate_mlkem_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    let (pk, sk) = mlkem1024::keypair();
     Ok((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()))
 }
 
@@ -60,18 +60,18 @@ pub fn init_sphincs() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Initialize Kyber post-quantum key encapsulation support.
-pub fn init_kyber() -> Result<(), Box<dyn Error>> {
+/// Initialize ML-KEM post-quantum key encapsulation support.
+pub fn init_mlkem() -> Result<(), Box<dyn Error>> {
     init_crypto_logging();
-    info!("Kyber post-quantum key encapsulation initialized.");
+    info!("ML-KEM post-quantum key encapsulation initialized.");
     Ok(())
 }
 
 /// Run basic quantum-resistant key generation self-tests.
 pub fn run_keygen_tests() -> Result<(), Box<dyn std::error::Error>> {
     let (sphincs_pk, sphincs_sk) = generate_sphincs_keypair()?;
-    let (kyber_pk, kyber_sk) = generate_kyber_keypair()?;
-    if sphincs_pk.is_empty() || sphincs_sk.is_empty() || kyber_pk.is_empty() || kyber_sk.is_empty()
+    let (mlkem_pk, mlkem_sk) = generate_mlkem_keypair()?;
+    if sphincs_pk.is_empty() || sphincs_sk.is_empty() || mlkem_pk.is_empty() || mlkem_sk.is_empty()
     {
         Err("Post-quantum key generation returned empty key material".into())
     } else {
@@ -84,12 +84,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kyber_generator_returns_kyber_1024_keys() {
-        let (public_key, secret_key) = generate_kyber_keypair().expect("Kyber keygen");
-        assert_eq!(public_key.len(), kyber1024::public_key_bytes());
-        assert_eq!(secret_key.len(), kyber1024::secret_key_bytes());
-        kyber1024::PublicKey::from_bytes(&public_key).expect("valid Kyber public key");
-        kyber1024::SecretKey::from_bytes(&secret_key).expect("valid Kyber secret key");
+    fn mlkem_generator_returns_mlkem_1024_keys() {
+        let (public_key, secret_key) = generate_mlkem_keypair().expect("ML-KEM keygen");
+        assert_eq!(public_key.len(), mlkem1024::public_key_bytes());
+        assert_eq!(secret_key.len(), mlkem1024::secret_key_bytes());
+        mlkem1024::PublicKey::from_bytes(&public_key).expect("valid ML-KEM public key");
+        mlkem1024::SecretKey::from_bytes(&secret_key).expect("valid ML-KEM secret key");
     }
 
     #[test]

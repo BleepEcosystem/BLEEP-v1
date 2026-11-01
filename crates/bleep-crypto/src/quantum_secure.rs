@@ -1,8 +1,8 @@
-// Real quantum-safe encryption and signature using pqcrypto-kyber and pqcrypto
+// Real quantum-safe encryption and signatures using pqcrypto-mlkem and pqcrypto
 use aes_gcm::aead::Aead;
 use aes_gcm::KeyInit;
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use pqcrypto_kyber::kyber1024;
+use pqcrypto_mlkem::mlkem1024;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::kem::SharedSecret;
 use pqcrypto_traits::sign::DetachedSignature;
@@ -10,31 +10,31 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 
 pub struct KyberAESHybrid {
-    pub public_key: kyber1024::PublicKey,
-    pub secret_key: kyber1024::SecretKey,
+    pub public_key: mlkem1024::PublicKey,
+    pub secret_key: mlkem1024::SecretKey,
 }
 
 impl KyberAESHybrid {
     pub fn keygen() -> Self {
-        let (pk, sk) = kyber1024::keypair();
+        let (pk, sk) = mlkem1024::keypair();
         KyberAESHybrid {
             public_key: pk,
             secret_key: sk,
         }
     }
 
-    pub fn encapsulate(&self) -> (Vec<u8>, kyber1024::Ciphertext) {
-        let (ss, ct) = kyber1024::encapsulate(&self.public_key);
+    pub fn encapsulate(&self) -> (Vec<u8>, mlkem1024::Ciphertext) {
+        let (ss, ct) = mlkem1024::encapsulate(&self.public_key);
         (ss.as_bytes().to_vec(), ct)
     }
 
-    pub fn decapsulate(&self, ct: &kyber1024::Ciphertext) -> Vec<u8> {
-        let ss = kyber1024::decapsulate(ct, &self.secret_key);
+    pub fn decapsulate(&self, ct: &mlkem1024::Ciphertext) -> Vec<u8> {
+        let ss = mlkem1024::decapsulate(ct, &self.secret_key);
         ss.as_bytes().to_vec()
     }
 
-    /// Encrypt data using Kyber shared secret and AES-GCM
-    pub fn encrypt(&self, data: &[u8]) -> (Vec<u8>, kyber1024::Ciphertext, Vec<u8>) {
+    /// Encrypt data using an ML-KEM shared secret and AES-GCM
+    pub fn encrypt(&self, data: &[u8]) -> (Vec<u8>, mlkem1024::Ciphertext, Vec<u8>) {
         let (ss, ct) = self.encapsulate();
         let key = Key::<Aes256Gcm>::from_slice(&ss[..32]); // AES-256 key
         let cipher = Aes256Gcm::new(key);
@@ -45,11 +45,11 @@ impl KyberAESHybrid {
         (ciphertext, ct, nonce_bytes.to_vec())
     }
 
-    /// Decrypt data using Kyber shared secret and AES-GCM
+    /// Decrypt data using an ML-KEM shared secret and AES-GCM
     pub fn decrypt(
         &self,
         ciphertext: &[u8],
-        ct: &kyber1024::Ciphertext,
+        ct: &mlkem1024::Ciphertext,
         nonce_bytes: &[u8],
     ) -> Vec<u8> {
         let ss = self.decapsulate(ct);
