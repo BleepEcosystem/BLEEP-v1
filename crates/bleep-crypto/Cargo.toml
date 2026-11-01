@@ -25,6 +25,8 @@ kyber = "0.1.1"
 # AEAD Encryption (Kyber + AES Hybrid)
 aes-gcm = "0.10.3"
 rand = "0.8.5"
+argon2 = "0.5"
+zeroize = { version = "1.8", features = ["derive"] }
 
 blake3 = "1.3"  # Modern, fast cryptographic hash
 
@@ -65,3 +67,4 @@ hmac   = "0.12"
 proptest = "1.4"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"

@@ -28,8 +28,6 @@ use bleep_connect_types::{
 };
 use bleep_crypto::pq_crypto::{DigitalSignature, PublicKey, SecretKey, SignatureScheme};
 
-const L3_PROOF_KEY_SEED: &[u8] = b"BLEEP-L3-PROOF-SEED-V1-UNIQUE-AND-STATIC";
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PROOF CACHE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,10 +102,9 @@ pub struct ProofGenerator {
 
 impl ProofGenerator {
     pub fn new() -> BleepConnectResult<Self> {
-        let (_public_key, signing_key) = SignatureScheme::keygen_from_seed(L3_PROOF_KEY_SEED)
-            .map_err(|e| {
-                BleepConnectError::InternalError(format!("Proof key generation failed: {e:?}"))
-            })?;
+        let (_public_key, signing_key) = SignatureScheme::keygen().map_err(|e| {
+            BleepConnectError::InternalError(format!("Proof key generation failed: {e:?}"))
+        })?;
         Ok(Self {
             cache: Arc::new(ProofCache::new(1_000)),
             signing_key,
@@ -122,12 +119,9 @@ impl ProofGenerator {
     }
 
     pub fn new_shared() -> BleepConnectResult<(ProofGenerator, ProofVerifier)> {
-        let (public_key, signing_key) = SignatureScheme::keygen_from_seed(L3_PROOF_KEY_SEED)
-            .map_err(|e| {
-                BleepConnectError::InternalError(format!(
-                    "Shared proof key generation failed: {e:?}"
-                ))
-            })?;
+        let (public_key, signing_key) = SignatureScheme::keygen().map_err(|e| {
+            BleepConnectError::InternalError(format!("Shared proof key generation failed: {e:?}"))
+        })?;
         let generator = ProofGenerator::new_with_signing_key(signing_key)?;
         let verifier = ProofVerifier::new_with_public_key(public_key)?;
         Ok((generator, verifier))
@@ -198,10 +192,9 @@ pub struct ProofVerifier {
 
 impl ProofVerifier {
     pub fn new() -> BleepConnectResult<Self> {
-        let (public_key, _signing_key) = SignatureScheme::keygen_from_seed(L3_PROOF_KEY_SEED)
-            .map_err(|e| {
-                BleepConnectError::InternalError(format!("Verifier key generation failed: {e:?}"))
-            })?;
+        let (public_key, _signing_key) = SignatureScheme::keygen().map_err(|e| {
+            BleepConnectError::InternalError(format!("Verifier key generation failed: {e:?}"))
+        })?;
         Ok(Self { public_key })
     }
 
@@ -210,12 +203,9 @@ impl ProofVerifier {
     }
 
     pub fn new_shared() -> BleepConnectResult<(ProofGenerator, ProofVerifier)> {
-        let (public_key, signing_key) = SignatureScheme::keygen_from_seed(L3_PROOF_KEY_SEED)
-            .map_err(|e| {
-                BleepConnectError::InternalError(format!(
-                    "Shared proof key generation failed: {e:?}"
-                ))
-            })?;
+        let (public_key, signing_key) = SignatureScheme::keygen().map_err(|e| {
+            BleepConnectError::InternalError(format!("Shared proof key generation failed: {e:?}"))
+        })?;
         let generator = ProofGenerator::new_with_signing_key(signing_key)?;
         let verifier = ProofVerifier::new_with_public_key(public_key)?;
         Ok((generator, verifier))

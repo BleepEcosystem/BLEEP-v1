@@ -26,7 +26,7 @@ pub mod decision_verification;
 
 // === Re-exports for broader ecosystem access ===
 pub use anti_asset_loss::*;
-pub use block::{derive_block_keypair, Block, BlockHeader, CompactBlock};
+pub use block::{Block, BlockHeader, CompactBlock};
 pub use block_validation::*;
 pub use blockchain::*;
 pub use decision_attestation::*;

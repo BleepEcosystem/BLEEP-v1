@@ -27,6 +27,13 @@ jobs:
       - name: Reject proof-verification stubs and placeholder keys
         run: bash scripts/check_no_stub_verifiers.sh
 
+      - name: Reject skipped zeroization fields
+        run: |
+          if grep -rn --include='*.rs' 'zeroize(skip)' crates/; then
+            echo "FATAL: zeroize(skip) neutralizes ZeroizeOnDrop" >&2
+            exit 1
+          fi
+
   # ------------------------------------------------------------------ #
   #  1. FORMAT CHECK                                                     #
   # ------------------------------------------------------------------ #

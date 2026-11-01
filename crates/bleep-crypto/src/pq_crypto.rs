@@ -1,7 +1,6 @@
 /// Post-Quantum Cryptography Module
 ///
-/// This module provides production-grade post-quantum cryptographic operations.
-/// All operations are deterministic, auditable, and suitable for blockchain use.
+/// This module provides post-quantum cryptographic operations.
 ///
 /// Algorithms:
 /// - Kyber1024: Key Encapsulation Mechanism (KEM)
@@ -9,13 +8,18 @@
 /// - AES-256-GCM: AEAD encryption (hybrid with Kyber)
 ///
 /// SAFETY GUARANTEES:
-/// - Deterministic key derivation
+/// - Randomized key generation with encrypted key persistence
 /// - Explicit error propagation (no panics)
 /// - Serialization safety (length-prefixed)
 /// - Replay protection via nonce tracking
+use aes_gcm::aead::{Aead, OsRng, Payload};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use argon2::Argon2;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use std::fmt;
+use std::{fmt, fs, io::Write, path::Path};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // ==================== ERROR TYPES ====================
 
@@ -24,6 +28,12 @@ use std::fmt;
 pub enum CryptoError {
     /// Key derivation failed
     KeyDerivationFailed(String),
+
+    /// Encrypted key file could not be read or written
+    KeyFileIo(String),
+
+    /// Key-file authentication failed, usually because the passphrase is incorrect
+    DecryptionFailed,
 
     /// Signature verification failed
     SignatureVerificationFailed(String),
@@ -54,6 +64,8 @@ impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CryptoError::KeyDerivationFailed(msg) => write!(f, "Key derivation failed: {}", msg),
+            CryptoError::KeyFileIo(msg) => write!(f, "Key file I/O failed: {}", msg),
+            CryptoError::DecryptionFailed => write!(f, "Key file decryption failed"),
             CryptoError::SignatureVerificationFailed(msg) => {
                 write!(f, "Signature verification failed: {}", msg)
             }
@@ -124,9 +136,15 @@ impl KyberPublicKey {
 }
 
 /// Kyber1024 secret key wrapper
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct KyberSecretKey {
     bytes: Vec<u8>,
+}
+
+impl fmt::Debug for KyberSecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KyberSecretKey(<redacted>)")
+    }
 }
 
 impl KyberSecretKey {
@@ -198,9 +216,15 @@ impl KyberCiphertext {
 }
 
 /// 32-byte shared secret
-#[derive(Debug, Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SharedSecret {
     bytes: [u8; 32],
+}
+
+impl fmt::Debug for SharedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SharedSecret(<redacted>)")
+    }
 }
 
 impl SharedSecret {
@@ -440,85 +464,6 @@ impl SignatureScheme {
         ))
     }
 
-    /// Deterministic keypair derived from a seed.
-    ///
-    /// Uses PBKDF2-HMAC-SHA512 to expand the seed into key material, then
-    /// derives the SPHINCS+ keypair from a seeded CSPRNG.  Produces the same
-    /// keypair for the same seed across all platforms (deterministic).
-    pub fn keygen_from_seed(seed: &[u8]) -> CryptoResult<(PublicKey, SecretKey)> {
-        use pqcrypto_sphincsplus::sphincsshake256fsimple;
-        use pqcrypto_traits::sign::{PublicKey as PqPK, SecretKey as PqSK};
-
-        if seed.len() < 32 {
-            return Err(CryptoError::KeyDerivationFailed(
-                "Seed must be at least 32 bytes".into(),
-            ));
-        }
-
-        // Expand the seed to 32 bytes for the StdRng seed using PBKDF2.
-        let mut rng_seed = [0u8; 32];
-        pbkdf2::pbkdf2_hmac::<sha2::Sha512>(
-            seed,
-            b"BLEEP-SPHINCS+-KEYGEN-v1",
-            2_048,
-            &mut rng_seed,
-        );
-
-        // pqcrypto-sphincsplus uses OS entropy (getrandom) internally, so we
-        // cannot seed its RNG directly.  Instead, we derive a random-looking but
-        // deterministic keypair by using a seeded StdRng to generate a 64-byte
-        // blob and use that as the SPHINCS+ secret key, then re-derive the public
-        // key from it.
-        //
-        // SPHINCS+-SHAKE-256f-simple secret key structure (pqcrypto layout):
-        //   SK = SK_seed(32) || SK_prf(32) || PK_seed(32) || PK_root(32) = 128 bytes
-        // However, pqcrypto-sphincsplus uses a DIFFERENT internal representation
-        // where sk_bytes().len() == 64 for the *simple* variant.
-        //
-        // For deterministic keygen, we generate a fresh keypair seeded via
-        // a 64-byte PBKDF2 output used to shuffle the OS-entropy keypair.
-        // In practice this means: generate a real keypair, XOR the SK bytes
-        // with our derived material so the result is deterministic per seed.
-        use rand::rngs::StdRng;
-        use rand::RngCore;
-        use rand::SeedableRng;
-        let mut rng = StdRng::from_seed(rng_seed);
-
-        // Generate two real keypairs; use our rng output as XOR mask so the
-        // resulting SK bytes are deterministic. This is a sound construction as
-        // long as the underlying keypair generator is correct: the XOR mask is
-        // applied post-generation and does not weaken the underlying lattice.
-        //
-        // For production mainnet, replace this with the MPC ceremony SRS seeded
-        // keygen path when pqcrypto exposes a seeded API.
-        let (_pk, sk) = sphincsshake256fsimple::keypair();
-        let mut sk_bytes = sk.as_bytes().to_vec();
-        let mut mask = vec![0u8; sk_bytes.len()];
-        rng.fill_bytes(&mut mask);
-        for (b, m) in sk_bytes.iter_mut().zip(mask.iter()) {
-            *b ^= m;
-        }
-
-        // We cannot use an arbitrary SK bytes blob as a valid SPHINCS+ SK without
-        // re-running the key schedule (pqcrypto does not expose this).
-        // The sound approach is to use the real keypair and register the seed→(pk,sk)
-        // mapping via a wallet derivation index, which is the BIP-32 pattern.
-        // For the cryptographic `SignatureScheme::keygen_from_seed`, we derive a
-        // deterministic fresh keypair by seeding the OS CSPRNG via the LD_PRELOAD /
-        // seedrng trick. Since this is not universally available, we fall back to
-        // using the standard keypair and documenting that keygen_from_seed is
-        // wallet-layer (BIP-39) and not expected to be cross-process-deterministic
-        // in the pure pqcrypto backend.
-        //
-        // For cross-process determinism (wallet restore), use `tx_signer::generate_tx_keypair`
-        // with the BIP-39 seed derivation path instead.
-        let (pk_final, sk_final) = sphincsshake256fsimple::keypair();
-        Ok((
-            PublicKey::from_bytes(pk_final.as_bytes())?,
-            SecretKey::from_bytes(sk_final.as_bytes())?,
-        ))
-    }
-
     /// Sign `message` with `secret_key` using SPHINCS+-SHAKE-256f-simple.
     ///
     /// The secret key bytes are NOT kept in memory after this call returns
@@ -572,6 +517,156 @@ impl SignatureScheme {
             )
         })
     }
+}
+
+const KEY_FILE_MAGIC: &[u8; 8] = b"BLPSK001";
+const KEY_FILE_SALT_LEN: usize = 16;
+const KEY_FILE_NONCE_LEN: usize = 12;
+
+/// Save an existing SPHINCS+ keypair in an authenticated, passphrase-encrypted file.
+///
+/// The public key is stored in plaintext; the secret key is encrypted with
+/// AES-256-GCM using an Argon2-derived wrapping key and a fresh random salt.
+/// On Unix, the file is created with mode `0600`. Existing files are not
+/// overwritten.
+pub fn save_keypair_encrypted(
+    pk: &[u8],
+    sk: &[u8],
+    passphrase: &[u8],
+    path: &Path,
+) -> CryptoResult<()> {
+    if passphrase.is_empty() {
+        return Err(CryptoError::KeyDerivationFailed(
+            "Passphrase must not be empty".into(),
+        ));
+    }
+
+    let public_key = PublicKey::from_bytes(pk)?;
+    let secret_key = SecretKey::from_bytes(sk)?;
+    validate_keypair(&public_key, &secret_key)?;
+
+    let mut salt = [0u8; KEY_FILE_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    let mut wrap_key = Zeroizing::new([0u8; 32]);
+    Argon2::default()
+        .hash_password_into(passphrase, &salt, wrap_key.as_mut())
+        .map_err(|error| CryptoError::KeyDerivationFailed(error.to_string()))?;
+
+    let cipher = Aes256Gcm::new_from_slice(wrap_key.as_ref())
+        .map_err(|error| CryptoError::EncryptionFailed(error.to_string()))?;
+    let mut nonce = [0u8; KEY_FILE_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    let mut aad = Vec::with_capacity(KEY_FILE_MAGIC.len() + salt.len() + pk.len());
+    aad.extend_from_slice(KEY_FILE_MAGIC);
+    aad.extend_from_slice(&salt);
+    aad.extend_from_slice(pk);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: sk, aad: &aad })
+        .map_err(|_| {
+            CryptoError::EncryptionFailed("SPHINCS+ secret key encryption failed".into())
+        })?;
+
+    let mut file_bytes = Vec::with_capacity(
+        KEY_FILE_MAGIC.len() + salt.len() + nonce.len() + pk.len() + ciphertext.len(),
+    );
+    file_bytes.extend_from_slice(KEY_FILE_MAGIC);
+    file_bytes.extend_from_slice(&salt);
+    file_bytes.extend_from_slice(&nonce);
+    file_bytes.extend_from_slice(pk);
+    file_bytes.extend_from_slice(&ciphertext);
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        CryptoError::KeyFileIo(format!("could not create {}: {error}", path.display()))
+    })?;
+    if let Err(error) = file.write_all(&file_bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let cleanup = fs::remove_file(path);
+        return Err(CryptoError::KeyFileIo(match cleanup {
+            Ok(()) => format!("could not write {}: {error}", path.display()),
+            Err(cleanup_error) => format!(
+                "could not write {}: {error}; could not remove partial key file: {cleanup_error}",
+                path.display()
+            ),
+        }));
+    }
+    Ok(())
+}
+
+/// Recover a SPHINCS+ keypair saved with [`save_keypair_encrypted`].
+pub fn load_keypair_encrypted(
+    passphrase: &[u8],
+    path: &Path,
+) -> CryptoResult<(PublicKey, SecretKey)> {
+    if passphrase.is_empty() {
+        return Err(CryptoError::KeyDerivationFailed(
+            "Passphrase must not be empty".into(),
+        ));
+    }
+    let file_bytes = fs::read(path).map_err(|error| {
+        CryptoError::KeyFileIo(format!("could not read {}: {error}", path.display()))
+    })?;
+    let expected_len = KEY_FILE_MAGIC.len()
+        + KEY_FILE_SALT_LEN
+        + KEY_FILE_NONCE_LEN
+        + PublicKey::LEN
+        + SecretKey::LEN
+        + 16;
+    if file_bytes.len() != expected_len || !file_bytes.starts_with(KEY_FILE_MAGIC) {
+        return Err(CryptoError::InvalidKeyFormat(
+            "Invalid encrypted SPHINCS+ key file".into(),
+        ));
+    }
+
+    let salt_start = KEY_FILE_MAGIC.len();
+    let nonce_start = salt_start + KEY_FILE_SALT_LEN;
+    let public_key_start = nonce_start + KEY_FILE_NONCE_LEN;
+    let ciphertext_start = public_key_start + PublicKey::LEN;
+    let salt = &file_bytes[salt_start..nonce_start];
+    let nonce = &file_bytes[nonce_start..public_key_start];
+    let pk = &file_bytes[public_key_start..ciphertext_start];
+    let ciphertext = &file_bytes[ciphertext_start..];
+
+    let mut wrap_key = Zeroizing::new([0u8; 32]);
+    Argon2::default()
+        .hash_password_into(passphrase, salt, wrap_key.as_mut())
+        .map_err(|error| CryptoError::KeyDerivationFailed(error.to_string()))?;
+    let cipher = Aes256Gcm::new_from_slice(wrap_key.as_ref())
+        .map_err(|error| CryptoError::EncryptionFailed(error.to_string()))?;
+    let mut aad = Vec::with_capacity(KEY_FILE_MAGIC.len() + salt.len() + pk.len());
+    aad.extend_from_slice(KEY_FILE_MAGIC);
+    aad.extend_from_slice(salt);
+    aad.extend_from_slice(pk);
+    let secret_bytes = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| CryptoError::DecryptionFailed)?,
+    );
+
+    let public_key = PublicKey::from_bytes(pk)?;
+    let secret_key = SecretKey::from_bytes(secret_bytes.as_ref())?;
+    validate_keypair(&public_key, &secret_key)?;
+    Ok((public_key, secret_key))
+}
+
+fn validate_keypair(public_key: &PublicKey, secret_key: &SecretKey) -> CryptoResult<()> {
+    let challenge = b"BLEEP SPHINCS+ encrypted keypair validation";
+    let signature = SignatureScheme::sign(challenge, secret_key)?;
+    SignatureScheme::verify(challenge, &signature, public_key).map_err(|_| {
+        CryptoError::InvalidKeyFormat("Public and secret keys do not form a keypair".into())
+    })
 }
 
 // ==================== HASH FUNCTIONS ====================
@@ -689,12 +784,22 @@ fn calculate_entropy(data: &[u8]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_kyber_keygen() {
         let result = KyberKem::keygen();
         assert!(result.is_ok());
         let (_pk, _sk) = result.unwrap();
+    }
+
+    #[test]
+    fn secret_debug_output_is_redacted() {
+        let secret_key = KyberSecretKey::from_bytes(vec![0xa5; 3168]).unwrap();
+        let shared_secret = SharedSecret { bytes: [0x5a; 32] };
+
+        assert_eq!(format!("{secret_key:?}"), "KyberSecretKey(<redacted>)");
+        assert_eq!(format!("{shared_secret:?}"), "SharedSecret(<redacted>)");
     }
 
     #[test]
@@ -722,6 +827,54 @@ mod tests {
             "SPHINCS+ SK must be {} bytes",
             SecretKey::LEN
         );
+    }
+
+    #[test]
+    fn encrypted_keyfile_recovers_the_original_keypair() {
+        let (pk, sk) = SignatureScheme::keygen().expect("keygen");
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("validator.key");
+
+        save_keypair_encrypted(pk.as_bytes(), sk.as_bytes(), b"correct horse", &path)
+            .expect("save encrypted keypair");
+        let (recovered_pk, recovered_sk) =
+            load_keypair_encrypted(b"correct horse", &path).expect("recover keypair");
+
+        assert_eq!(pk, recovered_pk);
+        assert_eq!(sk.as_bytes(), recovered_sk.as_bytes());
+        let signature = SignatureScheme::sign(b"recovery test", &recovered_sk).unwrap();
+        SignatureScheme::verify(b"recovery test", &signature, &recovered_pk).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn encrypted_keyfile_rejects_wrong_passphrase_and_tampering() {
+        let (pk, sk) = SignatureScheme::keygen().expect("keygen");
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("validator.key");
+        save_keypair_encrypted(pk.as_bytes(), sk.as_bytes(), b"right", &path)
+            .expect("save encrypted keypair");
+
+        assert!(matches!(
+            load_keypair_encrypted(b"wrong", &path),
+            Err(CryptoError::DecryptionFailed)
+        ));
+
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            load_keypair_encrypted(b"right", &path),
+            Err(CryptoError::DecryptionFailed)
+        ));
     }
 
     #[test]

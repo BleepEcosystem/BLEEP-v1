@@ -182,7 +182,8 @@ impl MessageProtocol {
 
     /// Respond to a Kyber KEM session initiation.
     pub fn accept_session(&self, peer_id: &NodeId, kem_ciphertext: &[u8]) -> P2PResult<()> {
-        let shared_secret = kyber_decapsulate(kem_ciphertext, &self.local_kyber.secret_key.0)?;
+        let shared_secret =
+            kyber_decapsulate(kem_ciphertext, self.local_kyber.secret_key.expose())?;
         let context = self.session_context(peer_id);
         let session_key = SessionKey::from_shared_secret(&shared_secret, &context);
         self.sessions.insert(

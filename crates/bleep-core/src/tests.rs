@@ -19,8 +19,7 @@ mod tests {
         let transactions = vec![];
         let mut block = Block::new(1, transactions, "genesis_hash".to_string());
 
-        let seed = [7u8; 32];
-        let (public_key, private_key) = SignatureScheme::keygen_from_seed(&seed).unwrap();
+        let (public_key, private_key) = SignatureScheme::keygen().unwrap();
         block
             .sign_block_with_pk(private_key.as_bytes(), public_key.as_bytes())
             .unwrap();
@@ -40,8 +39,7 @@ mod tests {
 
         let mut new_block = Block::new(1, transactions, genesis_block.compute_hash());
 
-        let seed = [8u8; 32];
-        let (public_key, private_key) = SignatureScheme::keygen_from_seed(&seed).unwrap();
+        let (public_key, private_key) = SignatureScheme::keygen().unwrap();
         new_block
             .sign_block_with_pk(private_key.as_bytes(), public_key.as_bytes())
             .unwrap();

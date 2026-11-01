@@ -900,7 +900,7 @@ fn sign_and_add_legacy_block(
     mut block: Block,
     config: &ProducerConfig,
 ) -> bool {
-    if let Err(e) = block.sign_block(&config.validator_sk) {
+    if let Err(e) = block.sign_block_with_pk(&config.validator_sk, &config.validator_pk) {
         warn!("Legacy sign_block: {}", e);
         return false;
     }

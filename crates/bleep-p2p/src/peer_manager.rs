@@ -391,7 +391,7 @@ mod tests {
         let id = NodeId::from_bytes(&identity_kp.public_key_bytes());
         let addr: SocketAddr = format!("10.0.0.{}:9000", seed).parse().unwrap();
         let challenge = b"test-handshake-context";
-        let sig = sphincs_sign(challenge, &sphincs_kp.secret_key.0).unwrap();
+        let sig = sphincs_sign(challenge, sphincs_kp.secret_key.expose()).unwrap();
         pm.add_peer(
             id.clone(),
             addr,
@@ -433,7 +433,7 @@ mod tests {
         let sphincs_kp = SphincsKeypair::generate();
         let addr: SocketAddr = "10.0.0.3:9001".parse().unwrap();
         let challenge = b"re-admit-context";
-        let sig = sphincs_sign(challenge, &sphincs_kp.secret_key.0).unwrap();
+        let sig = sphincs_sign(challenge, sphincs_kp.secret_key.expose()).unwrap();
         let result = pm
             .add_peer(
                 id.clone(),

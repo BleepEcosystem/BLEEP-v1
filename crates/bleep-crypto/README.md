@@ -67,6 +67,12 @@ let secret_key: Zeroizing<Vec<u8>> = Zeroizing::new(generate_key_bytes());
 
 Primary interface for SPHINCS+, Kyber-1024, and Falcon operations. Re-exported at the crate root.
 
+SPHINCS+ key generation uses OS randomness, not a seed. Persist a generated
+keypair with `save_keypair_encrypted(pk.as_bytes(), sk.as_bytes(), passphrase,
+path)` and recover it with `load_keypair_encrypted(passphrase, path)`. Argon2
+derives the AES-256-GCM wrapping key; the public key is stored in plaintext,
+and Unix key files are created with mode `0600`.
+
 ```rust
 use bleep_crypto::{sphincs_sign, sphincs_verify, kyber_encapsulate, kyber_decapsulate};
 

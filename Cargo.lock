@@ -1319,6 +1319,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "argon2",
  "bincode 2.0.1",
  "blake2",
  "blake3",
@@ -1343,11 +1344,13 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "sha3",
+ "tempfile",
  "thiserror 1.0.69",
  "tiny-keccak 2.0.2",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

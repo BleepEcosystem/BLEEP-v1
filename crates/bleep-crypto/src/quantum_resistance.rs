@@ -1,27 +1,42 @@
 use log::info;
+use pqcrypto_kyber::kyber1024;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
+use pqcrypto_traits::kem::{PublicKey as _, SecretKey as _};
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 // --- BLEEP Quantum Resistance API ---
-pub fn generate_falcon_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+pub fn generate_sphincs_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
     let (pk, sk) = sphincsshake256fsimple::keypair();
     Ok((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()))
 }
 
-pub fn generate_kyber_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
-    let (pk, sk) = sphincsshake256fsimple::keypair();
+pub fn generate_kyber_keypair() -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
+    let (pk, sk) = kyber1024::keypair();
     Ok((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()))
 }
 
-pub fn sign_transaction<T: std::fmt::Debug>(_tx: &mut T) -> Result<(), Box<dyn std::error::Error>> {
-    // In production, sign with Falcon or Kyber. Here, dummy.
-    Ok(())
+pub fn canonical_encode<T: Serialize>(tx: &T) -> Result<Vec<u8>, Box<dyn Error>> {
+    Ok(bincode::serde::encode_to_vec(
+        tx,
+        bincode::config::standard(),
+    )?)
+}
+
+pub fn sign_transaction<T: Serialize>(
+    tx: &T,
+    sk: &sphincsshake256fsimple::SecretKey,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let message = canonical_encode(tx)?;
+    Ok(sphincsshake256fsimple::detached_sign(&message, sk)
+        .as_bytes()
+        .to_vec())
 }
 
 /// Initialize cryptography module logging
@@ -38,15 +53,15 @@ pub fn init_crypto_logging() {
     // Logging init failures are non-fatal and should not propagate as errors
 }
 
-/// Initialize Falcon post-quantum signing support.
-pub fn init_falcon() -> Result<(), Box<dyn std::error::Error>> {
+/// Initialize SPHINCS+ post-quantum signing support.
+pub fn init_sphincs() -> Result<(), Box<dyn Error>> {
     init_crypto_logging();
-    info!("Falcon post-quantum signing initialized.");
+    info!("SPHINCS+ post-quantum signing initialized.");
     Ok(())
 }
 
 /// Initialize Kyber post-quantum key encapsulation support.
-pub fn init_kyber() -> Result<(), Box<dyn std::error::Error>> {
+pub fn init_kyber() -> Result<(), Box<dyn Error>> {
     init_crypto_logging();
     info!("Kyber post-quantum key encapsulation initialized.");
     Ok(())
@@ -54,11 +69,52 @@ pub fn init_kyber() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Run basic quantum-resistant key generation self-tests.
 pub fn run_keygen_tests() -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, sk) = generate_falcon_keypair()?;
-    if pk.is_empty() || sk.is_empty() {
-        Err("Falcon key generation returned empty key material".into())
+    let (sphincs_pk, sphincs_sk) = generate_sphincs_keypair()?;
+    let (kyber_pk, kyber_sk) = generate_kyber_keypair()?;
+    if sphincs_pk.is_empty() || sphincs_sk.is_empty() || kyber_pk.is_empty() || kyber_sk.is_empty()
+    {
+        Err("Post-quantum key generation returned empty key material".into())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kyber_generator_returns_kyber_1024_keys() {
+        let (public_key, secret_key) = generate_kyber_keypair().expect("Kyber keygen");
+        assert_eq!(public_key.len(), kyber1024::public_key_bytes());
+        assert_eq!(secret_key.len(), kyber1024::secret_key_bytes());
+        kyber1024::PublicKey::from_bytes(&public_key).expect("valid Kyber public key");
+        kyber1024::SecretKey::from_bytes(&secret_key).expect("valid Kyber secret key");
+    }
+
+    #[test]
+    fn sphincs_generator_and_transaction_signing_roundtrip() {
+        let (public_key, secret_key) = generate_sphincs_keypair().expect("SPHINCS+ keygen");
+        let secret_key =
+            sphincsshake256fsimple::SecretKey::from_bytes(&secret_key).expect("valid secret key");
+        let public_key =
+            sphincsshake256fsimple::PublicKey::from_bytes(&public_key).expect("valid public key");
+        let transaction = Transaction {
+            id: 1,
+            from: "alice".into(),
+            to: "bob".into(),
+            amount: 25,
+            timestamp: 123,
+            signature: vec![],
+            public_key: public_key.as_bytes().to_vec(),
+        };
+
+        let signature = sign_transaction(&transaction, &secret_key).expect("sign transaction");
+        let signature = sphincsshake256fsimple::DetachedSignature::from_bytes(&signature)
+            .expect("valid detached signature");
+        let message = canonical_encode(&transaction).expect("canonical encoding");
+        sphincsshake256fsimple::verify_detached_signature(&signature, &message, &public_key)
+            .expect("verify transaction signature");
     }
 }
 

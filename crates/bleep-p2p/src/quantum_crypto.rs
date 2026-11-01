@@ -20,7 +20,7 @@ use pqcrypto_traits::{
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::{P2PError, P2PResult};
 
@@ -32,15 +32,27 @@ use crate::error::{P2PError, P2PResult};
 #[derive(Clone)]
 pub struct KyberPublicKey(pub Vec<u8>);
 
-/// Kyber-1024 secret key.
-#[derive(Clone, ZeroizeOnDrop)]
-pub struct KyberSecretKey(#[zeroize(skip)] pub Vec<u8>);
+/// Kyber-1024 secret key. Contents are zeroized on drop. Not publicly readable.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct KyberSecretKey(Vec<u8>);
+
+impl KyberSecretKey {
+    pub fn from_bytes(bytes: &[u8]) -> P2PResult<Self> {
+        let secret_key = kyber1024::SecretKey::from_bytes(bytes)
+            .map_err(|e| P2PError::Crypto(format!("Kyber sk parse: {e}")))?;
+        Ok(Self(secret_key.as_bytes().to_vec()))
+    }
+
+    pub(crate) fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 /// A generated Kyber keypair.
 #[derive(Clone)]
 pub struct KyberKeypair {
     pub public_key: KyberPublicKey,
-    pub secret_key: KyberSecretKey,
+    pub(crate) secret_key: KyberSecretKey,
 }
 
 impl KyberKeypair {
@@ -49,7 +61,8 @@ impl KyberKeypair {
         let (pk, sk) = kyber1024::keypair();
         KyberKeypair {
             public_key: KyberPublicKey(pk.as_bytes().to_vec()),
-            secret_key: KyberSecretKey(sk.as_bytes().to_vec()),
+            secret_key: KyberSecretKey::from_bytes(sk.as_bytes())
+                .expect("Kyber keypair generator returns a valid secret key"),
         }
     }
 }
@@ -81,14 +94,26 @@ pub fn kyber_decapsulate(ciphertext_bytes: &[u8], sk_bytes: &[u8]) -> P2PResult<
 #[derive(Clone, Debug)]
 pub struct SphincsPublicKey(pub Vec<u8>);
 
-/// SPHINCS+-SHAKE-256f-simple secret key.
-#[derive(Clone, ZeroizeOnDrop)]
-pub struct SphincsSecretKey(#[zeroize(skip)] pub Vec<u8>);
+/// SPHINCS+-SHAKE-256f-simple secret key. Contents are zeroized on drop.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct SphincsSecretKey(Vec<u8>);
+
+impl SphincsSecretKey {
+    pub fn from_bytes(bytes: &[u8]) -> P2PResult<Self> {
+        let secret_key = sphincs::SecretKey::from_bytes(bytes)
+            .map_err(|e| P2PError::Crypto(format!("SPHINCS+ sk parse: {e}")))?;
+        Ok(Self(secret_key.as_bytes().to_vec()))
+    }
+
+    pub(crate) fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 #[derive(Clone)]
 pub struct SphincsKeypair {
     pub public_key: SphincsPublicKey,
-    pub secret_key: SphincsSecretKey,
+    pub(crate) secret_key: SphincsSecretKey,
 }
 
 impl SphincsKeypair {
@@ -96,12 +121,13 @@ impl SphincsKeypair {
         let (pk, sk) = sphincs::keypair();
         SphincsKeypair {
             public_key: SphincsPublicKey(pk.as_bytes().to_vec()),
-            secret_key: SphincsSecretKey(sk.as_bytes().to_vec()),
+            secret_key: SphincsSecretKey::from_bytes(sk.as_bytes())
+                .expect("SPHINCS+ keypair generator returns a valid secret key"),
         }
     }
 
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        sphincs_sign(message, &self.secret_key.0).expect("SPHINCS+ signing failed")
+        sphincs_sign(message, self.secret_key.expose()).expect("SPHINCS+ signing failed")
     }
 
     pub fn public_key_bytes(&self) -> Vec<u8> {
@@ -187,9 +213,8 @@ pub fn aes_gcm_decrypt(key: &[u8; 32], nonce_and_ciphertext: &[u8]) -> P2PResult
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A Kyber-derived session key shared between two peers.
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SessionKey {
-    #[zeroize(skip)]
     pub key_material: [u8; 32],
     pub peer_id_bytes: Vec<u8>,
 }
@@ -290,7 +315,7 @@ impl NodeIdentity {
 
     /// Sign message with SPHINCS+ (quantum-safe — used for identity proofs).
     pub fn sign_sphincs(&self, message: &[u8]) -> P2PResult<Vec<u8>> {
-        sphincs_sign(message, &self.sphincs_keypair.secret_key.0)
+        sphincs_sign(message, self.sphincs_keypair.secret_key.expose())
     }
 }
 
@@ -302,7 +327,7 @@ mod tests {
     fn test_kyber_encap_decap_roundtrip() {
         let kp = KyberKeypair::generate();
         let (ct, ss1) = kyber_encapsulate(&kp.public_key.0).unwrap();
-        let ss2 = kyber_decapsulate(&ct, &kp.secret_key.0).unwrap();
+        let ss2 = kyber_decapsulate(&ct, kp.secret_key.expose()).unwrap();
         assert_eq!(ss1, ss2, "Shared secrets must match");
         assert_eq!(ss1.len(), 32, "Kyber-1024 shared secret is 32 bytes");
     }
@@ -311,14 +336,14 @@ mod tests {
     fn test_sphincs_sign_verify() {
         let kp = SphincsKeypair::generate();
         let msg = b"bleep identity proof test";
-        let sig = sphincs_sign(msg, &kp.secret_key.0).unwrap();
+        let sig = sphincs_sign(msg, kp.secret_key.expose()).unwrap();
         sphincs_verify(msg, &sig, &kp.public_key.0).unwrap();
     }
 
     #[test]
     fn test_sphincs_verify_wrong_message_fails() {
         let kp = SphincsKeypair::generate();
-        let sig = sphincs_sign(b"correct", &kp.secret_key.0).unwrap();
+        let sig = sphincs_sign(b"correct", kp.secret_key.expose()).unwrap();
         assert!(sphincs_verify(b"wrong", &sig, &kp.public_key.0).is_err());
     }
 
