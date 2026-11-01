@@ -109,6 +109,25 @@ fn zkp_module_generates_hash_proofs() {
 }
 
 #[test]
+fn zkp_verification_fails_closed() {
+    assert!(!crate::zkp_verification::verify_proof("0x0102").expect("valid hex"));
+    assert!(!crate::zkp_verification::verify_proof("").expect("empty hex"));
+    assert!(crate::zkp_verification::verify_proof("not-hex").is_err());
+    assert!(!BLEEPZKPModule::unconfigured()
+        .verify_proof(&[1, 2], &[3, 4])
+        .expect("verification result"));
+}
+
+#[test]
+fn unconfigured_zkp_module_cannot_generate_proofs() {
+    let module = BLEEPZKPModule::unconfigured();
+    assert!(matches!(
+        module.generate_proof(b"transaction"),
+        Err(crate::zkp_verification::BLEEPError::ProofGenerationFailed)
+    ));
+}
+
+#[test]
 fn asset_recovery_requires_matching_proof_and_approval_threshold() {
     let mut request = AssetRecoveryRequest::new(
         "asset".to_string(),

@@ -1,8 +1,6 @@
 #![recursion_limit = "256"]
 
 //! # bleep-rpc
-//!
-//! Provides `rpc_routes_with_state()` used by `main.rs`, and re-exports
 //! `RpcState` so the node can update live counters.
 //!
 //! - `GET /rpc/state/{address}` — live balance + nonce from `StateManager`
@@ -39,7 +37,7 @@ use warp::Filter;
 
 use bleep_auth::{AuthError, AuthService, Permission, SessionClaims};
 use bleep_core::{transaction_pool::TransactionPool, Blockchain};
-use bleep_crypto::{tx_payload, verify_tx_signature};
+use bleep_crypto::verify_tx_signature;
 use bleep_p2p::{p2p_node::P2PNode, types::MessageType};
 
 // ─── Auth rejection ──────────────────────────────────────────────────────────
@@ -69,6 +67,7 @@ pub struct RpcState {
     pub txs_processed: Arc<std::sync::atomic::AtomicU64>,
     pub peer_count: Arc<std::sync::atomic::AtomicUsize>,
     pub chain_height: Arc<std::sync::atomic::AtomicU64>,
+    pub blocks_per_epoch: Option<u64>,
     /// Live `StateManager` for `/rpc/state` and `/rpc/proof`.
     pub state_mgr: Option<Arc<Mutex<StateManager>>>,
     /// Live `ValidatorRegistry` for `/rpc/validator/*` (Sprint 6).
@@ -118,6 +117,7 @@ impl RpcState {
             txs_processed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             chain_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            blocks_per_epoch: None,
             state_mgr: None,
             validator_registry: None,
             slashing_engine: None,
@@ -205,6 +205,11 @@ impl RpcState {
         self
     }
 
+    pub fn with_blocks_per_epoch(mut self, blocks_per_epoch: u64) -> Self {
+        self.blocks_per_epoch = (blocks_per_epoch > 0).then_some(blocks_per_epoch);
+        self
+    }
+
     pub fn uptime_secs(&self) -> u64 {
         now_secs().saturating_sub(self.start_time)
     }
@@ -221,6 +226,18 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn canonical_block_hash_at(
+    blockchain: Option<&Arc<RwLock<Blockchain>>>,
+    height: u64,
+) -> Option<[u8; 32]> {
+    let blockchain = blockchain?.read().ok()?;
+    let block = blockchain
+        .chain
+        .iter()
+        .find(|block| block.index == height)?;
+    hex::decode(block.compute_hash()).ok()?.try_into().ok()
 }
 
 fn with_rpc_state(
@@ -423,6 +440,135 @@ impl StakeRequest {
     pub fn parse(data: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(data)
     }
+}
+
+fn validator_stake_payload(
+    chain_id: &str,
+    account: &str,
+    label: &str,
+    amount: u64,
+    timestamp: u64,
+    nonce: u64,
+    kyber_public_key: &[u8],
+) -> [u8; 32] {
+    bleep_crypto::tx_signer::validator_stake_payload(
+        chain_id,
+        account,
+        label,
+        amount,
+        timestamp,
+        nonce,
+        kyber_public_key,
+    )
+}
+
+fn register_validator_stake(
+    req: StakeRequest,
+    signing_public_key: Vec<u8>,
+    proof: Vec<u8>,
+    kyber_public_key: Vec<u8>,
+    state: &RpcState,
+) -> Result<StakeResp, (warp::http::StatusCode, String)> {
+    let requested = u128::from(req.amount);
+    if requested == 0 {
+        return Err((
+            warp::http::StatusCode::BAD_REQUEST,
+            "stake amount must be greater than zero".into(),
+        ));
+    }
+
+    let kyber_public_key = bleep_crypto::pq_crypto::KyberPublicKey::from_bytes(kyber_public_key)
+        .and_then(|key| {
+            key.validate()?;
+            bleep_crypto::pq_crypto::KyberKem::encapsulate(&key).map(|_| key)
+        })
+        .map_err(|error| {
+            (
+                warp::http::StatusCode::BAD_REQUEST,
+                format!("invalid Kyber-1024 public key: {error}"),
+            )
+        })?;
+    let kyber_public_key = kyber_public_key.to_vec();
+
+    let account = bleep_crypto::tx_signer::derive_account_address(&signing_public_key);
+    let validator_id = format!("val-{}-{}", req.label, req.timestamp);
+    let bond_account = format!("bleep:validator-bond:{validator_id}");
+    let (Some(state_manager), Some(registry), Some(blocks_per_epoch)) = (
+        &state.state_mgr,
+        &state.validator_registry,
+        state.blocks_per_epoch.filter(|v| *v > 0),
+    ) else {
+        return Err((
+            warp::http::StatusCode::SERVICE_UNAVAILABLE,
+            "staking state, validator registry, or genesis epoch configuration is unavailable"
+                .into(),
+        ));
+    };
+
+    let mut registry = registry.lock();
+    if registry.get(&validator_id).is_some() {
+        return Err((
+            warp::http::StatusCode::CONFLICT,
+            "validator is already registered".into(),
+        ));
+    }
+
+    let mut state_manager = state_manager.lock();
+    let nonce = state_manager.get_nonce(&account);
+    let chain_id = std::env::var("BLEEP_CHAIN_ID")
+        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+    let request_hash = validator_stake_payload(
+        &chain_id,
+        &account,
+        &req.label,
+        req.amount,
+        req.timestamp,
+        nonce,
+        &kyber_public_key,
+    );
+    if !verify_tx_signature(&request_hash, &proof, &signing_public_key) {
+        return Err((
+            warp::http::StatusCode::UNAUTHORIZED,
+            "validator key did not sign the stake and Kyber-key binding".into(),
+        ));
+    }
+
+    let current_epoch = state
+        .chain_height
+        .load(std::sync::atomic::Ordering::Relaxed)
+        / blocks_per_epoch;
+    let signing_key_id = hex::encode(&signing_public_key);
+    let identity = ValidatorIdentity::new(
+        validator_id.clone(),
+        kyber_public_key,
+        signing_key_id,
+        requested,
+        current_epoch,
+    )
+    .map_err(|error| (warp::http::StatusCode::BAD_REQUEST, error))?;
+
+    if state_manager.get_balance(&account) < requested {
+        return Err((
+            warp::http::StatusCode::PAYMENT_REQUIRED,
+            "insufficient balance to bond requested stake".into(),
+        ));
+    }
+    if !state_manager.apply_transfer(&account, &bond_account, requested, nonce, req.timestamp) {
+        return Err((
+            warp::http::StatusCode::BAD_REQUEST,
+            "stake debit failed (stale timestamp, nonce, or bond-account overflow)".into(),
+        ));
+    }
+
+    registry
+        .register_validator(identity)
+        .map_err(|error| (warp::http::StatusCode::CONFLICT, error))?;
+
+    Ok(StakeResp {
+        validator_id,
+        status: "candidate".into(),
+        stake: requested,
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -808,7 +954,7 @@ pub fn rpc_routes_with_state(
         ))
         .and(with_rpc_state(rpc.clone()))
         .and_then(
-            |req: StakeRequest, _claims: SessionClaims, st: RpcState| async move {
+            |req: StakeRequest, claims: SessionClaims, st: RpcState| async move {
                 if req.tx_type.trim().to_lowercase() != "stake" {
                     let resp = warp::reply::with_status(
                         warp::reply::json(&ErrResp {
@@ -821,121 +967,93 @@ pub fn rpc_routes_with_state(
                 let signing_public_key = match req
                     .signing_public_key
                     .as_deref()
-                    .and_then(|v| hex::decode(v).ok())
+                    .and_then(|value| hex::decode(value).ok())
                 {
                     Some(key) if key.len() == 64 => key,
                     _ => {
-                        return Ok(warp::reply::with_status(
+                        let resp = warp::reply::with_status(
                             warp::reply::json(&ErrResp {
                                 error: "signing_public_key is required".into(),
                             }),
                             warp::http::StatusCode::BAD_REQUEST,
-                        ));
+                        );
+                        return Ok::<_, warp::Rejection>(resp);
                     }
                 };
-                let proof = match req.proof.as_deref().and_then(|v| hex::decode(v).ok()) {
-                    Some(proof) if !proof.is_empty() => proof,
-                    _ => {
-                        return Ok(warp::reply::with_status(
+                let proof = match req
+                    .proof
+                    .as_deref()
+                    .and_then(|value| hex::decode(value).ok())
+                {
+                    Some(proof) => proof,
+                    None => {
+                        let resp = warp::reply::with_status(
                             warp::reply::json(&ErrResp {
                                 error: "proof is required".into(),
                             }),
                             warp::http::StatusCode::BAD_REQUEST,
-                        ));
+                        );
+                        return Ok::<_, warp::Rejection>(resp);
                     }
                 };
-                if !verify_tx_signature(
-                    &tx_payload(
-                        bleep_crypto::DEFAULT_CHAIN_ID,
-                        &req.label,
-                        "validator",
-                        req.amount,
-                        req.timestamp,
-                        0,
-                    ),
-                    &proof,
-                    &signing_public_key,
-                ) {
-                    return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrResp {
-                            error: "proof-of-possession verification failed".into(),
-                        }),
-                        warp::http::StatusCode::UNAUTHORIZED,
-                    ));
-                }
-                match &st.validator_registry {
+                let kyber_public_key = match req
+                    .kyber_public_key
+                    .as_deref()
+                    .and_then(|value| hex::decode(value).ok())
+                {
+                    Some(key) => key,
                     None => {
                         let resp = warp::reply::with_status(
                             warp::reply::json(&ErrResp {
-                                error: "ValidatorRegistry unavailable".into(),
+                                error: "kyber_public_key is required".into(),
                             }),
-                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                            warp::http::StatusCode::BAD_REQUEST,
                         );
-                        Ok::<_, warp::Rejection>(resp)
+                        return Ok::<_, warp::Rejection>(resp);
                     }
-                    Some(reg_arc) => {
-                        let mut reg = reg_arc.lock();
-                        // Derive a validator ID from label + timestamp
-                        let validator_id = format!("val-{}-{}", req.label, req.timestamp);
-                        let stake = req.amount as u128;
-                        // Register or update stake
-                        match reg.get(&validator_id) {
-                            Some(_) => {
-                                // Already exists — just return current stake
-                                let v = reg.get(&validator_id).unwrap();
-                                let resp = StakeResp {
-                                    validator_id: validator_id.clone(),
-                                    status: "already_registered".into(),
-                                    stake: v.stake,
-                                };
-                                Ok::<_, warp::Rejection>(warp::reply::with_status(
-                                    warp::reply::json(&resp),
-                                    warp::http::StatusCode::OK,
-                                ))
-                            }
-                            None => {
-                                // Create new validator identity.
-                                // ValidatorIdentity::new(id, kyber_pk[1568], signing_key_id, stake, epoch)
-                                // Kyber pk is zeroed here; real integration in Sprint 7.
-                                let mock_kyber_pk = req
-                                    .kyber_public_key
-                                    .as_deref()
-                                    .and_then(|v| hex::decode(v).ok())
-                                    .unwrap_or_default();
-                                let signing_key_id = hex::encode(&signing_public_key);
-                                let identity = ValidatorIdentity::new(
-                                    validator_id.clone(),
-                                    mock_kyber_pk,
-                                    signing_key_id,
-                                    stake,
-                                    0,
-                                );
-                                match identity {
-                                    Err(e) => {
-                                        let resp = warp::reply::with_status(
-                                            warp::reply::json(&ErrResp { error: e }),
-                                            warp::http::StatusCode::BAD_REQUEST,
-                                        );
-                                        Ok::<_, warp::Rejection>(resp)
-                                    }
-                                    Ok(ident) => {
-                                        let current_stake = ident.stake;
-                                        let _ = reg.register_validator(ident);
-                                        let _ = reg.activate_validator(&validator_id);
-                                        let resp = StakeResp {
-                                            validator_id,
-                                            status: "registered".into(),
-                                            stake: current_stake,
-                                        };
-                                        Ok::<_, warp::Rejection>(warp::reply::with_status(
-                                            warp::reply::json(&resp),
-                                            warp::http::StatusCode::OK,
-                                        ))
-                                    }
-                                }
-                            }
-                        }
-                    }
+                };
+
+                let Some(auth_service) = st.auth_service.as_ref() else {
+                    let resp = warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "AuthService unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                    return Ok::<_, warp::Rejection>(resp);
+                };
+                let registered_kyber_key = auth_service
+                    .identities
+                    .read()
+                    .await
+                    .get_node(&claims.sub)
+                    .and_then(|identity| hex::decode(&identity.kyber_pubkey_hex).ok());
+                if registered_kyber_key.as_deref() != Some(kyber_public_key.as_slice()) {
+                    let resp = warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Kyber key does not match the authenticated node identity"
+                                .into(),
+                        }),
+                        warp::http::StatusCode::FORBIDDEN,
+                    );
+                    return Ok::<_, warp::Rejection>(resp);
+                }
+
+                match register_validator_stake(
+                    req,
+                    signing_public_key,
+                    proof,
+                    kyber_public_key,
+                    &st,
+                ) {
+                    Ok(resp) => Ok::<_, warp::Rejection>(warp::reply::with_status(
+                        warp::reply::json(&resp),
+                        warp::http::StatusCode::CREATED,
+                    )),
+                    Err((status, error)) => Ok(warp::reply::with_status(
+                        warp::reply::json(&ErrResp { error }),
+                        status,
+                    )),
                 }
             },
         );
@@ -1105,20 +1223,34 @@ pub fn rpc_routes_with_state(
 
                 match (&st.slashing_engine, &st.validator_registry) {
                     (Some(engine_arc), Some(reg_arc)) => {
+                        let Some(blocks_per_epoch) = st.blocks_per_epoch else {
+                            return Box::new(warp::reply::with_status(
+                                warp::reply::json(&ErrResp {
+                                    error: "Genesis blocks_per_epoch is unavailable".into(),
+                                }),
+                                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                            ));
+                        };
+                        let canonical_block = match &evidence {
+                            SlashingEvidence::DoubleSigning { height, .. } => {
+                                canonical_block_hash_at(st.blockchain.as_ref(), *height)
+                                    .map(|hash| (*height, hash))
+                            }
+                            _ => None,
+                        };
                         let mut engine = engine_arc.lock();
                         let mut reg = reg_arc.lock();
                         let timestamp = now_secs();
-                        // Derive epoch from live chain height.
-                        // Testnet: 100 blocks/epoch. Mainnet: 1,000 blocks/epoch.
-                        // The testnet value is used here; mainnet nodes set this via
-                        // genesis config. Using the wrong epoch stamps evidence with
-                        // an incorrect epoch ID, corrupting the slashing audit trail.
-                        const TESTNET_BLOCKS_PER_EPOCH: u64 = 100;
                         let current_epoch =
                             st.chain_height.load(std::sync::atomic::Ordering::Relaxed)
-                                / TESTNET_BLOCKS_PER_EPOCH;
-                        match engine.process_evidence(evidence, &mut reg, current_epoch, timestamp)
-                        {
+                                / blocks_per_epoch;
+                        match engine.process_evidence_with_canonical_chain(
+                            evidence,
+                            &mut reg,
+                            current_epoch,
+                            timestamp,
+                            |height, hash| canonical_block == Some((height, *hash)),
+                        ) {
                             Ok(event) => Box::new(warp::reply::json(&EvidenceResp {
                                 accepted: true,
                                 slash_amount: event.slash_amount,
@@ -1324,6 +1456,15 @@ struct SubmitIntentReq {
     escrow_proof: Option<String>,
     nonce: Option<u64>,
     signature: Option<String>,
+}
+
+fn decode_escrow_proof(proof: Option<&str>) -> Result<Vec<u8>, &'static str> {
+    let proof = proof.ok_or("MissingEscrowProof")?;
+    let decoded = hex::decode(proof).map_err(|_| "InvalidEscrowProof")?;
+    if decoded.is_empty() {
+        return Err("InvalidEscrowProof");
+    }
+    Ok(decoded)
 }
 
 #[derive(Serialize)]
@@ -1683,39 +1824,74 @@ fn connect_submit_intent(
             Some(Permission::SubmitTransaction),
         ))
         .and(with_arc_state(state))
-        .map(
-            |req: SubmitIntentReq, _claims: SessionClaims, st: Arc<RpcState>| {
+        .and_then(
+            |req: SubmitIntentReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
                 use bleep_interop::types::{
                     AssetId, AssetType, ChainId, InstantIntent, UniversalAddress,
                 };
-                use sha2::{Digest, Sha256};
+                use warp::Reply as _;
 
-                let src = ChainId::from_name(&req.source_chain).unwrap_or(ChainId::BLEEP);
-                let dst = ChainId::from_name(&req.dest_chain).unwrap_or(ChainId::Ethereum);
+                let reject = |error: &str, status| {
+                    warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({ "error": error })),
+                        status,
+                    )
+                    .into_response()
+                };
+                let bad_request = warp::http::StatusCode::BAD_REQUEST;
+
+                let escrow_proof = match decode_escrow_proof(req.escrow_proof.as_deref()) {
+                    Ok(proof) => proof,
+                    Err(error) => return Ok::<_, warp::Rejection>(reject(error, bad_request)),
+                };
+
+                let src = match ChainId::from_name(&req.source_chain) {
+                    Some(chain) => chain,
+                    None => {
+                        return Ok::<_, warp::Rejection>(reject("InvalidSourceChain", bad_request))
+                    }
+                };
+                let dst = match ChainId::from_name(&req.dest_chain) {
+                    Some(chain) => chain,
+                    None => {
+                        return Ok::<_, warp::Rejection>(reject(
+                            "InvalidDestinationChain",
+                            bad_request,
+                        ))
+                    }
+                };
+                let escrow_tx_hash = match req.escrow_tx_hash.as_deref() {
+                    Some(hash) if !hash.trim().is_empty() => hash.to_string(),
+                    _ => {
+                        return Ok::<_, warp::Rejection>(reject(
+                            "MissingEscrowTransaction",
+                            bad_request,
+                        ))
+                    }
+                };
+                let signature = match req.signature.as_deref() {
+                    Some(signature) => match hex::decode(signature) {
+                        Ok(signature) if !signature.is_empty() => signature,
+                        _ => {
+                            return Ok::<_, warp::Rejection>(reject(
+                                "InvalidSignature",
+                                bad_request,
+                            ))
+                        }
+                    },
+                    None => {
+                        return Ok::<_, warp::Rejection>(reject("MissingSignature", bad_request))
+                    }
+                };
 
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-
-                // Deterministic intent ID from (source_chain, dest_chain, source_amount, sender, nonce)
                 let nonce = req.nonce.unwrap_or(ts);
-                let mut h = Sha256::new();
-                h.update(req.source_chain.as_bytes());
-                h.update(req.dest_chain.as_bytes());
-                h.update(req.source_amount.to_le_bytes());
-                h.update(req.sender_address.as_bytes());
-                h.update(nonce.to_le_bytes());
-                let id_arr: [u8; 32] = h.finalize().into();
-
-                let escrow_proof = req
-                    .escrow_proof
-                    .as_ref()
-                    .and_then(|s| hex::decode(s).ok())
-                    .unwrap_or_else(|| vec![1, 2, 3]); // devnet placeholder
 
                 let intent = InstantIntent {
-                    intent_id: id_arr,
+                    intent_id: [0; 32],
                     created_at: ts,
                     expires_at: ts + 300,
                     source_chain: src,
@@ -1739,48 +1915,32 @@ fn connect_submit_intent(
                     max_solver_reward_bps: req.max_solver_reward_bps.unwrap_or(50),
                     slippage_tolerance_bps: req.slippage_tolerance_bps.unwrap_or(100),
                     nonce,
-                    signature: req
-                        .signature
-                        .as_ref()
-                        .and_then(|s| hex::decode(s).ok())
-                        .unwrap_or_else(|| vec![1]),
-                    escrow_tx_hash: req
-                        .escrow_tx_hash
-                        .clone()
-                        .unwrap_or_else(|| format!("0xescrow-{}", hex::encode(&id_arr[..4]))),
+                    signature,
+                    escrow_tx_hash,
                     escrow_proof,
                 };
 
-                let intent_id_hex = hex::encode(id_arr);
-
                 match &st.connect_orchestrator {
-                    Some(orc) => {
-                        // Submit to live intent pool asynchronously
-                        let orc2 = Arc::clone(orc);
-                        let intent2 = intent.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = orc2.submit_intent(intent2).await {
-                                tracing::warn!("Intent submit error: {}", e);
-                            }
-                        });
-                        warp::reply::with_status(
-                            warp::reply::json(&SubmitIntentResp {
-                                intent_id: intent_id_hex,
-                                status: "AuctionOpen".to_string(),
-                            }),
-                            warp::http::StatusCode::CREATED,
-                        )
-                    }
-                    None => {
-                        // Stub mode: return accepted status without live pool
-                        warp::reply::with_status(
-                            warp::reply::json(&SubmitIntentResp {
-                                intent_id: intent_id_hex,
-                                status: "Pending".to_string(),
-                            }),
-                            warp::http::StatusCode::CREATED,
-                        )
-                    }
+                    Some(orc) => match orc.submit_intent(intent).await {
+                        Ok(id) => Ok::<_, warp::Rejection>(
+                            warp::reply::with_status(
+                                warp::reply::json(&SubmitIntentResp {
+                                    intent_id: hex::encode(id),
+                                    status: "AuctionOpen".to_string(),
+                                }),
+                                warp::http::StatusCode::CREATED,
+                            )
+                            .into_response(),
+                        ),
+                        Err(error) => Ok(reject(
+                            &format!("EscrowVerificationFailed: {error}"),
+                            bad_request,
+                        )),
+                    },
+                    None => Ok(reject(
+                        "ConnectOrchestratorUnavailable",
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
                 }
             },
         )
@@ -3869,6 +4029,92 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use warp::test::request;
 
+    #[test]
+    fn escrow_proof_input_has_no_placeholder_fallback() {
+        assert_eq!(decode_escrow_proof(None), Err("MissingEscrowProof"));
+        assert_eq!(
+            decode_escrow_proof(Some("not-hex")),
+            Err("InvalidEscrowProof")
+        );
+        assert_eq!(decode_escrow_proof(Some("")), Err("InvalidEscrowProof"));
+        assert_eq!(decode_escrow_proof(Some("a55a")), Ok(vec![0xA5, 0x5A]));
+    }
+
+    #[test]
+    fn validator_stake_binds_kyber_key_and_bonds_without_activation() {
+        use bleep_crypto::pq_crypto::KyberKem;
+
+        let (signing_public_key, secret_key) = generate_tx_keypair();
+        let account = bleep_crypto::tx_signer::derive_account_address(&signing_public_key);
+        let (kyber_key, _) = KyberKem::keygen().unwrap();
+        let kyber_public_key = kyber_key.to_vec();
+        let (substituted_key, _) = KyberKem::keygen().unwrap();
+        let substituted_key = substituted_key.to_vec();
+        let amount = 3_000;
+        let timestamp = now_secs();
+        let payload = validator_stake_payload(
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            &account,
+            "candidate-a",
+            amount,
+            timestamp,
+            0,
+            &kyber_public_key,
+        );
+        let proof = sign_tx_payload(&payload, &secret_key).unwrap();
+        let req = StakeRequest {
+            tx_type: "stake".into(),
+            amount,
+            label: "candidate-a".into(),
+            timestamp,
+            signing_public_key: Some(hex::encode(&signing_public_key)),
+            proof: Some(hex::encode(&proof)),
+            kyber_public_key: Some(hex::encode(&kyber_public_key)),
+        };
+
+        let state_manager = Arc::new(Mutex::new(StateManager::new()));
+        state_manager.lock().set_balance(&account, 10_000);
+        let registry = Arc::new(Mutex::new(ValidatorRegistry::new()));
+        let state = RpcState::new()
+            .with_state_manager(Arc::clone(&state_manager))
+            .with_validator_registry(Arc::clone(&registry))
+            .with_blocks_per_epoch(100);
+        state
+            .chain_height
+            .store(250, std::sync::atomic::Ordering::Relaxed);
+
+        let error = match register_validator_stake(
+            req.clone(),
+            signing_public_key.clone(),
+            proof.clone(),
+            substituted_key,
+            &state,
+        ) {
+            Ok(_) => panic!("a mismatched Kyber key must not register"),
+            Err(error) => error,
+        };
+        assert_eq!(error.0, warp::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(state_manager.lock().get_balance(&account), 10_000);
+        assert_eq!(state_manager.lock().get_nonce(&account), 0);
+        assert_eq!(registry.lock().active_validator_count(), 0);
+
+        let response =
+            register_validator_stake(req, signing_public_key, proof, kyber_public_key, &state)
+                .unwrap();
+        let bond_account = format!("bleep:validator-bond:{}", response.validator_id);
+        assert_eq!(response.status, "candidate");
+        assert_eq!(response.stake, u128::from(amount));
+        assert_eq!(state_manager.lock().get_balance(&account), 7_000);
+        assert_eq!(state_manager.lock().get_balance(&bond_account), 3_000);
+        assert_eq!(state_manager.lock().get_nonce(&account), 1);
+
+        let registry = registry.lock();
+        let validator = registry.get(&response.validator_id).unwrap();
+        assert_eq!(validator.state, bleep_consensus::ValidatorState::Inactive);
+        assert_eq!(validator.joined_epoch, 2);
+        assert_eq!(registry.active_validator_count(), 0);
+    }
+
     fn sign_pat_request<T: Serialize>(
         endpoint: &str,
         request: &T,
@@ -4481,8 +4727,6 @@ pub fn ceremony_status_route(
                     { "id": "transparent-setup", "timestamp": 1_746_000_000, "attested": true }
                 ],
                 "participant_count":  1,
-                "min_required":       1,
-                "srs_hash":           "transparent-no-setup-required",
                 "transcript_url":     "https://docs.bleep.network/stark-transparent-setup",
                 "security_claim":     "STARK proofs require no trusted setup - transparent and post-quantum secure.",
                 "verified_by":        ["bleep-core-team", "external-audit-trail-of-bleep"]
@@ -4658,7 +4902,6 @@ pub fn layer3_intent_submit_route(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             let amount = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
-            // Generate deterministic intent ID
             let seed = sender
                 .bytes()
                 .fold(0u64, |a, b| a.wrapping_add(b as u64))
@@ -4677,12 +4920,7 @@ pub fn layer3_intent_submit_route(
 }
 
 // ── GET /rpc/benchmark/latest ────────────────────────────────────────────────
-// Returns the live performance benchmark result from the running BlockProducer.
-// All figures are accumulated from real wall-clock block production timings via
-// BlockProducer::benchmark_result(), which calls record_block() on every produced
-// block with actual Instant measurements. If the node was just started and no
-// blocks have been produced yet, the endpoint returns current accumulator state
-// (zeroes) rather than fabricated constants.
+// Returns live performance benchmark data from BlockProducer.
 
 pub fn benchmark_result_route(
     state: Arc<RpcState>,
@@ -4692,7 +4930,6 @@ pub fn benchmark_result_route(
         .and(warp::get())
         .map(move || {
             let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-
             match st.block_producer.as_ref() {
                 Some(producer) => {
                     let r = producer.benchmark_result();
@@ -4718,8 +4955,6 @@ pub fn benchmark_result_route(
                     Box::new(warp::reply::json(&json)) as Box<dyn warp::Reply>
                 }
                 None => {
-                    // BlockProducer not attached — node is in RPC-only mode.
-                    // Return an explicit not-ready response rather than fabricated data.
                     let json = serde_json::json!({
                         "chain_height":  height,
                         "source":        "no BlockProducer attached",

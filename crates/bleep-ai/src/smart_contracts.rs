@@ -74,7 +74,7 @@ impl SmartContractAutomation {
         Self {
             governance: Arc::new(RwLock::new(SelfAmendingGovernance::new())),
             ai_decision: Arc::new(BLEEPAIDecisionModule::new()),
-            zkp_module: Arc::new(BLEEPZKPModule::new()),
+            zkp_module: Arc::new(BLEEPZKPModule::unconfigured()),
             interoperability: Arc::new(BLEEPInteroperabilityModule::new()),
             bleep_connect: Arc::new(BLEEPConnect::new()),
             consensus: Arc::new(RwLock::new(BLEEPAdaptiveConsensus::new())),
@@ -148,8 +148,14 @@ impl SmartContractAutomation {
         &self,
         contract_data: &[u8],
     ) -> Result<ApiResponse, String> {
-        let proof = self.zkp_module.generate_proof(contract_data)?;
-        let is_valid = self.zkp_module.verify_proof(&proof, contract_data)?;
+        let proof = self
+            .zkp_module
+            .generate_proof(contract_data)
+            .map_err(|error| error.to_string())?;
+        let is_valid = self
+            .zkp_module
+            .verify_proof(&proof, contract_data)
+            .map_err(|error| error.to_string())?;
 
         if is_valid {
             Ok(ApiResponse {

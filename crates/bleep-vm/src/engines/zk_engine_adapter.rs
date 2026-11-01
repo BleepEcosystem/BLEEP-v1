@@ -1,6 +1,6 @@
 //! ZK Engine Adapter (Post-Quantum)
 //! Bridges the ZkProof subsystem to the Engine trait.
-//! Verifies transparent hash-based proofs and optionally executes post-verify WASM.
+//! Parses proof packets and rejects proofs without cryptographic verification.
 
 use crate::error::{VmError, VmResult};
 use crate::execution::{execution_context::ExecutionContext, state_transition::StateDiff};
@@ -29,21 +29,14 @@ impl ZkEngineAdapter {
         }
     }
 
-    /// Structural verification of a post-quantum transparent proof.
-    /// Checks that proof deserializes correctly and state transitions are consistent.
+    /// Parse a proof packet, but do not treat structure alone as verification.
     fn verify_pq_proof(proof_bytes: &[u8]) -> VmResult<bool> {
         use crate::engines::zk_engine::ExecutionProof;
 
-        // Structural check: deserialize the proof
         match ExecutionProof::deserialize(proof_bytes) {
-            Ok(proof) => {
-                debug!(
-                    state_before = hex::encode(proof.state_root_before),
-                    state_after = hex::encode(proof.state_root_after),
-                    gas_used = proof.gas_used,
-                    "Post-quantum proof verified successfully"
-                );
-                Ok(true)
+            Ok(_) => {
+                warn!("Proof packet is well-formed but no cryptographic verifier is configured");
+                Ok(false)
             }
             Err(e) => {
                 warn!("Failed to parse post-quantum proof: {:?}", e);
@@ -236,7 +229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_small_packet_succeeds_structurally() {
+    async fn test_well_formed_packet_is_rejected_without_verifier() {
         let e = ZkEngineAdapter::new();
         let c = ctx(1_000_000);
         let proof = crate::engines::zk_engine::ExecutionProof::new(
@@ -250,7 +243,7 @@ mod tests {
             .execute(&c, &proof.serialize(), &[], 1_000_000)
             .await
             .unwrap();
-        assert!(result.success);
+        assert!(!result.success);
     }
 
     #[tokio::test]

@@ -507,7 +507,7 @@ fn keypair_from_seed(seed: &[u8; 64]) -> Result<(Vec<u8>, Vec<u8>), WalletError>
             private_key: private_key.as_bytes().to_vec(),
             mnemonic: mnemonic_obj,
         ai_decision_module: Arc::new(BLEEPAIDecisionModule::new()),
-        zkp_module: Arc::new(BLEEPZKPModule::new()),
+        zkp_module: Arc::new(BLEEPZKPModule::unconfigured()),
         consensus_module: Arc::new(Mutex::new(BLEEPAdaptiveConsensus::new())),
         bleep_connect: Arc::new(BLEEPConnect::new()),
         state_merkle: Arc::new(Mutex::new(StateMerkle::new())),

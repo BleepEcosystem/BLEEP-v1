@@ -119,7 +119,7 @@ decl_module! {
             let sender = ensure_signed(origin)?;
 
             // ZKP validation logic
-            let zkp_module = BLEEPZKPModule::new(); // Assume ZKP module is initialized
+            let zkp_module = BLEEPZKPModule::unconfigured();
             let is_valid = zkp_module.verify_proof(&proof, &public_inputs)
                 .map_err(|_| Error::<T>::ProofValidationError)?;
 
@@ -186,7 +186,7 @@ mod bleep_pat {
 
             // Verify proof before updating owner
             let public_inputs = vec![caller.as_ref().to_vec(), new_owner.as_ref().to_vec()];
-            let zkp_module = BLEEPZKPModule::new();
+            let zkp_module = BLEEPZKPModule::unconfigured();
             let is_valid = zkp_module.verify_proof(&proof, &public_inputs)
                 .map_err(|_| "Invalid Proof".to_string())?;
 

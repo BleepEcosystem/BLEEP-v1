@@ -28,6 +28,9 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, instrument};
 
+/// Dedicated account holding native-bridge value pending settlement.
+pub const ESCROW_ACCOUNT: [u8; 32] = [0xEE; 32];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CHAIN ABI ENCODING
 // ─────────────────────────────────────────────────────────────────────────────
@@ -356,6 +359,17 @@ impl ConnectBridge {
         }
 
         let encoded = encode_for_chain(&intent.destination_chain, &intent.calldata)?;
+        let value = i128::try_from(intent.bridge_value).map_err(|_| {
+            VmError::ValidationError("Bridge value exceeds the supported balance range".into())
+        })?;
+        let fee = i128::try_from(intent.relay_fee).map_err(|_| {
+            VmError::ValidationError("Relay fee exceeds the supported balance range".into())
+        })?;
+        value.checked_add(fee).ok_or_else(|| {
+            VmError::ValidationError(
+                "Bridge value and relay fee exceed the supported balance range".into(),
+            )
+        })?;
 
         info!(
             dst     = %intent.destination_chain,
@@ -383,7 +397,9 @@ impl ConnectBridge {
         }
 
         let mut diff = StateDiff::empty();
-        diff.add_balance_update(*sender, -(intent.relay_fee as i128));
+        diff.add_balance_update(*sender, -value);
+        diff.add_balance_update(*sender, -fee);
+        diff.add_balance_update(ESCROW_ACCOUNT, value);
         diff.gas_charged = self.gas_model.cross_chain_base() + (intent.calldata.len() as u64 * 10);
 
         // Emit bridge event (BLEEP Connect contract address = [0xBB; 32])
@@ -535,7 +551,48 @@ mod tests {
         let (msg_id, diff) = bridge.submit(&intent, &sender).await.unwrap();
         assert_ne!(msg_id, [0u8; 32]);
         assert_eq!(diff.balances[&sender].delta, -1_000);
+        assert_eq!(diff.balances[&ESCROW_ACCOUNT].delta, 0);
         assert!(!diff.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_submit_debits_bridge_value_and_credits_escrow() {
+        let bridge = ConnectBridge::new();
+        let sender = [0x01u8; 32];
+        let intent = CrossChainIntent {
+            destination_chain: ChainId::Ethereum,
+            contract: vec![0xABu8; 20],
+            calldata: vec![0x12, 0x34, 0x56],
+            source_gas_limit: 100_000,
+            dest_gas_limit: 200_000,
+            bridge_value: 25_000,
+            relay_fee: 1_000,
+            require_zk_proof: false,
+        };
+
+        let (_, diff) = bridge.submit(&intent, &sender).await.unwrap();
+
+        assert_eq!(diff.balances[&sender].delta, -26_000);
+        assert_eq!(diff.balances[&ESCROW_ACCOUNT].delta, 25_000);
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_unrepresentable_amounts_before_pending() {
+        let bridge = ConnectBridge::new();
+        let sender = [0x01u8; 32];
+        let intent = CrossChainIntent {
+            destination_chain: ChainId::Ethereum,
+            contract: vec![0xABu8; 20],
+            calldata: vec![],
+            source_gas_limit: 100_000,
+            dest_gas_limit: 200_000,
+            bridge_value: u128::MAX,
+            relay_fee: 0,
+            require_zk_proof: false,
+        };
+
+        assert!(bridge.submit(&intent, &sender).await.is_err());
+        assert!(bridge.pending.read().is_empty());
     }
 
     #[tokio::test]

@@ -19,6 +19,8 @@ const SPHINCS_PUBLIC_KEY_LEN: usize = 64;
 const SPHINCS_SIGNATURE_LEN: usize = 49_856;
 const SIGNED_BLOCK_SIGNATURE_LEN: usize = SPHINCS_PUBLIC_KEY_LEN + SPHINCS_SIGNATURE_LEN;
 const EQUIVOCATION_DOMAIN: &[u8] = b"BLEEP:CONSENSUS:VOTE:V1\0";
+const DOUBLE_SIGN_DOMAIN: &[u8] = b"BLEEP_SLASH_DOUBLE_SIGN_V1:";
+const PENALTY_BPS_DENOMINATOR: u128 = 10_000;
 
 /// Evidence of a slashable offense.
 ///
@@ -100,7 +102,7 @@ impl SlashingEvidence {
                     return Err("Block hashes must each be 32 bytes".to_string());
                 }
                 if decoded_hash_1 == decoded_hash_2 {
-                    return Err("Block hashes must be different for double-signing".to_string());
+                    return Err("double-signing requires two distinct block hashes".to_string());
                 }
                 if !has_valid_signature_length(signature_1)
                     || !has_valid_signature_length(signature_2)
@@ -173,11 +175,11 @@ impl SlashingEvidence {
 /// SAFETY: These percentages are immutable once set at genesis.
 #[derive(Debug, Clone)]
 pub struct SlashingPenalty {
-    /// Percentage of stake slashed for double-signing (100% = 1.0)
-    pub double_signing_penalty: f64,
+    /// Basis points of stake slashed for double-signing (100% = 10,000).
+    pub double_signing_penalty_bps: u32,
 
-    /// Percentage of stake slashed for equivocation
-    pub equivocation_penalty: f64,
+    /// Basis points of stake slashed for equivocation.
+    pub equivocation_penalty_bps: u32,
 
     /// Percentage of stake slashed for downtime per missed block
     pub downtime_penalty_per_block: f64,
@@ -186,8 +188,8 @@ pub struct SlashingPenalty {
 impl Default for SlashingPenalty {
     fn default() -> Self {
         SlashingPenalty {
-            double_signing_penalty: 1.0, // Slash 100% of stake for double-signing
-            equivocation_penalty: 0.25,  // Slash 25% of stake
+            double_signing_penalty_bps: 10_000,
+            equivocation_penalty_bps: 2_500,
             downtime_penalty_per_block: 0.001, // Slash 0.1% per missed block
         }
     }
@@ -249,6 +251,27 @@ impl SlashingEngine {
         current_epoch: u64,
         timestamp: u64,
     ) -> Result<SlashingEvent, String> {
+        self.process_evidence_with_canonical_chain(
+            evidence,
+            validator_registry,
+            current_epoch,
+            timestamp,
+            |_, _| false,
+        )
+    }
+
+    /// Process evidence while checking double-signing hashes against the canonical chain.
+    pub fn process_evidence_with_canonical_chain<F>(
+        &mut self,
+        evidence: SlashingEvidence,
+        validator_registry: &mut ValidatorRegistry,
+        current_epoch: u64,
+        timestamp: u64,
+        canonical_chain_contains: F,
+    ) -> Result<SlashingEvent, String>
+    where
+        F: Fn(u64, &[u8; 32]) -> bool,
+    {
         // SAFETY: Verify evidence is well-formed
         evidence.is_well_formed()?;
 
@@ -273,7 +296,7 @@ impl SlashingEngine {
             .get(&validator_id)
             .ok_or_else(|| format!("Validator {} not found", validator_id))?;
 
-        verify_evidence_signatures(&evidence, validator)?;
+        verify_evidence_signatures(&evidence, validator, &canonical_chain_contains)?;
 
         let slash_amount = self.calculate_slash_amount(&evidence, validator)?;
 
@@ -340,25 +363,27 @@ impl SlashingEngine {
     ) -> Result<u128, String> {
         let slash_amount = match evidence {
             SlashingEvidence::DoubleSigning { .. } => {
-                // Double-signing results in full ejection
-                let slash_percentage = self.penalties.double_signing_penalty;
-                let amount = (validator.stake as f64 * slash_percentage) as u128;
+                let amount = validator
+                    .stake
+                    .checked_mul(u128::from(self.penalties.double_signing_penalty_bps))
+                    .ok_or_else(|| "Double-signing penalty calculation overflowed".to_string())?
+                    / PENALTY_BPS_DENOMINATOR;
                 // For double-signing, confiscate the full calculated penalty
                 info!(
-                    "Double-signing detected: will slash {:.2}% of {} microBLEEP from {}",
-                    slash_percentage * 100.0,
-                    validator.stake,
-                    validator.id
+                    "Double-signing detected: will slash {} bps of {} microBLEEP from {}",
+                    self.penalties.double_signing_penalty_bps, validator.stake, validator.id
                 );
                 amount
             }
             SlashingEvidence::Equivocation { .. } => {
-                let penalty_percentage = self.penalties.equivocation_penalty;
-                let amount = (validator.stake as f64 * penalty_percentage) as u128;
+                let amount = validator
+                    .stake
+                    .checked_mul(u128::from(self.penalties.equivocation_penalty_bps))
+                    .ok_or_else(|| "Equivocation penalty calculation overflowed".to_string())?
+                    / PENALTY_BPS_DENOMINATOR;
                 info!(
-                    "Equivocation detected: will slash {:.2}% from {}",
-                    penalty_percentage * 100.0,
-                    validator.id
+                    "Equivocation detected: will slash {} bps from {}",
+                    self.penalties.equivocation_penalty_bps, validator.id
                 );
                 amount.min(validator.stake)
             }
@@ -419,6 +444,7 @@ fn has_valid_signature_length(signature: &[u8]) -> bool {
 fn verify_evidence_signatures(
     evidence: &SlashingEvidence,
     validator: &ValidatorIdentity,
+    canonical_chain_contains: &impl Fn(u64, &[u8; 32]) -> bool,
 ) -> Result<(), String> {
     let public_key_bytes = hex::decode(&validator.signing_key_id)
         .map_err(|_| format!("Validator {} has an invalid signing key ID", validator.id))?;
@@ -440,11 +466,30 @@ fn verify_evidence_signatures(
             signature_2,
             ..
         } => {
-            verify_block_hash(block_hash_1, signature_1, &public_key_bytes, &public_key).map_err(
-                |e| format!("Invalid first double-signing proof at height {height}: {e}"),
-            )?;
-            verify_block_hash(block_hash_2, signature_2, &public_key_bytes, &public_key)
-                .map_err(|e| format!("Invalid second double-signing proof at height {height}: {e}"))
+            let decoded_hash_1 = decode_block_hash(block_hash_1)?;
+            let decoded_hash_2 = decode_block_hash(block_hash_2)?;
+            verify_block_hash(
+                *height,
+                &decoded_hash_1,
+                signature_1,
+                &public_key_bytes,
+                &public_key,
+            )
+            .map_err(|e| format!("Invalid first double-signing proof at height {height}: {e}"))?;
+            verify_block_hash(
+                *height,
+                &decoded_hash_2,
+                signature_2,
+                &public_key_bytes,
+                &public_key,
+            )
+            .map_err(|e| format!("Invalid second double-signing proof at height {height}: {e}"))?;
+            if !canonical_chain_contains(*height, &decoded_hash_1)
+                && !canonical_chain_contains(*height, &decoded_hash_2)
+            {
+                return Err("neither block is in the canonical chain at this height".to_string());
+            }
+            Ok(())
         }
         SlashingEvidence::Equivocation {
             validator_id,
@@ -477,17 +522,30 @@ fn verify_evidence_signatures(
     }
 }
 
+fn decode_block_hash(block_hash: &str) -> Result<[u8; 32], String> {
+    let decoded =
+        hex::decode(block_hash).map_err(|_| "block hash is not valid hexadecimal".to_string())?;
+    decoded
+        .try_into()
+        .map_err(|_| "block hash must be 32 bytes".to_string())
+}
+
+fn double_sign_message(height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(DOUBLE_SIGN_DOMAIN.len() + 8 + block_hash.len());
+    message.extend_from_slice(DOUBLE_SIGN_DOMAIN);
+    message.extend_from_slice(&height.to_be_bytes());
+    message.extend_from_slice(block_hash);
+    message
+}
+
 fn verify_block_hash(
-    block_hash: &str,
+    height: u64,
+    block_hash: &[u8; 32],
     signature: &[u8],
     expected_public_key: &[u8],
     public_key: &sphincsshake256fsimple::PublicKey,
 ) -> Result<(), String> {
-    if block_hash.len() != 64 {
-        return Err("block hash must be 32 bytes of hexadecimal data".to_string());
-    }
-    let message =
-        hex::decode(block_hash).map_err(|_| "block hash is not valid hexadecimal".to_string())?;
+    let message = double_sign_message(height, block_hash);
     verify_validator_signature(signature, &message, expected_public_key, public_key)
 }
 
@@ -579,8 +637,8 @@ mod tests {
         SlashingEvidence::DoubleSigning {
             validator_id: validator_id.to_string(),
             height,
-            signature_1: sign(&hex::decode(&block_hash_1).unwrap(), secret_key),
-            signature_2: sign(&hex::decode(&block_hash_2).unwrap(), secret_key),
+            signature_1: sign(&double_sign_message(height, &[1; 32]), secret_key),
+            signature_2: sign(&double_sign_message(height, &[2; 32]), secret_key),
             block_hash_1,
             block_hash_2,
         }
@@ -648,23 +706,54 @@ mod tests {
         registry.activate_validator("v1").unwrap();
 
         let event = engine
-            .process_evidence(
+            .process_evidence_with_canonical_chain(
                 double_signing_evidence("v1", 100, &secret_key),
                 &mut registry,
                 1,
                 1000,
+                |height, hash| height == 100 && *hash == [1; 32],
             )
             .unwrap();
         assert_eq!(event.slash_amount, 1_000_000);
         assert!(registry.get("v1").unwrap().is_ejected());
         assert!(engine
-            .process_evidence(
+            .process_evidence_with_canonical_chain(
                 double_signing_evidence("v1", 100, &secret_key),
                 &mut registry,
                 1,
-                1001
+                1001,
+                |height, hash| height == 100 && *hash == [1; 32],
             )
             .is_err());
+    }
+
+    #[test]
+    fn test_double_signing_requires_height_bound_signatures_and_canonical_hash() {
+        let mut engine = SlashingEngine::new();
+        let mut registry = ValidatorRegistry::new();
+        let (validator, secret_key) = create_test_validator("v1");
+        registry.register_validator(validator).unwrap();
+        registry.activate_validator("v1").unwrap();
+
+        let mut replayed = double_signing_evidence("v1", 100, &secret_key);
+        if let SlashingEvidence::DoubleSigning { height, .. } = &mut replayed {
+            *height = 101;
+        }
+        assert!(engine
+            .process_evidence_with_canonical_chain(replayed, &mut registry, 1, 1000, |_, _| true,)
+            .is_err());
+
+        assert!(engine
+            .process_evidence_with_canonical_chain(
+                double_signing_evidence("v1", 100, &secret_key),
+                &mut registry,
+                1,
+                1001,
+                |_, _| false,
+            )
+            .is_err());
+        assert_eq!(registry.get("v1").unwrap().stake, 1_000_000);
+        assert!(engine.history().is_empty());
     }
 
     #[test]
@@ -701,7 +790,7 @@ mod tests {
             .process_evidence(evidence, &mut registry, 1, 1000)
             .unwrap();
         assert_eq!(event.evidence_type, "EQUIVOCATION");
-        assert!(event.slash_amount > 0 && event.slash_amount < 1_000_000);
+        assert_eq!(event.slash_amount, 250_000);
     }
 
     #[test]

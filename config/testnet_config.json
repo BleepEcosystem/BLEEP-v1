@@ -23,6 +23,7 @@
   },
   "consensus": {
     "type": "Hybrid-PoS-AI",
+    "blocks_per_epoch": 100,
     "block_time": 2,
     "adaptive_consensus": true,
     "ai_leader_selection": true,

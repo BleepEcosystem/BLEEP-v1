@@ -15,11 +15,7 @@ mod tests {
 
     impl BLEEPZKPModule {
         pub fn mock() -> Arc<Self> {
-            Arc::new(Self::new())
-        }
-
-        pub fn verify_mock_proof(&self, _proof: &[u8], _public_inputs: &[u8]) -> Result<bool, String> {
-            Ok(true)
+            Arc::new(Self::unconfigured())
         }
     }
 

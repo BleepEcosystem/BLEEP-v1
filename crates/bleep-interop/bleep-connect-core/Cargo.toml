@@ -12,6 +12,7 @@ bleep-connect-layer1-social    = { path = "../bleep-connect-layer1-social" }
 bleep-connect-layer2-fullnode  = { path = "../bleep-connect-layer2-fullnode" }
 bleep-connect-layer3-zkproof   = { path = "../bleep-connect-layer3-zkproof" }
 bleep-connect-layer4-instant   = { path = "../bleep-connect-layer4-instant" }
+async-trait = "0.1"
 bleep-connect-adapters         = { path = "../bleep-connect-adapters" }
 bleep-connect-executor         = { path = "../bleep-connect-executor" }
 tokio      = { version = "1.36", features = ["full"] }

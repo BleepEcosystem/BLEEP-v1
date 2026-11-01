@@ -11,27 +11,6 @@ pub mod blake3 {
     }
 }
 
-pub mod zk_snarks {
-    use sha2::{Digest, Sha256};
-
-    /// Verify a zero-knowledge proof
-    /// This is a deterministic verification based on proof structure
-    pub fn verify_proof(proof: &[u8]) -> bool {
-        // Proof must be non-empty and have valid structure
-        if proof.is_empty() {
-            return false;
-        }
-
-        // Verify proof integrity using SHA-256 checksum
-        let mut hasher = Sha256::new();
-        hasher.update(proof);
-        let result = hasher.finalize();
-
-        // Proof is valid if it produces a hash with specific properties
-        result[0] != 0 || result[1] != 0
-    }
-}
-
 /// Sphincs signature verification module
 pub mod sphincs {
     use sha2::{Digest, Sha256};
