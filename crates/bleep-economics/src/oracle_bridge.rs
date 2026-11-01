@@ -1,7 +1,9 @@
-/// ORACLE & BRIDGE INTEGRATION
-///
-/// Trust-minimized integration with external data sources.
-/// Multi-source aggregation, cryptographic commitments, and slashing for false data.
+//! ORACLE & BRIDGE INTEGRATION
+//!
+//! Trust-minimized integration with external data sources.
+//! Multi-source aggregation, cryptographic commitments, and slashing for false data.
+use pqcrypto_sphincsplus::sphincsshake256fsimple;
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -38,21 +40,46 @@ pub struct PriceUpdate {
 }
 
 impl PriceUpdate {
-    /// Compute hash of price data
+    /// Compute a stable hash of the domain-separated signed update payload.
     pub fn compute_hash(&self) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        hasher.update(format!("{:?}", self.source).as_bytes());
-        hasher.update(self.asset.as_bytes());
-        hasher.update(self.price.to_le_bytes());
-        hasher.update(self.timestamp.to_le_bytes());
-        hasher.update(self.confidence_bps.to_le_bytes());
-        hasher.finalize().to_vec()
+        Sha256::digest(oracle_signing_message(self)).to_vec()
     }
 
     /// Verify data freshness
     pub fn is_fresh(&self, current_timestamp: u64, max_age_seconds: u64) -> bool {
         current_timestamp.saturating_sub(self.timestamp) < max_age_seconds
     }
+}
+
+/// Canonical, domain-separated payload signed by oracle operators.
+pub fn oracle_signing_message(update: &PriceUpdate) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(b"BLEEP_ORACLE_PRICE_V1:");
+    message.extend_from_slice(&(update.operator_id.len() as u64).to_be_bytes());
+    message.extend_from_slice(&update.operator_id);
+    message.extend_from_slice(&(update.asset.len() as u64).to_be_bytes());
+    message.extend_from_slice(update.asset.as_bytes());
+    match &update.source {
+        OracleSource::Chainlink(feed) => {
+            message.push(0);
+            message.extend_from_slice(&(feed.len() as u64).to_be_bytes());
+            message.extend_from_slice(feed.as_bytes());
+        }
+        OracleSource::Pyth(feed) => {
+            message.push(1);
+            message.extend_from_slice(&(feed.len() as u64).to_be_bytes());
+            message.extend_from_slice(feed.as_bytes());
+        }
+        OracleSource::Custom(source) => {
+            message.push(2);
+            message.extend_from_slice(&(source.len() as u64).to_be_bytes());
+            message.extend_from_slice(source);
+        }
+    }
+    message.extend_from_slice(&update.price.to_le_bytes());
+    message.extend_from_slice(&update.timestamp.to_le_bytes());
+    message.extend_from_slice(&update.confidence_bps.to_le_bytes());
+    message
 }
 
 /// Aggregated price from multiple oracles
@@ -235,6 +262,8 @@ impl OracleBridgeEngine {
         operator_id: Vec<u8>,
         slashing_balance: u128,
     ) -> Result<(), OracleError> {
+        sphincsshake256fsimple::PublicKey::from_bytes(&operator_id)
+            .map_err(|_| OracleError::InvalidOperatorKey)?;
         if self.operators.contains_key(&operator_id) {
             return Err(OracleError::OperatorAlreadyRegistered);
         }
@@ -257,35 +286,40 @@ impl OracleBridgeEngine {
 
     /// Submit price update from oracle operator
     pub fn submit_price_update(&mut self, update: PriceUpdate) -> Result<(), OracleError> {
-        // Verify operator is registered
-        if !self.operators.contains_key(&update.operator_id) {
-            return Err(OracleError::OperatorNotRegistered);
-        }
+        let operator = self
+            .operators
+            .get(&update.operator_id)
+            .ok_or(OracleError::OperatorNotRegistered)?;
 
         // Verify freshness
         if update.confidence_bps > 5000 {
             return Err(OracleError::InsufficientConfidence);
         }
 
-        // ── Cryptographic signature verification ──────────────────────────
-        // Signature is SHA-256(operator_id || asset || price_bytes || timestamp_bytes).
-        // Only a valid signature (matching the hash) or an empty signature (genesis
-        // bootstrap with no signing key available) is accepted.
-        // All-zero placeholder signatures are explicitly REJECTED (SA-M1 closure).
-        if !update.signature.is_empty() {
-            let expected = update.compute_hash();
-            // Reject all-zero placeholder signatures that were used as a devnet bypass
-            let is_zero_placeholder =
-                update.signature.len() == 64 && update.signature.iter().all(|&b| b == 0);
-            if is_zero_placeholder || update.signature != expected {
-                if let Some(op) = self.operators.get_mut(&update.operator_id) {
-                    op.updates_submitted += 1;
-                    op.rejected_updates += 1;
-                }
-                return Err(OracleError::InvalidSignature);
+        let valid_signature = !update.signature.is_empty()
+            && operator.operator_id == update.operator_id
+            && sphincsshake256fsimple::PublicKey::from_bytes(&operator.operator_id)
+                .ok()
+                .and_then(|public_key| {
+                    sphincsshake256fsimple::DetachedSignature::from_bytes(&update.signature)
+                        .ok()
+                        .map(|signature| {
+                            sphincsshake256fsimple::verify_detached_signature(
+                                &signature,
+                                &oracle_signing_message(&update),
+                                &public_key,
+                            )
+                            .is_ok()
+                        })
+                })
+                .unwrap_or(false);
+        if !valid_signature {
+            if let Some(operator) = self.operators.get_mut(&update.operator_id) {
+                operator.updates_submitted += 1;
+                operator.rejected_updates += 1;
             }
+            return Err(OracleError::InvalidSignature);
         }
-        // ──────────────────────────────────────────────────────────────────
 
         // Record update
         self.price_updates
@@ -469,11 +503,37 @@ pub enum OracleError {
     InvalidBridgeAmount,
     #[error("Invalid oracle operator signature")]
     InvalidSignature,
+    #[error("Invalid oracle operator public key")]
+    InvalidOperatorKey,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signed_update(
+        source: OracleSource,
+        asset: &str,
+        price: u128,
+        timestamp: u64,
+        public_key: &[u8],
+        secret_key: &sphincsshake256fsimple::SecretKey,
+    ) -> PriceUpdate {
+        let mut update = PriceUpdate {
+            source,
+            asset: asset.to_string(),
+            price,
+            timestamp,
+            confidence_bps: 100,
+            operator_id: public_key.to_vec(),
+            signature: Vec::new(),
+        };
+        update.signature =
+            sphincsshake256fsimple::detached_sign(&oracle_signing_message(&update), secret_key)
+                .as_bytes()
+                .to_vec();
+        update
+    }
 
     #[test]
     fn test_price_update_hash() {
@@ -494,7 +554,12 @@ mod tests {
     #[test]
     fn test_oracle_operator_registration() {
         let mut engine = OracleBridgeEngine::genesis();
-        let operator_id = vec![1, 2, 3];
+        assert_eq!(
+            engine.register_operator(vec![1, 2, 3], 1000),
+            Err(OracleError::InvalidOperatorKey)
+        );
+        let (public_key, _) = sphincsshake256fsimple::keypair();
+        let operator_id = public_key.as_bytes().to_vec();
 
         assert!(engine.register_operator(operator_id.clone(), 1000).is_ok());
         assert!(engine.operators.contains_key(&operator_id));
@@ -504,51 +569,51 @@ mod tests {
     fn test_price_aggregation() {
         let mut engine = OracleBridgeEngine::genesis();
 
-        let op1 = vec![1];
-        let op2 = vec![2];
-        let op3 = vec![3];
+        let (pk1, sk1) = sphincsshake256fsimple::keypair();
+        let (pk2, sk2) = sphincsshake256fsimple::keypair();
+        let (pk3, sk3) = sphincsshake256fsimple::keypair();
+        let op1 = pk1.as_bytes().to_vec();
+        let op2 = pk2.as_bytes().to_vec();
+        let op3 = pk3.as_bytes().to_vec();
 
-        engine.register_operator(op1.clone(), 1000).ok();
-        engine.register_operator(op2.clone(), 1000).ok();
-        engine.register_operator(op3.clone(), 1000).ok();
+        engine.register_operator(op1.clone(), 1000).unwrap();
+        engine.register_operator(op2.clone(), 1000).unwrap();
+        engine.register_operator(op3.clone(), 1000).unwrap();
 
         let ts = 1000u64;
 
         engine
-            .submit_price_update(PriceUpdate {
-                source: OracleSource::Chainlink("BTC/USD".to_string()),
-                asset: "BTC/USD".to_string(),
-                price: 45000 * 10u128.pow(8),
-                timestamp: ts,
-                confidence_bps: 100,
-                operator_id: op1,
-                signature: vec![],
-            })
-            .ok();
+            .submit_price_update(signed_update(
+                OracleSource::Chainlink("BTC/USD".to_string()),
+                "BTC/USD",
+                45000 * 10u128.pow(8),
+                ts,
+                &op1,
+                &sk1,
+            ))
+            .unwrap();
 
         engine
-            .submit_price_update(PriceUpdate {
-                source: OracleSource::Pyth("BTC/USD".to_string()),
-                asset: "BTC/USD".to_string(),
-                price: 45100 * 10u128.pow(8),
-                timestamp: ts,
-                confidence_bps: 100,
-                operator_id: op2,
-                signature: vec![],
-            })
-            .ok();
+            .submit_price_update(signed_update(
+                OracleSource::Pyth("BTC/USD".to_string()),
+                "BTC/USD",
+                45100 * 10u128.pow(8),
+                ts,
+                &op2,
+                &sk2,
+            ))
+            .unwrap();
 
         engine
-            .submit_price_update(PriceUpdate {
-                source: OracleSource::Custom(vec![99]),
-                asset: "BTC/USD".to_string(),
-                price: 45050 * 10u128.pow(8),
-                timestamp: ts,
-                confidence_bps: 100,
-                operator_id: op3,
-                signature: vec![],
-            })
-            .ok();
+            .submit_price_update(signed_update(
+                OracleSource::Custom(vec![99]),
+                "BTC/USD",
+                45050 * 10u128.pow(8),
+                ts,
+                &op3,
+                &sk3,
+            ))
+            .unwrap();
 
         let agg = match engine.aggregate_prices("BTC/USD", ts, 1000) {
             Ok(agg) => agg,
@@ -558,6 +623,69 @@ mod tests {
             }
         };
         assert_eq!(agg.source_count, 3);
+    }
+
+    #[test]
+    fn unsigned_and_tampered_updates_are_rejected() {
+        let mut engine = OracleBridgeEngine::genesis();
+        let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+        let operator_id = public_key.as_bytes().to_vec();
+        engine.register_operator(operator_id.clone(), 1000).unwrap();
+
+        let mut update = signed_update(
+            OracleSource::Chainlink("ETH/USD".into()),
+            "ETH/USD",
+            1800,
+            1000,
+            &operator_id,
+            &secret_key,
+        );
+        let mut unsigned = update.clone();
+        unsigned.signature.clear();
+        assert_eq!(
+            engine.submit_price_update(unsigned),
+            Err(OracleError::InvalidSignature)
+        );
+
+        update.price += 1;
+        assert_eq!(
+            engine.submit_price_update(update),
+            Err(OracleError::InvalidSignature)
+        );
+
+        let mut source_tampered = signed_update(
+            OracleSource::Chainlink("ETH/USD".into()),
+            "ETH/USD",
+            1800,
+            1000,
+            &operator_id,
+            &secret_key,
+        );
+        source_tampered.source = OracleSource::Pyth("ETH/USD".into());
+        assert_eq!(
+            engine.submit_price_update(source_tampered),
+            Err(OracleError::InvalidSignature)
+        );
+
+        let (other_public_key, _) = sphincsshake256fsimple::keypair();
+        let other_operator_id = other_public_key.as_bytes().to_vec();
+        engine
+            .register_operator(other_operator_id.clone(), 1000)
+            .unwrap();
+        let mut identity_tampered = signed_update(
+            OracleSource::Chainlink("ETH/USD".into()),
+            "ETH/USD",
+            1800,
+            1000,
+            &operator_id,
+            &secret_key,
+        );
+        identity_tampered.operator_id = other_operator_id;
+        assert_eq!(
+            engine.submit_price_update(identity_tampered),
+            Err(OracleError::InvalidSignature)
+        );
+        assert!(engine.price_updates.is_empty());
     }
 
     #[test]

@@ -22,17 +22,17 @@ jobs:
     name: Cargo Audit
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Run audit
         run: cargo audit --deny warnings --json > audit-report.json
 
       - name: Upload audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
         with:
           name: cargo-audit-report
           path: audit-report.json
@@ -45,10 +45,10 @@ jobs:
     name: Cargo Deny
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        run: cargo install cargo-deny --version 0.20.2 --locked
 
       - name: Run deny checks
         run: cargo deny --config .github-deny.toml check all
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs: [cargo-audit, cargo-deny]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install Rust nightly + cargo-fuzz
         run: |
@@ -98,7 +98,7 @@ jobs:
       security-events: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install system dependencies
         run: |
@@ -109,16 +109,16 @@ jobs:
             protobuf-compiler libssl-dev pkg-config
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@60168efe1c415ce0f5521ea06d5c2062adbeed1b # v3.28.17
         with:
           languages: rust
           queries: security-and-quality
 
       - name: Build for CodeQL
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@60168efe1c415ce0f5521ea06d5c2062adbeed1b # v3.28.17
         with:
           category: "/language:rust"
 
@@ -129,7 +129,7 @@ jobs:
     name: Supply Chain Check
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Verify Cargo.lock is committed
         run: |

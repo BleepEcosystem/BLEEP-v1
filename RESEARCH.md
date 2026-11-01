@@ -10,8 +10,9 @@ properties that do not yet coexist in any production blockchain:
    prove transaction signatures, Merkle-root derivation, or state-transition execution.
 
 2. **Post-quantum algorithm implementations** — the code uses `pqcrypto` SPHINCS+-SHAKE-256f-simple
-   and legacy Kyber-1024 APIs. These are legacy/round-3 algorithm APIs; FIPS 205 or FIPS 203
-   implementation conformance or validation is not claimed.
+   and `pqcrypto-mlkem` ML-KEM-1024 APIs. FIPS implementation conformance or validation is not
+   claimed; the ML-KEM C sources derive from retired PQClean. See the [PQC implementation
+   lifecycle](crates/bleep-crypto/README.md#pqclean-maintenance-status).
 
 The implementation is a Rust workspace of 29 crates, currently in pre-testnet phase with a
 completed internal security audit. This document describes what has been built, what has been
@@ -31,7 +32,7 @@ circuit.
 
 **Post-quantum migration.** Ethereum will eventually need to migrate away from secp256k1 and
 ECDSA. The practical cost of migration is an open empirical question. BLEEP's use of
-SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs provides implementation experience with
+SPHINCS+-SHAKE-256f-simple and ML-KEM-1024 APIs provides implementation experience with
 post-quantum algorithm families; it does not establish FIPS implementation conformance or
 production-scale network measurements.
 
@@ -51,8 +52,8 @@ The following components are built, tested, and running at Protocol Version 5.
 - SPHINCS+-SHAKE-256f-simple (legacy/round-3 API; FIPS 205 conformance not claimed) for
   transaction signing, block signing, and
   P2P message authentication. Crate: `pqcrypto-sphincsplus` v0.7.2.
-- Kyber-1024 (legacy API; not FIPS 203 ML-KEM) for key encapsulation: validator binding, peer
-  session establishment, and onion routing. Crate: `pqcrypto-kyber` v0.8.1.
+- ML-KEM-1024 (FIPS 203 algorithm; implementation conformance not claimed) for key encapsulation:
+  validator binding, peer session establishment, and onion routing. Crate: `pqcrypto-mlkem` v0.1.1.
 - AES-256-GCM for symmetric encryption of onion routing hop payloads.
 - SHA3-256 for state commitments, Merkle hashing, block hashing, and audit log chaining.
 - No classical public-key primitive — RSA, ECDSA, x25519, BLS, Groth16 — present on any
@@ -163,7 +164,7 @@ be made practical.
 
 ### Key Encapsulation Overhead
 
-| Parameter | Kyber-1024 legacy API (not FIPS 203 ML-KEM) | x25519 / ECDH |
+| Parameter | ML-KEM-1024 (FIPS 203 algorithm) | x25519 / ECDH |
 |---|---|---|
 | Public key | 1,568 bytes | 32 bytes |
 | Ciphertext | 1,568 bytes | 32 bytes |
@@ -367,7 +368,7 @@ or key is required to call it.
 
 | Phase | Description | Status |
 |---|---|---|
-| Phase 1 | Cryptographic foundation — SPHINCS+, Kyber-1024, SHA3-256, BLAKE3 | ✅ Complete |
+| Phase 1 | Cryptographic foundation — SPHINCS+, ML-KEM-1024, SHA3-256, BLAKE3 | ✅ Complete |
 | Phase 2 | Consensus — PoS-BFT, Sparse Merkle Trie, epoch management | ✅ Complete |
 | Phase 3 | Execution — 7-tier VM, PAT engine, BLEEP Connect Tiers 3 & 4 | ✅ Complete |
 | Phase 4 | Self-healing, deterministic AI advisory, cross-shard 2PC, STARK hardening | ✅ Complete |
@@ -384,7 +385,7 @@ or key is required to call it.
 | Primitive | Standard | Security Level | Sizes | Usage |
 |---|---|---|---|---|
 | SPHINCS+-SHAKE-256f-simple | Legacy/round-3 API; FIPS 205 conformance not claimed | Level-5 parameter set | PK: 64B · SK: 128B · Sig: 49,856B | Transaction/block signing, P2P auth |
-| Kyber-1024 | Legacy Kyber API; not FIPS 203 ML-KEM | Level-5 parameter set | PK: 1,568B · SK: 3,168B · CT: 1,568B | Key encapsulation, onion routing |
+| ML-KEM-1024 | FIPS 203 algorithm; implementation conformance not claimed | Level-5 parameter set | PK: 1,568B · SK: 3,168B · CT: 1,568B | Key encapsulation, onion routing |
 | Winterfell STARK (FRI) | Hash-based | Hash security assumptions | 48-col trace · No SRS | Bounded block-metadata constraints |
 | SHA3-256 | FIPS 202 | Classical 256-bit | 32B output | State commitments, Merkle chain, audit log |
 

@@ -84,11 +84,11 @@ pub fn validate_mnemonic(mnemonic: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Derive a BLEEP signing seed (32 bytes) from a mnemonic + passphrase.
+/// Derive a BLEEP wallet seed (32 bytes) from a mnemonic + passphrase.
 ///
 /// Calls `mnemonic_to_seed` and returns the first 32 bytes of the 64-byte output.
-/// These 32 bytes can be passed directly to `derive_block_keypair` or used as
-/// SPHINCS+ key material.
+/// This seed is not a SPHINCS+ key; SPHINCS+ keys are generated with OS
+/// randomness and persisted using the encrypted key-file API.
 pub fn mnemonic_to_bleep_seed(mnemonic: &str, passphrase: &str) -> Result<[u8; 32], String> {
     let full = mnemonic_to_seed(mnemonic, passphrase)?;
     let mut seed = [0u8; 32];

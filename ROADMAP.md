@@ -26,7 +26,7 @@ This document describes the development trajectory for the BLEEP Quantum Trust N
 
 **Delivered:**
 - ✅ 19-crate Cargo workspace with acyclic dependency graph
-- ✅ `bleep-crypto`: SPHINCS+-SHAKE-256f-simple and legacy Kyber-1024 APIs (FIPS implementation conformance not claimed), AES-256-GCM, SHA3-256, BLAKE3
+- ✅ `bleep-crypto`: SPHINCS+-SHAKE-256f-simple and ML-KEM-1024 (FIPS implementation conformance not claimed), AES-256-GCM, SHA3-256, BLAKE3
 - ✅ `bleep-core`: Block, ZKTransaction, mempool, networking stubs
 - ✅ Genesis configuration (`config/genesis.json`)
 - ✅ Constitutional parameters as Rust `const_assert!` — MAX_SUPPLY, MAX_INFLATION_RATE_BPS, FEE_BURN_BPS
@@ -57,7 +57,7 @@ This document describes the development trajectory for the BLEEP Quantum Trust N
 - ✅ `bleep-vm` v0.5: 7-tier intent-driven VM (Native / Router / EVM / WASM / STARK / AI-Advised / Cross-Chain); unified gas model; deterministic sandbox; `StateDiff`
 - ✅ `bleep-pat` v2: 6-layer intent-driven PAT engine; `PATRegistry`; `PATGasModel`
 - ✅ `bleep-interop`: All 10 BLEEP Connect sub-crates; Tier 4 instant intent pool; executor node
-- ✅ `bleep-p2p`: Kademlia DHT (k=20), Plumtree gossip (fanout=8), onion routing, Kyber session crypto
+- ✅ `bleep-p2p`: Kademlia DHT (k=20), Plumtree gossip (fanout=8), onion routing, ML-KEM session crypto
 - ✅ `bleep-economics` Phase 1–4: tokenomics, EIP-1559-style fee market, validator incentives, distribution
 - ✅ `bleep-auth`: credentials, JWT sessions, RBAC, validator binding, tamper-evident audit log, rate limiter
 - ✅ `bleep-scheduler`: 14 built-in protocol maintenance tasks
@@ -171,7 +171,7 @@ This document describes the development trajectory for the BLEEP Quantum Trust N
 
 - 🔲 Mandatory SPHINCS+ signatures enforced for all transaction types
 - 🔲 Ed25519 sunset — removed from all code paths
-- 🔲 Kyber-1024 mandatory for all session key establishment (no classical KEM fallback)
+- 🔲 ML-KEM-1024 mandatory for all session key establishment (no classical KEM fallback)
 - 🔲 `bleep-vm` licence converts from BSL-1.1 to Apache-2.0 (2028-07-13 — automatic per licence terms)
 - 🔵 Governance vote: post-quantum cryptography enforcement across all BLEEP Connect bridge tiers
 - 🔲 Quantum-safe ZK voting enforced for all governance proposals
@@ -276,7 +276,7 @@ These are honest gaps documented for contributors and researchers. See [`WHITEPA
 
 - 🔲 Mandatory Falcon signatures for all transaction types (Ed25519 sunset)
 - 🔲 SPHINCS+ state root signing enforced for all validators
-- 🔲 Kyber-1024 mandatory for all session key establishment
+- 🔲 ML-KEM-1024 mandatory for all session key establishment
 - 🔲 `bleep-vm` licence converts from BSL-1.1 to Apache-2.0 (2028-07-13)
 - 🔵 Governance vote: post-quantum cryptography enforcement across BLEEP Connect bridges
 - 🔲 Quantum-safe ZK voting for all governance proposals

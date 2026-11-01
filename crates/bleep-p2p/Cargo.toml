@@ -27,7 +27,7 @@ rand = "0.8.5"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 subtle = "2.5"
-pqcrypto-kyber = "0.8.1"
+pqcrypto-mlkem = "0.1.1"
 pqcrypto-sphincsplus = "0.7.0"
 pqcrypto-traits = "0.3.5"
 thiserror = "1.0"

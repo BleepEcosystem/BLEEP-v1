@@ -1,6 +1,6 @@
 // src/bin/bleep-wallet_core.rs
 
-use bleep_crypto::quantum_resistance::{generate_falcon_keypair, generate_kyber_keypair};
+use bleep_crypto::quantum_resistance::{generate_mlkem_keypair, generate_sphincs_keypair};
 use bleep_wallet_core::wallet::{EncryptedWallet, WalletManager};
 
 use log::{error, info};
@@ -18,12 +18,12 @@ fn main() {
 
 fn run_wallet_engine() -> Result<(), Box<dyn Error>> {
     // Step 1: Generate new post-quantum keypairs for a wallet
-    let (falcon_pk, _falcon_sk) = generate_falcon_keypair()?;
-    let (kyber_pk, _kyber_sk) = generate_kyber_keypair()?;
-    info!("🔐 Falcon and Kyber keypairs generated.");
+    let (sphincs_pk, _sphincs_sk) = generate_sphincs_keypair()?;
+    let (mlkem_pk, _mlkem_sk) = generate_mlkem_keypair()?;
+    info!("🔐 SPHINCS+ and ML-KEM keypairs generated.");
 
     // Step 2: Initialize a new encrypted wallet
-    let wallet = EncryptedWallet::new(falcon_pk, kyber_pk);
+    let wallet = EncryptedWallet::new(sphincs_pk, mlkem_pk);
     info!("✅ Encrypted wallet instance created.");
 
     // Step 3: Use WalletManager to save and manage the wallet

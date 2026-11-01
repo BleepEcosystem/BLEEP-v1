@@ -35,7 +35,6 @@ use bleep_zkp::{
 };
 
 // Transaction signature helpers used by block compaction and validation.
-use bleep_crypto::pq_crypto::SignatureScheme;
 use bleep_crypto::tx_signer::{tx_payload, verify_tx_signature};
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
@@ -393,22 +392,6 @@ impl Block {
 
     // ── Signing (Sprint 6: SPHINCS+-SHAKE-256) ────────────────────────────────
 
-    /// Sign this block with a real SPHINCS+ secret key and public key.
-    ///
-    /// `sphincs_sk_bytes` must be raw SPHINCS+-SHAKE-256-simple secret key bytes
-    /// (as returned by `generate_tx_keypair()` or `sphincsshake256fsimple::keypair()`).
-    /// `sphincs_pk_bytes` must be raw SPHINCS+-SHAKE-256-simple public key bytes (64 bytes).
-    ///
-    /// On success, sets `self.validator_signature = pk_bytes(64) || sig(49856)`.
-    /// The block proof is generated separately by the consensus producer.
-    pub fn sign_block(&mut self, seed_bytes: &[u8]) -> Result<(), String> {
-        // For backward compatibility: derive keypair from seed
-        // In production, BlockProducer should call sign_block_with_pk instead
-        let (pk, sk) = SignatureScheme::keygen_from_seed(seed_bytes)
-            .map_err(|e| format!("SPHINCS+ keygen_from_seed failed: {:?}", e))?;
-        self.sign_block_with_pk(sk.as_bytes(), pk.as_bytes())
-    }
-
     /// Sign this block with explicit secret and public keys (production-grade).
     ///
     /// `sphincs_sk_bytes` must be raw SPHINCS+-SHAKE-256-simple secret key bytes.
@@ -740,30 +723,6 @@ impl Block {
     }
 }
 
-// ── Block keypair helper (Sprint 3+, still used for pk fingerprint) ───────────
-
-/// Derive a (secret_key_32, public_key_32) pair for the block-signing fingerprint.
-///
-/// In Sprint 6, `sk` is passed to `sign_block()` as a 32-byte seed that is
-/// reinterpreted as a SPHINCS+ secret key (or used to derive one).  The `pk` is
-/// the SHA3-256 fingerprint stored in `validator_signature[0..32]` and used by
-/// `verify_signature()` for fast pk-identity checks before the full SPHINCS+ verify.
-pub fn derive_block_keypair(seed: &[u8]) -> Result<([u8; 32], [u8; 32]), String> {
-    if seed.len() < 32 {
-        return Err(format!("seed must be ≥32 bytes, got {}", seed.len()));
-    }
-    let mut sk = [0u8; 32];
-    sk.copy_from_slice(&seed[..32]);
-
-    let mut h = Sha3_256::new();
-    h.update(sk);
-    let pk_bytes = h.finalize();
-    let mut pk = [0u8; 32];
-    pk.copy_from_slice(&pk_bytes);
-
-    Ok((sk, pk))
-}
-
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -812,21 +771,16 @@ mod tests {
 
     #[test]
     fn test_legacy_signature_and_commitment_are_rejected() {
-        let seed = [0x42u8; 32];
-        let (sk, pk) = derive_block_keypair(&seed).unwrap();
+        let pk = [0u8; 32];
         let mut b = Block::new(3, vec![], "0".to_string());
         // Build a legacy synthetic signature manually
         let mut h2 = Sha3_256::new();
         h2.update(b.compute_hash().as_bytes());
         let msg: [u8; 32] = h2.finalize().into();
-        let mut h3 = Sha3_256::new();
-        h3.update(msg);
-        h3.update(sk);
-        let prf: [u8; 32] = h3.finalize().into();
         let mut sig = Vec::with_capacity(96);
         sig.extend_from_slice(&pk);
         sig.extend_from_slice(&msg);
-        sig.extend_from_slice(&prf);
+        sig.extend_from_slice(&[0x42; 32]);
         b.validator_signature = sig;
         assert!(
             !b.verify_signature(&pk).unwrap(),

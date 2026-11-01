@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bip39::{Language, Mnemonic};
-use pqcrypto_kyber::kyber1024::{decapsulate, encapsulate, keypair};
+use pqcrypto_mlkem::mlkem1024::{decapsulate, encapsulate, keypair};
 use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SecretKey as _, SharedSecret as _};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -302,9 +302,9 @@ impl Wallet {
         let kyber_seed = pbkdf2_expand(&self.public_key, b"bleep-kyber-auth-v1");
         let (ky_pk, ky_sk) = keypair_from_seed(&kyber_seed)?;
 
-        let ky_pub = pqcrypto_kyber::kyber1024::PublicKey::from_bytes(&ky_pk)
+        let ky_pub = pqcrypto_mlkem::mlkem1024::PublicKey::from_bytes(&ky_pk)
             .map_err(|_| WalletError::QuantumSecurityError)?;
-        let ky_sec = pqcrypto_kyber::kyber1024::SecretKey::from_bytes(&ky_sk)
+        let ky_sec = pqcrypto_mlkem::mlkem1024::SecretKey::from_bytes(&ky_sk)
             .map_err(|_| WalletError::QuantumSecurityError)?;
 
         let (shared_secret, ciphertext) = encapsulate(&ky_pub);
@@ -518,9 +518,9 @@ fn keypair_from_seed(seed: &[u8; 64]) -> Result<(Vec<u8>, Vec<u8>), WalletError>
     // 🔒 Quantum-Secure Authentication
     pub fn authenticate(&mut self, _credentials: &[u8]) -> Result<bool, WalletError> {
         // Use as_bytes for pqcrypto keys
-        let public_key = pqcrypto_kyber::kyber1024::PublicKey::from_bytes(&self.public_key).map_err(|_| WalletError::QuantumSecurityError)?;
-        let secret_key = pqcrypto_kyber::kyber1024::SecretKey::from_bytes(&self.private_key).map_err(|_| WalletError::QuantumSecurityError)?;
-        let (shared_secret, ciphertext): (pqcrypto_kyber::kyber1024::SharedSecret, pqcrypto_kyber::kyber1024::Ciphertext) = encapsulate(&public_key);
+        let public_key = pqcrypto_mlkem::mlkem1024::PublicKey::from_bytes(&self.public_key).map_err(|_| WalletError::QuantumSecurityError)?;
+        let secret_key = pqcrypto_mlkem::mlkem1024::SecretKey::from_bytes(&self.private_key).map_err(|_| WalletError::QuantumSecurityError)?;
+        let (shared_secret, ciphertext): (pqcrypto_mlkem::mlkem1024::SharedSecret, pqcrypto_mlkem::mlkem1024::Ciphertext) = encapsulate(&public_key);
         let decrypted_secret = decapsulate(&ciphertext, &secret_key);
         // Compare the shared secrets
         if decrypted_secret.as_bytes() == shared_secret.as_bytes() {

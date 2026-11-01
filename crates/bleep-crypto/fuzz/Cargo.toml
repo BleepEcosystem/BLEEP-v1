@@ -10,6 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 bleep-crypto  = { path = ".." }
+pqcrypto-mlkem = "0.1.1"
+pqcrypto-traits = "0.3.5"
 
 [[bin]]
 name = "fuzz_hash_input"
@@ -24,7 +26,7 @@ test = false
 doc  = false
 
 [[bin]]
-name = "fuzz_kyber_encap_decap"
-path = "fuzz_targets/fuzz_kyber_encap_decap.rs"
+name = "fuzz_mlkem_encap_decap"
+path = "fuzz_targets/fuzz_mlkem_encap_decap.rs"
 test = false
 doc  = false

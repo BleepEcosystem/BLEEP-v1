@@ -141,8 +141,8 @@ The messaging protocol standard used as a reference for BLEEP Connect's cross-ch
 **Kademlia**
 The structured peer-to-peer overlay protocol powering peer discovery in `bleep-p2p`.
 
-**Kyber (ML-KEM)**
-A post-quantum key encapsulation mechanism (KEM) used in `bleep-crypto` for secure key exchange resistant to quantum attacks.
+**ML-KEM**
+The NIST-standardized post-quantum key encapsulation mechanism (FIPS 203) used in `bleep-crypto` for key exchange. BLEEP uses the ML-KEM-1024 parameter set; implementation validation is not claimed.
 
 ---
 
@@ -169,7 +169,7 @@ A one-time-use commitment stored in `bleep-interop`'s `NullifierStore` to preven
 ## O
 
 **Onion Router**
-A dark-routing subsystem in `bleep-p2p` that encrypts P2P messages in multiple layers (Kyber + AES-GCM) to obscure sender identity.
+A dark-routing subsystem in `bleep-p2p` that encrypts P2P messages in multiple layers (ML-KEM + AES-GCM) to obscure sender identity.
 
 **Oracle**
 An off-chain data feed provider. Price updates are submitted via `POST /rpc/oracle/update` and aggregated by the RPC layer for use in smart contracts.
@@ -194,7 +194,7 @@ The default consensus mode in BLEEP. Validators are selected proportionally to t
 A fallback consensus mode activated by the AI engine when network reliability drops below 0.6. Provides censorship resistance in adversarial conditions.
 
 **Post-Quantum Cryptography (PQC)**
-Cryptographic algorithms designed to resist attacks by quantum computers. BLEEP uses Falcon (signatures), Kyber (KEM), and SPHINCS+ (hash-based signatures).
+Cryptographic algorithms designed to resist attacks by quantum computers. BLEEP uses ML-KEM (key encapsulation) and SPHINCS+ (hash-based signatures).
 
 **Protocol Versioning**
 Managed by `protocol_versioning.rs` in `bleep-state`. Enables live upgrades to protocol rules without requiring a hard fork.

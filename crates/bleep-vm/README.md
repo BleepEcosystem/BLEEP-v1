@@ -79,7 +79,7 @@
 │  Contracts call other chains natively:                              │
 │  bleep_call(chain="ethereum", contract=0xABC, data=...)            │
 │                                                                     │
-│  Routes through BLEEP Connect (Kyber-1024 KEM + SPHINCS+ sigs)     │
+│  Routes through BLEEP Connect (ML-KEM-1024 + SPHINCS+ sigs)        │
 │  Supported: Ethereum, BSC, Solana, Cosmos, Polkadot                │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -258,7 +258,7 @@ executor.router.register_engine(Arc::new(CairoEngine));
 | Deterministic execution | No syscalls, no randomness, same bytecode + same state = same result |
 | State safety | VM outputs `StateDiff` only — `bleep-state` performs atomic commit |
 | Memory safety | WASM: max 256 pages (16 MB); call stack: 1,024 frames |
-| Cross-chain security | BLEEP Connect: Kyber-1024 KEM + SPHINCS+ signatures (PQ-secure) |
+| Cross-chain security | BLEEP Connect: ML-KEM-1024 + SPHINCS+ signatures (PQ-secure) |
 | DoS prevention | Unified gas normalisation prevents cheap-VM exploitation |
 | Bytecode validation | Sandbox validator runs before any deployment |
 

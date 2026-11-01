@@ -25,7 +25,7 @@ use zeroize::Zeroize;
 /// SHA3-256 of a single SPHINCS+ transaction signature.
 pub type SigHash = [u8; 32];
 
-/// Blake3 Merkle root over all `SigHash` values in a block.
+/// Versioned BLEEP Merkle root over all `SigHash` values in a block.
 pub type SigCommitmentRoot = [u8; 32];
 
 // ─────────────────────────────────────────────────────────────────────────────

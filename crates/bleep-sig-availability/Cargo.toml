@@ -11,7 +11,6 @@ bleep-crypto = { path = "../bleep-crypto" }
 
 # Cryptographic hashing
 sha3    = "0.10"
-blake3  = "1"
 
 # Parallelism
 rayon = "1"

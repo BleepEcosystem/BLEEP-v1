@@ -22,7 +22,7 @@ Muhammad Attahir · May 2026
 
 ## Abstract
 
-This paper describes BLEEP, an experimental distributed execution environment investigating post-quantum algorithm integration and transparent STARK proofs. Its extended Winterfell AIR proves bounded metadata relationships—epoch arithmetic, transaction/signature count equality and limits, and batch sequence equality. It does not prove transaction signatures, derive Merkle or signature-commitment roots, or prove state-transition execution. Conventional validation and execution code perform those checks separately. The implementation uses `pqcrypto` SPHINCS+-SHAKE-256f-simple and Kyber-1024 APIs. These are legacy/round-3 algorithm APIs; this paper does not claim FIPS 205 (SLH-DSA) or FIPS 203 (ML-KEM) implementation conformance or validation.
+This paper describes BLEEP, an experimental distributed execution environment investigating post-quantum algorithm integration and transparent STARK proofs. Its extended Winterfell AIR proves bounded metadata relationships—epoch arithmetic, transaction/signature count equality and limits, and batch sequence equality. It does not prove transaction signatures, derive Merkle or signature-commitment roots, or prove state-transition execution. Conventional validation and execution code perform those checks separately. The implementation uses `pqcrypto` SPHINCS+-SHAKE-256f-simple and `pqcrypto-mlkem` ML-KEM-1024 APIs. FIPS implementation conformance or validation is not claimed. `pqcrypto-mlkem` C sources derive from PQClean, which has retired its repository; see the [PQC implementation lifecycle](crates/bleep-crypto/README.md#pqclean-maintenance-status).
 
 The repository reports proof timings of approximately 850 ms generation and 12 ms verification on reference hardware; those timings apply to the bounded metadata proof, not an execution-validity proof. The active SPHINCS+ signature size is 49,856 bytes. A local single-node CLI benchmark measured 6.43 TPS sequentially and 26.33 TPS with 32 concurrent CLI workers; neither figure measures network-wide consensus or protocol capacity. The repository also contains simulated throughput projections, which are not achieved performance.
 
@@ -38,7 +38,7 @@ The operationally significant threat is **archival**. Every transaction broadcas
 
 A protocol that launches with classical cryptography and plans a post-quantum migration inherits a coordination problem that history shows cannot be cleanly solved. Validators, wallets, bridges, indexers, and all tooling must upgrade simultaneously. HTTPS migration took over a decade and is still not complete.
 
-BLEEP uses post-quantum algorithm APIs from genesis, avoiding a classical-key migration today. The current Kyber and SPHINCS+ APIs are legacy/round-3 variants; FIPS 203/205 conformance is not established, so standardization and production-readiness work may still require migration.
+BLEEP uses post-quantum algorithm APIs from genesis, avoiding a classical-key migration today. ML-KEM-1024 is standardized by FIPS 203, but implementation conformance is not established. The ML-KEM C sources derive from retired PQClean; production readiness requires a maintained provider.
 
 ### 1.3 The Execution Problem
 
@@ -95,7 +95,7 @@ graph TB
         IDX["bleep-indexer · Block · Tx · Account Indexes"]
     end
     subgraph CRYPTO["Cryptographic Foundation"]
-        CRY["bleep-crypto · SPHINCS+ · Kyber-1024 · AES-256-GCM"]
+        CRY["bleep-crypto · SPHINCS+ · ML-KEM-1024 · AES-256-GCM"]
         WALLET["bleep-wallet-core · Key Lifecycle · BIP-39"]
     end
     subgraph ECON["Economics and Governance"]
@@ -143,7 +143,7 @@ graph TB
 |--------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------|
 | Bounded Metadata Proofs | Selected metadata relationships are proven | Winterfell extended AIR — epoch arithmetic, transaction/signature counts and bounds, batch sequence |
 | Intent Native            | Callers express outcomes, not instructions                  | PAT engine + 7-tier VM router — intent resolved to optimal execution path         |
-| Post-Quantum Algorithms | Post-quantum signature and KEM algorithms are used on configured paths | SPHINCS+-SHAKE-256f-simple and legacy Kyber-1024 APIs; FIPS conformance is not claimed |
+| Post-Quantum Algorithms | Post-quantum signature and KEM algorithms are used on configured paths | SPHINCS+-SHAKE-256f-simple and ML-KEM-1024; implementation conformance is not claimed |
 | Constitutional Integrity | Supply cap, inflation, finality cannot be changed by anyone | Rust const_assert! — violations do not compile                                    |
 
 
@@ -166,9 +166,9 @@ SPHINCS+-SHAKE-256f-simple · legacy API"]
         P2P_AUTH["P2P Authentication
 SPHINCS+-SHAKE-256f-simple · legacy API"]
         KEM["Key Encapsulation
-Kyber-1024 · legacy API; not ML-KEM"]
+ML-KEM-1024 · FIPS 203 algorithm"]
         ONION["Onion Routing
-Kyber-1024 per-hop + AES-256-GCM"]
+ML-KEM-1024 per-hop + AES-256-GCM"]
         ZKP_BLOCK["Bounded Metadata Proof
 Winterfell STARK · Hash-based · No trusted setup"]
         ZKP_BRIDGE["Cross-Chain Bridge Proofs
@@ -203,16 +203,16 @@ SHA3-256 Merkle chain · sync=true"]
 
 > **Bandwidth:** Each SPHINCS+ signature is 49,856 bytes; 512 signatures total about 24.3 MiB. The Signature Availability Layer commits to signature hashes. The 48-column extended AIR proves bounded metadata relationships, not signature validity or commitment-root derivation.
 
-### 3.3 Key Encapsulation — Kyber-1024
+### 3.3 Key Encapsulation — ML-KEM-1024
 
 | **Parameter**       | **Value**                                                         |
 |---------------------|-------------------------------------------------------------------|
-| Standard status     | Legacy Kyber API; FIPS 203 ML-KEM conformance is not claimed      |
-| Parameter set       | Kyber-1024                                                        |
+| Standard status     | FIPS 203 algorithm; implementation conformance is not claimed     |
+| Parameter set       | ML-KEM-1024                                                       |
 | Public Key          | 1,568 bytes                                                       |
 | Secret Key          | 3,168 bytes (Zeroizing\<Vec\<u8\>\> — zeroed on drop)             |
 | Output              | 1,568-byte ciphertext + 32-byte shared secret                     |
-| Crate               | pqcrypto-kyber                                                     |
+| Crate               | pqcrypto-mlkem                                                    |
 | Usage               | Validator binding, peer KEM, wallet key management, onion routing |
 
 ### 3.4 Zero-Knowledge Proofs — Winterfell STARK (FRI-based)
@@ -333,7 +333,7 @@ Let **S**_t_ denote the complete protocol state at block index t, and T the cano
 Let V = {v1, …, vn} be the active validator set at epoch e. Each vi carries:
 
 - A SPHINCS+ verification key (transaction and block signing)
-- A Kyber-1024 encapsulation key (peer channels and onion routing)
+- An ML-KEM-1024 encapsulation key (peer channels and onion routing)
 - A stake si in microBLEEP (determines vote weight and slashing exposure)
 
 **Safety is guaranteed when Byzantine stake f \< S/3** (total staked supply S).
@@ -653,7 +653,7 @@ SelfHealingOrchestrator tracks protocol health: Healthy → Degraded → Critica
 
 ### 11.1 Post-Quantum Primitives Introduce Measurable Overhead
 
-SPHINCS+-SHAKE-256f-simple signatures are 49,856 bytes. The Signature Availability Layer exchanges signature commitments, but signature validity and commitment-root derivation are checked outside the AIR. The 48-column extended STARK proves bounded metadata relationships; it does not prove execution validity. Kyber-1024 public keys are 1,568 bytes compared to 32-byte Curve25519 keys. Reported Winterfell proof timings apply to the bounded metadata proof, not an execution proof. The cryptographic APIs are legacy/round-3 implementations; FIPS 203/205 conformance is not claimed.
+SPHINCS+-SHAKE-256f-simple signatures are 49,856 bytes. The Signature Availability Layer exchanges signature commitments, but signature validity and commitment-root derivation are checked outside the AIR. The 48-column extended STARK proves bounded metadata relationships; it does not prove execution validity. ML-KEM-1024 public keys are 1,568 bytes compared to 32-byte Curve25519 keys. Reported Winterfell proof timings apply to the bounded metadata proof, not an execution proof. SPHINCS+ uses a legacy/round-3 API and neither signature nor KEM implementation conformance is claimed.
 
 ### 11.2 Signature Aggregation Not Yet Available
 
@@ -694,7 +694,7 @@ The Signature Availability Layer (Sprint 10) resolves block-propagation bandwidt
 
 ### 12.2 Phase 9 — Quantum-Safe Mainnet (2028+)
 
-Mandatory SPHINCS+ enforcement across all transaction types, Ed25519 sunset, Kyber-1024 mandatory for all session key establishment, and bleep-vm BSL-1.1 → Apache 2.0 automatic conversion (2028-07-13).
+Mandatory SPHINCS+ enforcement across all transaction types, Ed25519 sunset, ML-KEM-1024 mandatory for all session key establishment, and bleep-vm BSL-1.1 → Apache 2.0 automatic conversion (2028-07-13).
 
 
 ---
@@ -705,7 +705,7 @@ BLEEP is an experimental distributed execution protocol with an intent-oriented 
 
 No classical public-key primitive is intended on the configured cryptographic paths, and the Winterfell STARK requires no trusted setup. The current post-quantum APIs are legacy/round-3 variants; FIPS conformance and whether migration will be required for production remain open.
 
-Protocol Version 5 includes SPHINCS+-signed blocks, Kyber-1024 key encapsulation, an extended Winterfell STARK for bounded metadata constraints, and simulated throughput projections. The local-node CLI measurements and their limitations are documented in [benchmark.md](benchmark.md). FIPS implementation conformance, execution-validity proofs, and public-testnet throughput have not been established.
+Protocol Version 5 includes SPHINCS+-signed blocks, ML-KEM-1024 key encapsulation, an extended Winterfell STARK for bounded metadata constraints, and simulated throughput projections. The local-node CLI measurements and their limitations are documented in [benchmark.md](benchmark.md). FIPS implementation conformance, execution-validity proofs, and public-testnet throughput have not been established.
 
 The current implementation includes an intent-oriented runtime, bounded metadata proofs, post-quantum algorithm APIs, and a 200,000,000 BLEEP maximum supply. Execution-validity proofs, FIPS implementation conformance, and public-testnet performance remain unestablished.
 
@@ -764,8 +764,8 @@ All values are drawn from the production Rust source at Protocol Version 5. Para
 | SPHINCS+ signature size | 49,856 bytes | pqcrypto-sphincsplus |
 | SPHINCS+ public key     | 64 bytes                | pqcrypto-sphincsplus v0.7.2 |
 | SPHINCS+ secret key     | 128 bytes               | pqcrypto-sphincsplus v0.7.2 |
-| Kyber-1024 public key   | 1,568 bytes             | pqcrypto-kyber              |
-| Kyber-1024 secret key   | 3,168 bytes             | pqcrypto-kyber              |
+| ML-KEM-1024 public key  | 1,568 bytes             | pqcrypto-mlkem              |
+| ML-KEM-1024 secret key  | 3,168 bytes             | pqcrypto-mlkem              |
 | State trie depth        | 256 levels              | TRIE_DEPTH                  |
 | Merkle proof size       | 8,192 bytes (fixed)     | SparseMerkleTrie            |
 | Gossip max message size | 2,097,152 bytes (2 MiB) | MAX_GOSSIP_MSG_BYTES        |

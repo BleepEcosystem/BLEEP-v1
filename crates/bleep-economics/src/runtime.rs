@@ -128,7 +128,9 @@ impl BleepEconomicsRuntime {
             })?;
 
         for update in &input.oracle_updates {
-            let _ = self.state.oracle_bridge.submit_price_update(update.clone());
+            self.state
+                .oracle_bridge
+                .submit_price_update(update.clone())?;
         }
 
         let ts = std::time::SystemTime::now()

@@ -21,7 +21,7 @@ bleep-auth
 ├── session            — HS256 JWT issuance & validation; JTI deny-list revocation
 ├── rbac               — Role hierarchy; O(1) permission evaluation via DashMap
 ├── identity           — NodeIdentity & DappIdentity; deterministic address derivation
-├── validator_binding  — Kyber-1024 challenge/response proof-of-possession
+├── validator_binding  — ML-KEM-1024 challenge/response proof-of-possession
 ├── audit              — Merkle-chained append-only log with tamper detection
 ├── rate_limiter       — Fixed-window token bucket per (identity, action)
 └── errors             — Typed AuthError / AuthResult
@@ -75,7 +75,7 @@ Key types: `NodeIdentity`, `DappIdentity`, `IdentityRegistry`, `IdentityKind`.
 
 ### `validator_binding`
 
-Cryptographically proves that a staking key and a network identity key belong to the same operator, using a Kyber-1024 challenge/response protocol.
+Cryptographically proves that a staking key and a network identity key belong to the same operator, using an ML-KEM-1024 challenge/response protocol.
 
 Key type: `ValidatorBinding`.
 

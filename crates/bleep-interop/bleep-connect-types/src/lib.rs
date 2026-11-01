@@ -704,12 +704,13 @@ impl CommitmentBlock {
 
         for commitment in &self.commitments {
             hasher.update(commitment.commitment_id);
+            hasher.update([commitment.commitment_type as u8]);
+            hasher.update(commitment.data_hash);
+            hasher.update([commitment.layer]);
+            hasher.update(commitment.created_at.to_be_bytes());
         }
 
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        hash
+        hasher.finalize().into()
     }
 }
 
@@ -723,6 +724,7 @@ pub struct StateCommitment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum CommitmentType {
     InstantTransfer,
     ZKProofBatch,
@@ -833,6 +835,51 @@ pub mod constants {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn commitment_block(commitment: StateCommitment) -> CommitmentBlock {
+        CommitmentBlock {
+            block_number: 1,
+            timestamp: 2,
+            previous_hash: [3; 32],
+            commitments: vec![commitment],
+            validator_signatures: vec![],
+        }
+    }
+
+    fn sample_commitment() -> StateCommitment {
+        StateCommitment {
+            commitment_id: [4; 32],
+            commitment_type: CommitmentType::InstantTransfer,
+            data_hash: [5; 32],
+            layer: 6,
+            created_at: 7,
+        }
+    }
+
+    #[test]
+    fn commitment_block_hash_commits_to_every_commitment_field() {
+        let baseline = commitment_block(sample_commitment()).calculate_hash();
+
+        let mut changed = sample_commitment();
+        changed.commitment_id[0] ^= 1;
+        assert_ne!(baseline, commitment_block(changed).calculate_hash());
+
+        let mut changed = sample_commitment();
+        changed.commitment_type = CommitmentType::ZKProofBatch;
+        assert_ne!(baseline, commitment_block(changed).calculate_hash());
+
+        let mut changed = sample_commitment();
+        changed.data_hash[0] ^= 1;
+        assert_ne!(baseline, commitment_block(changed).calculate_hash());
+
+        let mut changed = sample_commitment();
+        changed.layer ^= 1;
+        assert_ne!(baseline, commitment_block(changed).calculate_hash());
+
+        let mut changed = sample_commitment();
+        changed.created_at ^= 1;
+        assert_ne!(baseline, commitment_block(changed).calculate_hash());
+    }
 
     #[test]
     fn test_chain_id_conversion() {

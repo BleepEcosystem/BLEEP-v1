@@ -1,4 +1,4 @@
-use sha3::{Digest, Sha3_256};
+use crate::merkle_commitment::{merkle_hash_leaf, merkle_root_from_hashes};
 
 #[derive(Default, Clone, Debug)]
 pub struct MerkleTree {
@@ -9,8 +9,8 @@ pub struct MerkleTree {
 impl MerkleTree {
     pub fn new() -> Self {
         MerkleTree {
-            leaves: vec![],
-            root: vec![],
+            leaves: Vec::new(),
+            root: Vec::new(),
         }
     }
 
@@ -20,7 +20,7 @@ impl MerkleTree {
     }
 
     pub fn contains_leaf(&self, leaf: &[u8]) -> bool {
-        self.leaves.iter().any(|l| l == leaf)
+        self.leaves.iter().any(|existing| existing == leaf)
     }
 
     pub fn root(&self) -> Vec<u8> {
@@ -31,27 +31,31 @@ impl MerkleTree {
         if self.leaves.is_empty() {
             return vec![0u8; 32];
         }
-        let mut hashes: Vec<Vec<u8>> = self
+
+        let leaf_hashes: Vec<_> = self
             .leaves
             .iter()
-            .map(|leaf| {
-                let mut hasher = Sha3_256::new();
-                hasher.update(leaf);
-                hasher.finalize().to_vec()
-            })
+            .map(|leaf| merkle_hash_leaf(leaf))
             .collect();
-        while hashes.len() > 1 {
-            let mut next_level = vec![];
-            for pair in hashes.chunks(2) {
-                let mut hasher = Sha3_256::new();
-                hasher.update(&pair[0]);
-                if pair.len() == 2 {
-                    hasher.update(&pair[1]);
-                }
-                next_level.push(hasher.finalize().to_vec());
-            }
-            hashes = next_level;
+        merkle_root_from_hashes(&leaf_hashes)
+            .expect("non-empty leaf hashes have a Merkle root")
+            .to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_uses_shared_versioned_merkle_format() {
+        let leaves = vec![b"left".to_vec(), b"right".to_vec()];
+        let expected_hashes: Vec<_> = leaves.iter().map(|leaf| merkle_hash_leaf(leaf)).collect();
+        let expected_root = merkle_root_from_hashes(&expected_hashes).unwrap();
+        let mut tree = MerkleTree::new();
+        for leaf in leaves {
+            tree.add_leaf(leaf);
         }
-        hashes[0].clone()
+        assert_eq!(tree.root(), expected_root);
     }
 }

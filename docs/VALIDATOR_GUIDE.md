@@ -30,7 +30,7 @@ Before starting a node, provision a unique random JWT secret for it and export i
 `init` performs the following steps:
 
 - Creates `~/.bleep/validators/validator-1/state/`.
-- Generates real Kyber-1024 and SPHINCS+-SHAKE-256f-simple keys if they are absent. Re-running it never regenerates existing keys.
+- Generates real ML-KEM-1024 and SPHINCS+-SHAKE-256f-simple keys if they are absent. Re-running it never regenerates existing keys.
 - Creates an operator session and performs registration through RPC.
 - On testnet, requests one faucet drip when the configured account balance is below the requested stake. Faucet top-up is never attempted on mainnet.
 - Writes `~/.bleep/validators/validator-1/config.toml`.

@@ -178,7 +178,7 @@ The VM never writes to `bleep-state` directly. It returns a `StateDiff` that is 
 
 ### 4. Post-Quantum by Default
 
-The `quantum` feature flag is on by default in `Cargo.toml`. All signatures on mainnet use Falcon or SPHINCS+. Kyber-1024 is used for session key establishment. Ed25519 remains available for compatibility but will be sunset post-mainnet.
+The `quantum` feature flag is on by default in `Cargo.toml`. All signatures on mainnet use Falcon or SPHINCS+. ML-KEM-1024 is used for session key establishment. Ed25519 remains available for compatibility but will be sunset post-mainnet.
 
 ### 5. Shard Safety via 2PC
 

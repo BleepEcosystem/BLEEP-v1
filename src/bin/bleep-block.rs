@@ -73,8 +73,8 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
     let last_hash = last_block.compute_hash();
     let mut new_block = Block::new(last_block.index + 1, pending_txs, last_hash);
 
-    let (_sphincs_pk, sphincs_sk) = generate_tx_keypair();
-    new_block.sign_block(&sphincs_sk)?;
+    let (sphincs_pk, sphincs_sk) = generate_tx_keypair();
+    new_block.sign_block_with_pk(&sphincs_sk, &sphincs_pk)?;
     info!(
         "📄 New block created with hash: {}",
         new_block.compute_hash()

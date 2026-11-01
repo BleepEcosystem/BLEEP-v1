@@ -482,8 +482,7 @@ impl Proposal {
 
         self.state = ProposalState::Executing;
 
-        // Execute payload (implementation-specific)
-        // This is where protocol changes actually happen
+        // Execute the payload only through a wired side-effect backend.
         match self.payload.execute() {
             Ok(_) => {
                 self.state = ProposalState::Executed;
@@ -554,46 +553,21 @@ pub enum SanctionAction {
 }
 
 impl GovernancePayload {
-    /// Execute the payload (actual protocol changes happen here)
+    /// Execute the payload.
+    ///
+    /// Governance execution backends are not wired into this module yet. Fail
+    /// closed so a proposal cannot be reported as executed without applying its
+    /// protocol side effect.
     pub fn execute(&self) -> Result<(), String> {
-        match self {
-            GovernancePayload::ProtocolParameterChange {
-                rule_name,
-                new_value,
-            } => {
-                // In real implementation, update protocol rules
-                info!("Executing parameter change: {} = {}", rule_name, new_value);
-                Ok(())
-            }
-            GovernancePayload::ValidatorSanction {
-                validator_id,
-                action,
-            } => {
-                // In real implementation, call slashing engine
-                info!(
-                    "Executing validator sanction: {} - {:?}",
-                    validator_id, action
-                );
-                Ok(())
-            }
-            GovernancePayload::Recovery {
-                description,
-                recovery_data: _,
-            } => {
-                // In real implementation, apply recovery
-                info!("Executing recovery: {}", description);
-                Ok(())
-            }
-            GovernancePayload::UpgradeAuthorization {
-                module_name,
-                version,
-                code_hash: _,
-            } => {
-                // In real implementation, verify and apply upgrade
-                info!("Executing upgrade: {} v{}", module_name, version);
-                Ok(())
-            }
-        }
+        let payload_type = match self {
+            GovernancePayload::ProtocolParameterChange { .. } => "protocol parameter change",
+            GovernancePayload::ValidatorSanction { .. } => "validator sanction",
+            GovernancePayload::Recovery { .. } => "recovery",
+            GovernancePayload::UpgradeAuthorization { .. } => "upgrade authorization",
+        };
+        Err(format!(
+            "{payload_type} execution not implemented: governance execution context is not wired"
+        ))
     }
 }
 
@@ -727,7 +701,7 @@ impl GovernanceEngine {
             if proposal.state == ProposalState::AwaitingExecution
                 && new_epoch >= proposal.execution_epoch
             {
-                let _ = proposal.execute(new_epoch);
+                proposal.execute(new_epoch)?;
             }
         }
 
@@ -765,6 +739,95 @@ impl GovernanceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unimplemented_payloads_fail_instead_of_reporting_success() {
+        let payloads = [
+            GovernancePayload::ProtocolParameterChange {
+                rule_name: "BLOCK_TIME".into(),
+                new_value: 6000,
+            },
+            GovernancePayload::ValidatorSanction {
+                validator_id: "validator-1".into(),
+                action: SanctionAction::Remove,
+            },
+            GovernancePayload::Recovery {
+                description: "repair state".into(),
+                recovery_data: vec![1],
+            },
+            GovernancePayload::UpgradeAuthorization {
+                module_name: "consensus".into(),
+                version: "2.0.0".into(),
+                code_hash: vec![2; 32],
+            },
+        ];
+
+        for payload in payloads {
+            let error = payload.execute().expect_err("unwired execution must fail");
+            assert!(error.contains("execution not implemented"));
+        }
+    }
+
+    #[test]
+    fn proposal_with_unwired_payload_is_not_marked_executed() {
+        let payload = GovernancePayload::ProtocolParameterChange {
+            rule_name: "BLOCK_TIME".into(),
+            new_value: 6000,
+        };
+        let mut proposal = Proposal::new(
+            "prop-unwired".into(),
+            ProposalType::ProtocolParameter,
+            "Change block time".into(),
+            "Test fail-closed execution".into(),
+            VotingWindow::new(1, 3).unwrap(),
+            3,
+            67,
+            payload,
+            0,
+        );
+        proposal.state = ProposalState::AwaitingExecution;
+
+        assert!(matches!(
+            proposal.execute(3),
+            Err(GovernanceError::ExecutionFailed(message))
+                if message.contains("execution not implemented")
+        ));
+        assert_eq!(proposal.state, ProposalState::RolledBack);
+    }
+
+    #[test]
+    fn epoch_advance_propagates_unwired_execution_failure() {
+        let payload = GovernancePayload::ProtocolParameterChange {
+            rule_name: "BLOCK_TIME".into(),
+            new_value: 6000,
+        };
+        let mut proposal = Proposal::new(
+            "prop-unwired".into(),
+            ProposalType::ProtocolParameter,
+            "Change block time".into(),
+            "Test fail-closed execution".into(),
+            VotingWindow::new(1, 3).unwrap(),
+            3,
+            67,
+            payload,
+            0,
+        );
+        proposal.state = ProposalState::AwaitingExecution;
+
+        let mut engine = GovernanceEngine::new(100);
+        engine.proposal_queue.push(proposal.id.clone());
+        engine.proposals.insert(proposal.id.clone(), proposal);
+
+        assert!(matches!(
+            engine.advance_epoch(3),
+            Err(GovernanceError::ExecutionFailed(message))
+                if message.contains("execution not implemented")
+        ));
+        assert_eq!(
+            engine.get_proposal("prop-unwired").unwrap().state,
+            ProposalState::RolledBack
+        );
+    }
 
     #[test]
     fn test_proposal_state_transitions() {

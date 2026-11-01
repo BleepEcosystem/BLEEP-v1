@@ -34,6 +34,8 @@ use crate::types::{unix_now, MessageType, NodeId, SecureMessage};
 const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// Anti-replay timestamp tolerance (seconds).
 const REPLAY_WINDOW_SECS: u64 = 30;
+/// Maximum number of live nonces retained for replay protection.
+const MAX_NONCE_CACHE_ENTRIES: usize = 100_000;
 /// TCP connection timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Read timeout per frame.
@@ -92,14 +94,18 @@ impl NonceCache {
         }
     }
 
-    /// Returns `true` if this nonce was already seen (replay).
+    /// Returns `true` if the nonce is a replay or the bounded cache is full.
     fn check_and_insert(&mut self, nonce: &[u8; 16], now: u64) -> bool {
         let key = hex::encode(nonce);
         self.evict_old(now);
         if self.seen.contains_key(&key) {
             return true; // replay
         }
-        self.seen.insert(key, now + REPLAY_WINDOW_SECS * 2);
+        if self.seen.len() >= MAX_NONCE_CACHE_ENTRIES {
+            return true;
+        }
+        self.seen
+            .insert(key, now.saturating_add(REPLAY_WINDOW_SECS * 2));
         false
     }
 
@@ -182,7 +188,8 @@ impl MessageProtocol {
 
     /// Respond to a Kyber KEM session initiation.
     pub fn accept_session(&self, peer_id: &NodeId, kem_ciphertext: &[u8]) -> P2PResult<()> {
-        let shared_secret = kyber_decapsulate(kem_ciphertext, &self.local_kyber.secret_key.0)?;
+        let shared_secret =
+            kyber_decapsulate(kem_ciphertext, self.local_kyber.secret_key.expose())?;
         let context = self.session_context(peer_id);
         let session_key = SessionKey::from_shared_secret(&shared_secret, &context);
         self.sessions.insert(
@@ -378,16 +385,17 @@ impl MessageProtocol {
             return Err(P2PError::AuthenticationFailed);
         }
 
-        // 2. Replay nonce check
+        // 2. Authenticate before consuming the nonce so invalid messages cannot
+        //    poison the replay cache.
+        sphincs_verify(&msg.signing_bytes(), &msg.signature, sender_pubkey_bytes)?;
+
+        // 3. Replay nonce check
         {
             let mut cache = self.nonce_cache.lock().await;
             if cache.check_and_insert(&msg.nonce, now) {
                 return Err(P2PError::AuthenticationFailed);
             }
         }
-
-        // 3. Signature verification
-        sphincs_verify(&msg.signing_bytes(), &msg.signature, sender_pubkey_bytes)?;
 
         // 4. Decryption
         let session = self
@@ -753,5 +761,41 @@ mod tests {
         assert!(!cache.check_and_insert(&msg.nonce, now));
         // Second insert with same nonce IS a replay
         assert!(cache.check_and_insert(&msg.nonce, now));
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_does_not_consume_nonce() {
+        let (proto_a, _, _) = make_proto();
+        let (proto_b, _, _) = make_proto();
+        let kem_ct = proto_a
+            .initiate_session(&proto_b.local_id, &proto_b.local_kyber.public_key.0)
+            .unwrap();
+        proto_b.accept_session(&proto_a.local_id, &kem_ct).unwrap();
+        let msg = proto_a
+            .seal_message(&proto_b.local_id, MessageType::Ping, b"authenticated")
+            .unwrap();
+
+        assert!(proto_b
+            .open_message(&msg, &proto_b.local_identity.public_key_bytes())
+            .await
+            .is_err());
+        assert_eq!(
+            proto_b
+                .open_message(&msg, &proto_a.local_identity.public_key_bytes())
+                .await
+                .unwrap(),
+            b"authenticated"
+        );
+    }
+
+    #[test]
+    fn nonce_cache_rejects_new_entries_at_capacity() {
+        let mut cache = NonceCache::new();
+        for i in 0..MAX_NONCE_CACHE_ENTRIES {
+            cache.seen.insert(i.to_string(), u64::MAX);
+        }
+
+        assert!(cache.check_and_insert(&[0xA5; 16], 1));
+        assert_eq!(cache.seen.len(), MAX_NONCE_CACHE_ENTRIES);
     }
 }
