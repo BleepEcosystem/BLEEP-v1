@@ -350,7 +350,7 @@ fn aes_gcm_decrypt(key: &[u8; 32], data: &[u8]) -> CryptoResult<Vec<u8>> {
 
 /// Aggregate multiple SPHINCS+ validator signatures into a compact representation.
 /// Returns the concatenated signatures and public keys; verification checks
-/// that at least `threshold` out of `total` validators signed correctly.
+/// that at least `threshold` distinct validators signed correctly.
 pub struct ValidatorMultiSig {
     pub signatures: Vec<Vec<u8>>,
     pub public_keys: Vec<Vec<u8>>,
@@ -373,13 +373,18 @@ impl ValidatorMultiSig {
 
     /// Verify that at least `threshold` signatures are valid.
     pub fn verify_threshold(&self, threshold: usize) -> bool {
-        let mut valid = 0usize;
+        use std::collections::BTreeMap;
+
+        let mut seen: BTreeMap<&[u8], bool> = BTreeMap::new();
         for (pk, sig) in self.public_keys.iter().zip(self.signatures.iter()) {
-            if ClassicalKeyPair::verify(pk, &self.message_hash, sig).unwrap_or(false) {
-                valid += 1;
+            if seen.contains_key(pk.as_slice()) {
+                continue;
             }
+            let valid = ClassicalKeyPair::verify(pk, &self.message_hash, sig).unwrap_or(false);
+            seen.insert(pk.as_slice(), valid);
         }
-        valid >= threshold
+
+        seen.values().filter(|valid| **valid).count() >= threshold
     }
 }
 
@@ -440,5 +445,18 @@ mod tests {
         assert!(multi.verify_threshold(2));
         // Threshold 4 of 3 must fail
         assert!(!multi.verify_threshold(4));
+    }
+
+    #[test]
+    fn test_validator_multisig_counts_each_public_key_once() {
+        let kp = ClassicalKeyPair::generate();
+        let msg = b"deduplicated validator vote";
+        let signature = kp.sign(&sha256(msg));
+        let mut multi = ValidatorMultiSig::new(msg);
+        multi.add_signature(kp.public_key_bytes(), signature.clone());
+        multi.add_signature(kp.public_key_bytes(), signature);
+
+        assert!(multi.verify_threshold(1));
+        assert!(!multi.verify_threshold(2));
     }
 }

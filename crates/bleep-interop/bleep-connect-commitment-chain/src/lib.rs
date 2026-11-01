@@ -2,8 +2,9 @@
 //!
 //! A minimal BFT blockchain that anchors cross-chain state commitments.
 //! Validators produce blocks containing StateCommitments from all protocol layers.
-//! Consensus requires 2/3+ of validators to sign each block (BFT, tolerates 1/3 Byzantine).
+//! Consensus requires at least two-thirds of validator stake to sign each block (BFT).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -257,45 +258,54 @@ impl BlockProducer {
 
 pub struct ConsensusEngine {
     validators: Arc<RwLock<Vec<Validator>>>,
-    byzantine_threshold: f64,
 }
 
 impl ConsensusEngine {
     pub fn new(validators: Vec<Validator>) -> Self {
         Self {
             validators: Arc::new(RwLock::new(validators)),
-            byzantine_threshold: 0.33,
         }
     }
 
     /// Check if a block has sufficient valid signatures to be finalized.
     pub async fn has_consensus(&self, block: &CommitmentBlock) -> bool {
         let validators = self.validators.read().await;
-        let total = validators.len();
-        if total == 0 {
+        let Some(total_stake) = validators
+            .iter()
+            .try_fold(0u128, |total, validator| total.checked_add(validator.stake))
+        else {
+            return false;
+        };
+        if total_stake == 0 {
             return false;
         }
-        let required = (total as f64 * (1.0 - self.byzantine_threshold)).ceil() as usize;
+        let required_stake = total_stake / 3 * 2 + (total_stake % 3) * 2 / 3;
         let block_hash = block.calculate_hash();
+        let mut seen = HashSet::new();
+        let mut valid_stake = 0u128;
 
-        let valid_count = block
-            .validator_signatures
-            .iter()
-            .filter(|vsig| {
-                // Find matching validator
-                validators.iter().any(|v| {
-                    v.id == vsig.validator_id
-                        && ClassicalKeyPair::verify(&v.public_key, &block_hash, &vsig.signature)
-                            .unwrap_or(false)
-                })
-            })
-            .count();
+        for vsig in &block.validator_signatures {
+            if !seen.insert(vsig.validator_id) {
+                continue;
+            }
+
+            if let Some(validator) = validators.iter().find(|v| v.id == vsig.validator_id) {
+                if ClassicalKeyPair::verify(&validator.public_key, &block_hash, &vsig.signature)
+                    .unwrap_or(false)
+                {
+                    let Some(stake) = valid_stake.checked_add(validator.stake) else {
+                        return false;
+                    };
+                    valid_stake = stake;
+                }
+            }
+        }
 
         info!(
-            "Block {} consensus: {}/{} valid signatures (need {})",
-            block.block_number, valid_count, total, required
+            "Block {} consensus: {}/{} valid stake (need {})",
+            block.block_number, valid_stake, total_stake, required_stake
         );
-        valid_count >= required
+        valid_stake >= required_stake
     }
 
     pub async fn add_validator(&self, v: Validator) {
@@ -461,6 +471,42 @@ mod tests {
         let block = chain.produce_block().await.unwrap();
         assert_eq!(block.block_number, 1);
         assert_eq!(block.commitments.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_consensus_deduplicates_signatures_and_weights_stake() {
+        let keypairs: Vec<_> = (0..3).map(|_| ClassicalKeyPair::generate()).collect();
+        let validators: Vec<_> = keypairs
+            .iter()
+            .zip([60u128, 25, 15])
+            .map(|(keypair, stake)| Validator::new(keypair.public_key_bytes(), stake))
+            .collect();
+        let engine = ConsensusEngine::new(validators.clone());
+        let mut block = CommitmentBlock {
+            block_number: 1,
+            timestamp: now(),
+            previous_hash: [0; 32],
+            commitments: vec![],
+            validator_signatures: vec![],
+        };
+        let block_hash = block.calculate_hash();
+
+        let first_signature = ValidatorSignature {
+            validator_id: validators[0].id,
+            signature: keypairs[0].sign(&block_hash),
+            signed_at: now(),
+        };
+        block.validator_signatures.push(first_signature.clone());
+        block.validator_signatures.push(first_signature);
+
+        assert!(!engine.has_consensus(&block).await);
+
+        block.validator_signatures.push(ValidatorSignature {
+            validator_id: validators[1].id,
+            signature: keypairs[1].sign(&block_hash),
+            signed_at: now(),
+        });
+        assert!(engine.has_consensus(&block).await);
     }
 
     #[test]
