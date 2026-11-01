@@ -100,6 +100,24 @@ pub fn tx_payload(
     h.finalize().into()
 }
 
+/// Build the canonical payload for bonding stake to a validator.
+///
+/// The destination commits to the Kyber public key so the signing key proves
+/// ownership of both the stake request and the validator's KEM identity.
+pub fn validator_stake_payload(
+    chain_id: &str,
+    sender: &str,
+    label: &str,
+    amount: u64,
+    timestamp: u64,
+    nonce: u64,
+    kyber_public_key: &[u8],
+) -> [u8; 32] {
+    let kem_commitment = hex::encode(Sha256::digest(kyber_public_key));
+    let receiver = format!("validator:{label}:kem:{kem_commitment}");
+    tx_payload(chain_id, sender, &receiver, amount, timestamp, nonce)
+}
+
 /// Generate a fresh SPHINCS+ keypair.
 ///
 /// Returns `(public_key_bytes, secret_key_bytes)`.

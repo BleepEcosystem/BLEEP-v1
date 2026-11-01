@@ -194,7 +194,49 @@ async fn main() {
     }
 }
 
+fn load_blocks_per_epoch() -> Result<u64, Box<dyn Error>> {
+    let path =
+        std::env::var("BLEEP_GENESIS_CONFIG").unwrap_or_else(|_| "config/genesis.json".to_string());
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    Ok(parse_blocks_per_epoch(&config)?)
+}
+
+fn parse_blocks_per_epoch(config: &serde_json::Value) -> Result<u64, std::io::Error> {
+    config
+        .pointer("/consensus/blocks_per_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|blocks_per_epoch| *blocks_per_epoch > 0)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "genesis config must define a positive consensus.blocks_per_epoch",
+            )
+            .into()
+        })
+}
+
+#[cfg(test)]
+mod epoch_config_tests {
+    use super::*;
+
+    #[test]
+    fn reads_positive_blocks_per_epoch_from_genesis() {
+        let config = serde_json::json!({"consensus": {"blocks_per_epoch": 1000}});
+        assert_eq!(parse_blocks_per_epoch(&config).unwrap(), 1000);
+    }
+
+    #[test]
+    fn rejects_missing_or_zero_blocks_per_epoch() {
+        assert!(parse_blocks_per_epoch(&serde_json::json!({"consensus": {}})).is_err());
+        assert!(
+            parse_blocks_per_epoch(&serde_json::json!({"consensus": {"blocks_per_epoch": 0}}))
+                .is_err()
+        );
+    }
+}
+
 async fn run() -> Result<(), Box<dyn Error>> {
+    let blocks_per_epoch = load_blocks_per_epoch()?;
     let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -686,6 +728,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_transaction_pool(Arc::clone(&tx_pool))
         .with_p2p_node(Arc::clone(&p2p_node))
         .with_blockchain(Arc::clone(&blockchain))
+        .with_blocks_per_epoch(blocks_per_epoch)
         .with_auth_service(Arc::clone(&auth_service));
 
     // Relay FinalizedBlock events into Scheduler + metrics + economics

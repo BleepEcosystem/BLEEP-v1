@@ -3,6 +3,7 @@
     "genesis_time": "2025-03-06T00:00:00Z",
     "consensus": {
         "algorithm": "AI-Adaptive-PoS",
+        "blocks_per_epoch": 100,
         "validators": [],
         "block_time": 2,
         "fallback_mechanism": "VRF-Based PoS",

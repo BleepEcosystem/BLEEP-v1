@@ -41,7 +41,9 @@ use bleep_ai::{
 };
 use bleep_core::transaction::ZKTransaction;
 use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
-use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+use bleep_crypto::tx_signer::{
+    generate_tx_keypair, sign_tx_payload, tx_payload, validator_stake_payload,
+};
 use bleep_governance::governance_core::{GovernanceEngine, Proposal, ProposalType, Vote};
 use bleep_p2p::p2p_node::{P2PNode, P2PNodeConfig};
 use bleep_state::state_manager::StateManager;
@@ -1325,17 +1327,74 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
         amount: u64,
         label: String,
         timestamp: u64,
+        signing_public_key: String,
+        proof: String,
+        kyber_public_key: String,
     }
     let url = format!("{}/rpc/validator/stake", rpc);
     let client = reqwest::Client::new();
+    let manager =
+        WalletManager::load_or_create().map_err(|error| anyhow!("Wallet load failed: {error}"))?;
+    let wallet = manager
+        .list_wallets()
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("No wallet found; create or import a wallet first"))?;
+    if !wallet.can_sign() {
+        return Err(anyhow!("Wallet cannot sign validator stake requests"));
+    }
+
+    let kyber_public_key = std::env::var("BLEEP_VALIDATOR_KYBER_PUBLIC_KEY").map_err(|_| {
+        anyhow!(
+            "Set BLEEP_VALIDATOR_KYBER_PUBLIC_KEY to the validator node's Kyber-1024 public key"
+        )
+    })?;
+    let kyber_public_key = hex::decode(kyber_public_key.trim())
+        .map_err(|error| anyhow!("Invalid validator Kyber public key: {error}"))?;
+    let kyber_key = bleep_crypto::pq_crypto::KyberPublicKey::from_bytes(kyber_public_key.clone())
+        .map_err(|error| anyhow!("Invalid validator Kyber public key: {error}"))?;
+    kyber_key
+        .validate()
+        .map_err(|error| anyhow!("Invalid validator Kyber public key: {error}"))?;
+    bleep_crypto::pq_crypto::KyberKem::encapsulate(&kyber_key)
+        .map_err(|error| anyhow!("Invalid validator Kyber public key: {error}"))?;
+
+    let nonce = client
+        .get(format!("{}/rpc/tx/nonce/{}", rpc, wallet.address))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?["nonce"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("RPC transaction nonce response is missing nonce"))?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let chain_id = std::env::var("BLEEP_CHAIN_ID")
+        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+    let payload = validator_stake_payload(
+        &chain_id,
+        &wallet.address,
+        label,
+        amount,
+        timestamp,
+        nonce,
+        &kyber_public_key,
+    );
+    let signing_key =
+        unlock_wallet_key(&wallet).map_err(|error| anyhow!("Wallet unlock failed: {error}"))?;
+    let proof = sign_tx_payload(&payload, &signing_key)
+        .map_err(|error| anyhow!("Validator stake signing failed: {error}"))?;
     let body = StakeRequest {
         tx_type: "Stake".to_string(),
         amount,
         label: label.to_string(),
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        timestamp,
+        signing_public_key: hex::encode(&wallet.falcon_keys),
+        proof: hex::encode(proof),
+        kyber_public_key: hex::encode(kyber_public_key),
     };
     let jwt_token = get_jwt_token().await?;
     let resp = client
