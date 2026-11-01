@@ -1094,6 +1094,7 @@ dependencies = [
 name = "bleep-connect-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bincode 2.0.1",
  "bleep-connect-adapters",
  "bleep-connect-commitment-chain",
@@ -1209,6 +1210,7 @@ dependencies = [
 name = "bleep-connect-layer4-instant"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bleep-connect-commitment-chain",
  "bleep-connect-crypto",
  "bleep-connect-types",

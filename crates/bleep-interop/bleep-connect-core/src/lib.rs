@@ -25,6 +25,7 @@ use bleep_connect_layer1_social::{Layer1Social, ProposalResult, RegisteredVoter}
 use bleep_connect_layer2_fullnode::Layer2FullNode;
 use bleep_connect_layer3_zkproof::{Layer3ZKProof, ProofInput};
 use bleep_connect_layer4_instant::Layer4Instant;
+pub use bleep_connect_layer4_instant::{EscrowVerifier, VerifiedEscrow};
 use bleep_connect_types::{
     BleepConnectError, BleepConnectResult, ChainId, ExecutorProfile, InstantIntent, ProposalType,
     StateCommitment, TransferStatus, UniversalAddress, Vote,
@@ -133,6 +134,17 @@ impl BleepConnectOrchestrator {
         config: BleepConnectConfig,
         validator_keypair: ClassicalKeyPair,
     ) -> BleepConnectResult<Self> {
+        Self::new_with_escrow_verifier(config, validator_keypair, None).await
+    }
+
+    /// Create the orchestrator with an optional source-chain escrow verifier.
+    ///
+    /// Without a verifier, Layer 4 rejects all transfer submissions.
+    pub async fn new_with_escrow_verifier(
+        config: BleepConnectConfig,
+        validator_keypair: ClassicalKeyPair,
+        escrow_verifier: Option<Arc<dyn EscrowVerifier>>,
+    ) -> BleepConnectResult<Self> {
         std::fs::create_dir_all(&config.data_directory)
             .map_err(|e| BleepConnectError::DatabaseError(e.to_string()))?;
 
@@ -146,7 +158,10 @@ impl BleepConnectOrchestrator {
             initial_validators,
         )?);
 
-        let layer4 = Arc::new(Layer4Instant::new(commitment_chain.clone()));
+        let layer4 = Arc::new(Layer4Instant::new_with_escrow_verifier(
+            commitment_chain.clone(),
+            escrow_verifier,
+        ));
         let layer3 = Arc::new(Layer3ZKProof::new(commitment_chain.clone())?);
         let layer2 = if config.enable_layer2 {
             Some(Arc::new(Layer2FullNode::new(commitment_chain.clone())))
@@ -504,18 +519,29 @@ fn now() -> u64 {
 /// Convenience builder for creating an orchestrator with sensible defaults.
 pub struct BleepConnectBuilder {
     config: BleepConnectConfig,
+    escrow_verifier: Option<Arc<dyn EscrowVerifier>>,
 }
 
 impl BleepConnectBuilder {
     pub fn new() -> Self {
         Self {
             config: BleepConnectConfig::default(),
+            escrow_verifier: None,
         }
     }
 
     /// Create builder with a custom config.
     pub fn with_config(config: BleepConnectConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            escrow_verifier: None,
+        }
+    }
+
+    /// Configure source-chain escrow verification. Without this, submissions fail closed.
+    pub fn with_escrow_verifier(mut self, verifier: Arc<dyn EscrowVerifier>) -> Self {
+        self.escrow_verifier = Some(verifier);
+        self
     }
     pub fn data_directory(mut self, path: PathBuf) -> Self {
         self.config.data_directory = path;
@@ -541,7 +567,12 @@ impl BleepConnectBuilder {
         self,
         keypair: ClassicalKeyPair,
     ) -> BleepConnectResult<Arc<BleepConnectOrchestrator>> {
-        let orchestrator = BleepConnectOrchestrator::new(self.config, keypair).await?;
+        let orchestrator = BleepConnectOrchestrator::new_with_escrow_verifier(
+            self.config,
+            keypair,
+            self.escrow_verifier,
+        )
+        .await?;
         Ok(Arc::new(orchestrator))
     }
 }
@@ -559,10 +590,28 @@ impl Default for BleepConnectBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use bleep_connect_types::{AssetId, ChainId, UniversalAddress};
     use tempfile::tempdir;
 
-    async fn make_orchestrator() -> Arc<BleepConnectOrchestrator> {
+    struct TestEscrowVerifier;
+
+    #[async_trait]
+    impl EscrowVerifier for TestEscrowVerifier {
+        async fn verify_escrow(&self, intent: &InstantIntent) -> Result<VerifiedEscrow, String> {
+            if intent.escrow_tx_hash != "0xescrow" || intent.escrow_proof != [0xA5, 0x5A] {
+                return Err("unrecognized escrow fixture".into());
+            }
+            Ok(VerifiedEscrow {
+                amount: intent.source_amount,
+                recipient: intent.recipient.address.clone(),
+            })
+        }
+    }
+
+    async fn make_orchestrator_with_verifier(
+        escrow_verifier: Option<Arc<dyn EscrowVerifier>>,
+    ) -> Arc<BleepConnectOrchestrator> {
         let dir = tempdir().unwrap();
         let kp = ClassicalKeyPair::generate();
         let config = BleepConnectConfig {
@@ -571,7 +620,15 @@ mod tests {
             ..BleepConnectConfig::default()
         };
 
-        Arc::new(BleepConnectOrchestrator::new(config, kp).await.unwrap())
+        Arc::new(
+            BleepConnectOrchestrator::new_with_escrow_verifier(config, kp, escrow_verifier)
+                .await
+                .unwrap(),
+        )
+    }
+
+    async fn make_orchestrator() -> Arc<BleepConnectOrchestrator> {
+        make_orchestrator_with_verifier(Some(Arc::new(TestEscrowVerifier))).await
     }
 
     fn make_intent() -> InstantIntent {
@@ -592,7 +649,7 @@ mod tests {
             nonce: 1,
             signature: vec![1],
             escrow_tx_hash: "0xescrow".into(),
-            escrow_proof: vec![1, 2, 3],
+            escrow_proof: vec![0xA5, 0x5A],
         }
     }
 
@@ -603,6 +660,13 @@ mod tests {
         let id = orc.submit_intent(intent).await.unwrap();
         let status = orc.get_transfer_status(id);
         assert!(matches!(status, Some(TransferStatus::AuctionOpen { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_submit_without_escrow_verifier_fails_closed() {
+        let orc = make_orchestrator_with_verifier(None).await;
+        assert!(orc.submit_intent(make_intent()).await.is_err());
+        assert!(orc.pending_intent_ids().is_empty());
     }
 
     #[tokio::test]

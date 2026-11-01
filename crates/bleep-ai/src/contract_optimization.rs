@@ -100,7 +100,7 @@ impl BLEEPAIOptimizer {
             ai_model: Box::new(AdvancedAIModel::new()),
             governance: SelfAmendingGovernance::new(),
             ai_decision: BLEEPAIDecisionModule::new(),
-            zkp_module: BLEEPZKPModule::new(),
+            zkp_module: BLEEPZKPModule::unconfigured(),
             interoperability: BLEEPInteroperabilityModule::new(),
             consensus: BLEEPAdaptiveConsensus::new(),
         }

@@ -18,6 +18,15 @@ env:
   LIBCLANG_PATH: /usr/lib/llvm-14/lib
 
 jobs:
+  stub-verifier-gate:
+    name: Stub verifier gate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject proof-verification stubs and placeholder keys
+        run: bash scripts/check_no_stub_verifiers.sh
+
   # ------------------------------------------------------------------ #
   #  1. FORMAT CHECK                                                     #
   # ------------------------------------------------------------------ #

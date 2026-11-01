@@ -178,8 +178,8 @@ impl BlockVerifier {
     }
 }
 
-/// Generic legacy proof dispatcher. `STARK_V1` block proofs are rejected;
-/// metadata checks on batch proofs are not execution proofs.
+/// Generic legacy proof dispatcher. The legacy block and batch formats are
+/// rejected because their payloads do not contain verifiable STARK proofs.
 pub struct ProofVerifier;
 
 impl ProofVerifier {
@@ -188,16 +188,9 @@ impl ProofVerifier {
         Self
     }
 
-    /// Verify a supported STARK proof format.
-    /// Legacy `STARK_V1` block proofs are rejected because their AIR does not
-    /// constrain block validity.
+    /// Reject legacy proof formats that do not contain a verifiable STARK proof.
     ///
-    /// For batch proofs, also verifies:
-    ///   - Transaction count bounds
-    ///   - Gas usage limits
-    ///   - Batch digest integrity
-    ///
-    /// Returns `true` if the proof is valid and well-formed, `false` if invalid.
+    /// Returns `false` for unsupported or malformed proof payloads.
     pub fn verify(&self, proof_bytes: &[u8]) -> bool {
         if proof_bytes.is_empty() {
             info!("❌ Proof verification failed: empty proof");
@@ -210,7 +203,8 @@ impl ProofVerifier {
             match header {
                 b"STARK_V1" => self.verify_stark_block_proof(proof_bytes),
                 _ if proof_bytes.starts_with(b"BATCH_STARKv1") => {
-                    self.verify_batch_proof(&proof_bytes[13..])
+                    info!("❌ Rejected metadata-only legacy batch payload");
+                    false
                 }
                 _ => {
                     info!("❌ Proof verification failed: unrecognized proof format");
@@ -227,54 +221,6 @@ impl ProofVerifier {
     fn verify_stark_block_proof(&self, _proof_bytes: &[u8]) -> bool {
         false
     }
-
-    /// Verify batch transaction proof structure
-    fn verify_batch_proof(&self, proof_bytes: &[u8]) -> bool {
-        if proof_bytes.len() < 28 {
-            info!("❌ Batch proof too short: expected at least 28 bytes");
-            return false;
-        }
-
-        // Parse batch metadata
-        let tx_count = u64::from_le_bytes([
-            proof_bytes[0],
-            proof_bytes[1],
-            proof_bytes[2],
-            proof_bytes[3],
-            proof_bytes[4],
-            proof_bytes[5],
-            proof_bytes[6],
-            proof_bytes[7],
-        ]);
-
-        let total_gas = u64::from_le_bytes([
-            proof_bytes[8],
-            proof_bytes[9],
-            proof_bytes[10],
-            proof_bytes[11],
-            proof_bytes[12],
-            proof_bytes[13],
-            proof_bytes[14],
-            proof_bytes[15],
-        ]);
-
-        // Validate constraints
-        if tx_count == 0 || tx_count > 65536 {
-            info!("❌ Invalid batch tx_count: {}", tx_count);
-            return false;
-        }
-
-        if total_gas > 30_000_000 {
-            info!("❌ Batch gas exceeds block limit: {}", total_gas);
-            return false;
-        }
-
-        info!(
-            "✅ Batch STARK proof verified (tx_count={}, total_gas={})",
-            tx_count, total_gas
-        );
-        true
-    }
 }
 
 impl Default for ProofVerifier {
@@ -283,8 +229,7 @@ impl Default for ProofVerifier {
     }
 }
 
-/// Batch transaction STARK prover.
-/// Aggregates multiple transactions into a single STARK proof.
+/// Legacy batch metadata encoder; it does not generate a STARK proof.
 pub struct BatchProver {
     max_transactions: usize,
 }
@@ -302,15 +247,12 @@ impl BatchProver {
         Self { max_transactions }
     }
 
-    /// Generate a STARK proof for a batch of transactions.
+    /// Serialize metadata for a batch of transactions.
     ///
-    /// The proof demonstrates:
-    ///   1. All transactions in the batch are structurally valid
-    ///   2. State transitions are computed correctly
-    ///   3. Total gas usage is within block limits
-    ///   4. Transaction ordering and sequence numbers are correct
+    /// The payload contains transaction count, gas usage, a digest, and records.
+    /// These self-asserted fields are not a cryptographic proof.
     ///
-    /// Returns serialized proof bytes.
+    /// Returns a legacy metadata payload, which `ProofVerifier` rejects.
     pub fn prove(&self, batch_txs: &[BatchTransaction]) -> Result<Vec<u8>, String> {
         if batch_txs.is_empty() {
             return Err("Batch must contain at least one transaction".to_string());
@@ -346,7 +288,7 @@ impl BatchProver {
         // 3. Validity attestations for each transaction
         let mut proof_bytes = Vec::with_capacity(512 + batch_txs.len() * 64);
 
-        // Header: "BATCH_STARK_v1"
+        // Header for the legacy metadata-only batch encoding.
         proof_bytes.extend_from_slice(b"BATCH_STARKv1");
 
         // Batch metadata
@@ -367,7 +309,7 @@ impl BatchProver {
 
         let prove_time_ms = start.elapsed().as_millis() as u64;
         info!(
-            "✅ Batch STARK proof generated for {} transactions in {} ms",
+            "Serialized legacy batch metadata for {} transactions in {} ms",
             batch_txs.len(),
             prove_time_ms
         );
@@ -381,7 +323,7 @@ impl BatchProver {
     }
 }
 
-/// Transaction data for batch STARK proofs
+/// Transaction metadata for legacy batch payloads.
 #[derive(Clone, Debug)]
 pub struct BatchTransaction {
     pub nonce: u64,
@@ -456,6 +398,15 @@ mod tests {
     fn metadata_only_stark_v1_is_rejected() {
         let mut proof_bytes = b"STARK_V1".to_vec();
         proof_bytes.extend_from_slice(&[0; 24 + 31 * 2 + 64]);
+        assert!(!ProofVerifier::new().verify(&proof_bytes));
+    }
+
+    #[test]
+    fn metadata_only_batch_payload_is_rejected() {
+        let mut proof_bytes = b"BATCH_STARKv1".to_vec();
+        proof_bytes.extend_from_slice(&1u64.to_le_bytes());
+        proof_bytes.extend_from_slice(&1u64.to_le_bytes());
+        proof_bytes.extend_from_slice(&[0; 32]);
         assert!(!ProofVerifier::new().verify(&proof_bytes));
     }
 

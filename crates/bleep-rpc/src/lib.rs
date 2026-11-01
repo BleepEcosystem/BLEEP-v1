@@ -1326,6 +1326,15 @@ struct SubmitIntentReq {
     signature: Option<String>,
 }
 
+fn decode_escrow_proof(proof: Option<&str>) -> Result<Vec<u8>, &'static str> {
+    let proof = proof.ok_or("MissingEscrowProof")?;
+    let decoded = hex::decode(proof).map_err(|_| "InvalidEscrowProof")?;
+    if decoded.is_empty() {
+        return Err("InvalidEscrowProof");
+    }
+    Ok(decoded)
+}
+
 #[derive(Serialize)]
 struct SubmitIntentResp {
     intent_id: String,
@@ -1683,39 +1692,74 @@ fn connect_submit_intent(
             Some(Permission::SubmitTransaction),
         ))
         .and(with_arc_state(state))
-        .map(
-            |req: SubmitIntentReq, _claims: SessionClaims, st: Arc<RpcState>| {
+        .and_then(
+            |req: SubmitIntentReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
                 use bleep_interop::types::{
                     AssetId, AssetType, ChainId, InstantIntent, UniversalAddress,
                 };
-                use sha2::{Digest, Sha256};
+                use warp::Reply as _;
 
-                let src = ChainId::from_name(&req.source_chain).unwrap_or(ChainId::BLEEP);
-                let dst = ChainId::from_name(&req.dest_chain).unwrap_or(ChainId::Ethereum);
+                let reject = |error: &str, status| {
+                    warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({ "error": error })),
+                        status,
+                    )
+                    .into_response()
+                };
+                let bad_request = warp::http::StatusCode::BAD_REQUEST;
+
+                let escrow_proof = match decode_escrow_proof(req.escrow_proof.as_deref()) {
+                    Ok(proof) => proof,
+                    Err(error) => return Ok::<_, warp::Rejection>(reject(error, bad_request)),
+                };
+
+                let src = match ChainId::from_name(&req.source_chain) {
+                    Some(chain) => chain,
+                    None => {
+                        return Ok::<_, warp::Rejection>(reject("InvalidSourceChain", bad_request))
+                    }
+                };
+                let dst = match ChainId::from_name(&req.dest_chain) {
+                    Some(chain) => chain,
+                    None => {
+                        return Ok::<_, warp::Rejection>(reject(
+                            "InvalidDestinationChain",
+                            bad_request,
+                        ))
+                    }
+                };
+                let escrow_tx_hash = match req.escrow_tx_hash.as_deref() {
+                    Some(hash) if !hash.trim().is_empty() => hash.to_string(),
+                    _ => {
+                        return Ok::<_, warp::Rejection>(reject(
+                            "MissingEscrowTransaction",
+                            bad_request,
+                        ))
+                    }
+                };
+                let signature = match req.signature.as_deref() {
+                    Some(signature) => match hex::decode(signature) {
+                        Ok(signature) if !signature.is_empty() => signature,
+                        _ => {
+                            return Ok::<_, warp::Rejection>(reject(
+                                "InvalidSignature",
+                                bad_request,
+                            ))
+                        }
+                    },
+                    None => {
+                        return Ok::<_, warp::Rejection>(reject("MissingSignature", bad_request))
+                    }
+                };
 
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-
-                // Deterministic intent ID from (source_chain, dest_chain, source_amount, sender, nonce)
                 let nonce = req.nonce.unwrap_or(ts);
-                let mut h = Sha256::new();
-                h.update(req.source_chain.as_bytes());
-                h.update(req.dest_chain.as_bytes());
-                h.update(req.source_amount.to_le_bytes());
-                h.update(req.sender_address.as_bytes());
-                h.update(nonce.to_le_bytes());
-                let id_arr: [u8; 32] = h.finalize().into();
-
-                let escrow_proof = req
-                    .escrow_proof
-                    .as_ref()
-                    .and_then(|s| hex::decode(s).ok())
-                    .unwrap_or_else(|| vec![1, 2, 3]); // devnet placeholder
 
                 let intent = InstantIntent {
-                    intent_id: id_arr,
+                    intent_id: [0; 32],
                     created_at: ts,
                     expires_at: ts + 300,
                     source_chain: src,
@@ -1739,48 +1783,32 @@ fn connect_submit_intent(
                     max_solver_reward_bps: req.max_solver_reward_bps.unwrap_or(50),
                     slippage_tolerance_bps: req.slippage_tolerance_bps.unwrap_or(100),
                     nonce,
-                    signature: req
-                        .signature
-                        .as_ref()
-                        .and_then(|s| hex::decode(s).ok())
-                        .unwrap_or_else(|| vec![1]),
-                    escrow_tx_hash: req
-                        .escrow_tx_hash
-                        .clone()
-                        .unwrap_or_else(|| format!("0xescrow-{}", hex::encode(&id_arr[..4]))),
+                    signature,
+                    escrow_tx_hash,
                     escrow_proof,
                 };
 
-                let intent_id_hex = hex::encode(id_arr);
-
                 match &st.connect_orchestrator {
-                    Some(orc) => {
-                        // Submit to live intent pool asynchronously
-                        let orc2 = Arc::clone(orc);
-                        let intent2 = intent.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = orc2.submit_intent(intent2).await {
-                                tracing::warn!("Intent submit error: {}", e);
-                            }
-                        });
-                        warp::reply::with_status(
-                            warp::reply::json(&SubmitIntentResp {
-                                intent_id: intent_id_hex,
-                                status: "AuctionOpen".to_string(),
-                            }),
-                            warp::http::StatusCode::CREATED,
-                        )
-                    }
-                    None => {
-                        // Stub mode: return accepted status without live pool
-                        warp::reply::with_status(
-                            warp::reply::json(&SubmitIntentResp {
-                                intent_id: intent_id_hex,
-                                status: "Pending".to_string(),
-                            }),
-                            warp::http::StatusCode::CREATED,
-                        )
-                    }
+                    Some(orc) => match orc.submit_intent(intent).await {
+                        Ok(id) => Ok::<_, warp::Rejection>(
+                            warp::reply::with_status(
+                                warp::reply::json(&SubmitIntentResp {
+                                    intent_id: hex::encode(id),
+                                    status: "AuctionOpen".to_string(),
+                                }),
+                                warp::http::StatusCode::CREATED,
+                            )
+                            .into_response(),
+                        ),
+                        Err(error) => Ok(reject(
+                            &format!("EscrowVerificationFailed: {error}"),
+                            bad_request,
+                        )),
+                    },
+                    None => Ok(reject(
+                        "ConnectOrchestratorUnavailable",
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )),
                 }
             },
         )
@@ -3868,6 +3896,17 @@ mod tests {
     use bleep_state::state_manager::StateManager;
     use std::sync::{Arc, RwLock};
     use warp::test::request;
+
+    #[test]
+    fn escrow_proof_input_has_no_placeholder_fallback() {
+        assert_eq!(decode_escrow_proof(None), Err("MissingEscrowProof"));
+        assert_eq!(
+            decode_escrow_proof(Some("not-hex")),
+            Err("InvalidEscrowProof")
+        );
+        assert_eq!(decode_escrow_proof(Some("")), Err("InvalidEscrowProof"));
+        assert_eq!(decode_escrow_proof(Some("a55a")), Ok(vec![0xA5, 0x5A]));
+    }
 
     fn sign_pat_request<T: Serialize>(
         endpoint: &str,

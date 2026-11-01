@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -253,6 +254,18 @@ pub struct ExecutionProof {
     pub executor_signature: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedEscrow {
+    pub amount: u128,
+    pub recipient: String,
+}
+
+/// Verifies a finalized source-chain escrow against the complete transfer intent.
+#[async_trait]
+pub trait EscrowVerifier: Send + Sync {
+    async fn verify_escrow(&self, intent: &InstantIntent) -> Result<VerifiedEscrow, String>;
+}
+
 impl ExecutionProof {
     pub fn verify_signature(&self, executor_pk: &[u8]) -> bool {
         let mut data = self.intent_id.to_vec();
@@ -272,17 +285,26 @@ pub struct Layer4Instant {
     executor_registry: Arc<ExecutorRegistry>,
     auction_engine: Arc<AuctionEngine>,
     commitment_chain: Arc<CommitmentChain>,
+    escrow_verifier: Option<Arc<dyn EscrowVerifier>>,
     // Tracks start time of each execution for timeout enforcement
     execution_starts: Arc<DashMap<[u8; 32], u64>>,
 }
 
 impl Layer4Instant {
     pub fn new(commitment_chain: Arc<CommitmentChain>) -> Self {
+        Self::new_with_escrow_verifier(commitment_chain, None)
+    }
+
+    pub fn new_with_escrow_verifier(
+        commitment_chain: Arc<CommitmentChain>,
+        escrow_verifier: Option<Arc<dyn EscrowVerifier>>,
+    ) -> Self {
         Self {
             intent_pool: Arc::new(IntentPool::new()),
             executor_registry: Arc::new(ExecutorRegistry::new()),
             auction_engine: Arc::new(AuctionEngine::new()),
             commitment_chain,
+            escrow_verifier,
             execution_starts: Arc::new(DashMap::new()),
         }
     }
@@ -293,22 +315,26 @@ impl Layer4Instant {
         if intent.expires_at == 0 {
             intent.expires_at = now() + INTENT_DEFAULT_EXPIRY.as_secs();
         }
-        let id = self.intent_pool.add(intent.clone())?;
 
-        // Escrow lock: in production this would verify the on-chain escrow transaction.
-        // Here we confirm the escrow proof is non-empty.
-        if intent.escrow_proof.is_empty() {
-            self.intent_pool.update_status(
-                id,
-                TransferStatus::Failed {
-                    reason: FailureReason::EscrowFailed,
-                    failed_at: now(),
-                },
-            );
+        if intent.escrow_tx_hash.trim().is_empty() || intent.escrow_proof.is_empty() {
             return Err(BleepConnectError::InternalError(
-                "Missing escrow proof".into(),
+                "Missing escrow transaction hash or proof".into(),
             ));
         }
+
+        let verifier = self.escrow_verifier.as_ref().ok_or_else(|| {
+            BleepConnectError::InternalError("Escrow verification is not configured".into())
+        })?;
+        let escrow = verifier.verify_escrow(&intent).await.map_err(|e| {
+            BleepConnectError::InternalError(format!("Escrow verification failed: {e}"))
+        })?;
+        if escrow.amount < intent.source_amount || escrow.recipient != intent.recipient.address {
+            return Err(BleepConnectError::InternalError(
+                "Escrow does not cover the intent amount or recipient".into(),
+            ));
+        }
+
+        let id = self.intent_pool.add(intent.clone())?;
 
         // Transition to EscrowLocked
         self.intent_pool.update_status(
@@ -607,6 +633,28 @@ mod tests {
     use bleep_connect_types::{AssetId, ChainId};
     use tempfile::tempdir;
 
+    #[derive(Default)]
+    struct TestEscrowVerifier {
+        amount: Option<u128>,
+        recipient: Option<String>,
+    }
+
+    #[async_trait]
+    impl EscrowVerifier for TestEscrowVerifier {
+        async fn verify_escrow(&self, intent: &InstantIntent) -> Result<VerifiedEscrow, String> {
+            if intent.escrow_tx_hash != "0xescrowtx" || intent.escrow_proof != [0xA5, 0x5A] {
+                return Err("unrecognized escrow fixture".into());
+            }
+            Ok(VerifiedEscrow {
+                amount: self.amount.unwrap_or(intent.source_amount),
+                recipient: self
+                    .recipient
+                    .clone()
+                    .unwrap_or_else(|| intent.recipient.address.clone()),
+            })
+        }
+    }
+
     async fn make_chain() -> Arc<CommitmentChain> {
         let dir = tempdir().unwrap();
         let kp = ClassicalKeyPair::generate();
@@ -634,14 +682,17 @@ mod tests {
             nonce: 1,
             signature: vec![1],
             escrow_tx_hash: "0xescrowtx".into(),
-            escrow_proof: vec![1, 2, 3],
+            escrow_proof: vec![0xA5, 0x5A],
         }
     }
 
     #[tokio::test]
     async fn test_submit_and_status() {
         let chain = make_chain().await;
-        let layer4 = Layer4Instant::new(chain);
+        let layer4 = Layer4Instant::new_with_escrow_verifier(
+            chain,
+            Some(Arc::new(TestEscrowVerifier::default())),
+        );
         let intent = make_intent(&make_chain().await);
         let id = layer4.submit_intent(intent).await.unwrap();
         let status = layer4.get_status(&id);
@@ -651,10 +702,63 @@ mod tests {
     #[tokio::test]
     async fn test_missing_escrow_fails() {
         let chain = make_chain().await;
-        let layer4 = Layer4Instant::new(chain);
+        let layer4 = Layer4Instant::new_with_escrow_verifier(
+            chain,
+            Some(Arc::new(TestEscrowVerifier::default())),
+        );
         let mut intent = make_intent(&make_chain().await);
         intent.escrow_proof = vec![]; // no proof
         let result = layer4.submit_intent(intent).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_escrow_without_configured_verifier_fails_closed() {
+        let layer4 = Layer4Instant::new(make_chain().await);
+        let result = layer4.submit_intent(make_intent(&make_chain().await)).await;
+        assert!(result.is_err());
+        assert!(layer4.intent_pool_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unmatched_escrow_is_not_submitted() {
+        let layer4 = Layer4Instant::new_with_escrow_verifier(
+            make_chain().await,
+            Some(Arc::new(TestEscrowVerifier::default())),
+        );
+        let mut intent = make_intent(&make_chain().await);
+        intent.escrow_proof = vec![0x01];
+        assert!(layer4.submit_intent(intent).await.is_err());
+        assert!(layer4.intent_pool_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_underfunded_escrow_is_not_submitted() {
+        let verifier = TestEscrowVerifier {
+            amount: Some(0),
+            recipient: None,
+        };
+        let layer4 =
+            Layer4Instant::new_with_escrow_verifier(make_chain().await, Some(Arc::new(verifier)));
+        assert!(layer4
+            .submit_intent(make_intent(&make_chain().await))
+            .await
+            .is_err());
+        assert!(layer4.intent_pool_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_wrong_escrow_recipient_is_not_submitted() {
+        let verifier = TestEscrowVerifier {
+            amount: None,
+            recipient: Some("wrong-recipient".into()),
+        };
+        let layer4 =
+            Layer4Instant::new_with_escrow_verifier(make_chain().await, Some(Arc::new(verifier)));
+        assert!(layer4
+            .submit_intent(make_intent(&make_chain().await))
+            .await
+            .is_err());
+        assert!(layer4.intent_pool_ids().is_empty());
     }
 }

@@ -11,7 +11,7 @@ mod tests {
         rt.block_on(async {
             let governance = SelfAmendingGovernance::new(
                 Arc::new(QuantumSecure::new().unwrap()),
-                Arc::new(BLEEPZKPModule::new()),
+                Arc::new(BLEEPZKPModule::unconfigured()),
                 Arc::new(BLEEPInteroperabilityModule::new()),
                 "models/proposal_categorization.onnx",
             )
@@ -32,7 +32,7 @@ mod tests {
         rt.block_on(async {
             let governance = SelfAmendingGovernance::new(
                 Arc::new(QuantumSecure::new().unwrap()),
-                Arc::new(BLEEPZKPModule::new()),
+                Arc::new(BLEEPZKPModule::unconfigured()),
                 Arc::new(BLEEPInteroperabilityModule::new()),
                 "models/proposal_categorization.onnx",
             )
@@ -60,7 +60,7 @@ mod tests {
         rt.block_on(async {
             let governance = SelfAmendingGovernance::new(
                 Arc::new(QuantumSecure::new().unwrap()),
-                Arc::new(BLEEPZKPModule::new()),
+                Arc::new(BLEEPZKPModule::unconfigured()),
                 Arc::new(BLEEPInteroperabilityModule::new()),
                 "models/proposal_categorization.onnx",
             )
@@ -84,7 +84,7 @@ mod tests {
         rt.block_on(async {
             let governance = SelfAmendingGovernance::new(
                 Arc::new(QuantumSecure::new().unwrap()),
-                Arc::new(BLEEPZKPModule::new()),
+                Arc::new(BLEEPZKPModule::unconfigured()),
                 Arc::new(BLEEPInteroperabilityModule::new()),
                 "models/proposal_categorization.onnx",
             )
@@ -116,7 +116,7 @@ mod tests {
         rt.block_on(async {
             let governance = SelfAmendingGovernance::new(
                 Arc::new(QuantumSecure::new().unwrap()),
-                Arc::new(BLEEPZKPModule::new()),
+                Arc::new(BLEEPZKPModule::unconfigured()),
                 Arc::new(BLEEPInteroperabilityModule::new()),
                 "models/proposal_categorization.onnx",
             )
@@ -150,7 +150,7 @@ mod tests {
         rt.block_on(async {
             let governance = SelfAmendingGovernance::new(
                 Arc::new(QuantumSecure::new().unwrap()),
-                Arc::new(BLEEPZKPModule::new()),
+                Arc::new(BLEEPZKPModule::unconfigured()),
                 Arc::new(BLEEPInteroperabilityModule::new()),
                 "models/proposal_categorization.onnx",
             )

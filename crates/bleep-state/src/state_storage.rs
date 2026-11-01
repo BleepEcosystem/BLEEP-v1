@@ -12,7 +12,6 @@ impl SphincsPlus {
     }
 }
 use crate::ai::anomaly_detector::detect_state_anomalies;
-use crate::crypto::zk_snarks::verify_proof; // ZKP verification for state integrity
 use crate::shard_manager::ShardManager; // Sharding module
 use crate::state_merkle::calculate_merkle_root; // Import optimized Merkle Tree
 use crate::transaction::Transaction;
@@ -86,10 +85,9 @@ impl BlockchainState {
             .expect("Deserialization failed")
     }
 
-    /// **Verifies a transaction using ZKP**
-    pub fn verify_transaction_zkp(&self, transaction: &Transaction, proof: &[u8]) -> bool {
-        verify_proof(proof)
-            && self.balances.get(&transaction.from).cloned().unwrap_or(0) >= transaction.amount
+    /// Reject ZKP transaction checks until a real verifier is wired in.
+    pub fn verify_transaction_zkp(&self, _transaction: &Transaction, _proof: &[u8]) -> bool {
+        false
     }
 
     /// **Retrieves account balance**
@@ -117,4 +115,3 @@ pub mod ai {
         pub fn detect_state_anomalies() {}
     }
 }
-// pub mod crypto { pub fn blake3() {} pub mod zk_snarks { pub fn verify_proof() {} } }
