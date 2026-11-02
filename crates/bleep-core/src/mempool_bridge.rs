@@ -14,7 +14,7 @@
 //! pushes new transactions into the pool, deduplicating by tx_id.
 //!
 //! ## Deduplication
-//! Uses a `HashSet<String>` of `tx_id = sender:receiver:amount:timestamp`.
+//! Uses a `HashSet<String>` of signature-derived transaction IDs.
 //! The set is bounded to `MAX_SEEN` entries and rotates on overflow.
 
 use std::collections::HashSet;
@@ -56,10 +56,7 @@ pub async fn run_mempool_bridge(mempool: Arc<Mempool>, tx_pool: Arc<TransactionP
         let mut forwarded = 0usize;
 
         for tx in pending {
-            let tx_id = format!(
-                "{}:{}:{}:{}",
-                tx.sender, tx.receiver, tx.amount, tx.timestamp
-            );
+            let tx_id = tx.get_hash();
 
             // Deduplication: skip if already seen
             if seen.contains(&tx_id) {

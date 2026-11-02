@@ -390,7 +390,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Transaction pools
     let tx_pool = TransactionPool::new_with_chain_id(10_000, chain_id.clone());
-    let mempool = Mempool::new();
+    let mempool = Mempool::new(chain_id.clone(), Mempool::embedded_sender_public_key);
 
     let blockchain = {
         let mut core_state = CoreBlockchainState::default();
@@ -1272,12 +1272,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Persist state
     {
         let mut s = state.lock();
-        s.create_snapshot()
-            .unwrap_or_else(|e| warn!("State snapshot: {}", e));
-        info!(
-            "  ✅ State flushed to RocksDB (height={}).",
-            s.block_height()
-        );
+        match s.create_snapshot() {
+            Ok(snapshot_path) => info!(
+                "  ✅ State snapshot saved to {} (height={}).",
+                snapshot_path.display(),
+                s.block_height()
+            ),
+            Err(error) => warn!("State snapshot: {}", error),
+        }
     }
 
     // Persist governance

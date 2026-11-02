@@ -8,7 +8,9 @@
 
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::state_merkle::SparseMerkleTrie;
@@ -21,6 +23,8 @@ pub enum StateError {
     Storage(String),
     #[error("Serialisation error: {0}")]
     Serialisation(String),
+    #[error("Snapshot error: {0}")]
+    Snapshot(String),
 }
 
 pub type StateResult<T> = Result<T, StateError>;
@@ -31,6 +35,8 @@ const PREFIX_BLOCK: &[u8] = b"chain:block:";
 const KEY_HEIGHT: &[u8] = b"sys:block_height";
 const KEY_CHAIN_ID: &[u8] = b"chain:id";
 const KEY_TIP_HASH: &[u8] = b"chain:tip_hash";
+const SNAPSHOT_MANIFEST: &str = "bleep-snapshot-manifest.json";
+const SNAPSHOT_TRIE: &str = "bleep-state-trie.bin";
 const TRANSACTION_REPLAY_WINDOW_SECS: u64 = 30;
 
 /// Persisted account record.
@@ -48,6 +54,15 @@ struct CanonicalBlockRecord {
     previous_hash: String,
     chain_id: String,
     body: Vec<u8>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SnapshotManifest {
+    version: u32,
+    chain_id: String,
+    block_height: u64,
+    state_root: String,
+    db_checksum: String,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +104,7 @@ pub struct StateCheckpoint {
 /// Top-level state manager with RocksDB persistence + SparseMerkleTrie state root.
 pub struct StateManager {
     db: rocksdb::DB,
+    db_path: PathBuf,
     cache: HashMap<String, CacheEntry>,
     block_height: u64,
     /// Sprint 3: Sparse Merkle Trie for O(1)-amortised cryptographic state root.
@@ -100,12 +116,14 @@ impl StateManager {
 
     /// Open (or create) a RocksDB database at `path`.
     pub fn open<P: AsRef<Path>>(path: P) -> StateResult<Self> {
+        let db_path = path.as_ref().to_path_buf();
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_max_open_files(512);
 
-        let db = rocksdb::DB::open(&opts, path).map_err(|e| StateError::Storage(e.to_string()))?;
+        let db =
+            rocksdb::DB::open(&opts, &db_path).map_err(|e| StateError::Storage(e.to_string()))?;
 
         let block_height = match db.get(KEY_HEIGHT) {
             Ok(Some(v)) => {
@@ -122,6 +140,7 @@ impl StateManager {
         log::info!("[StateManager] Opened DB — block_height={}", block_height);
         let mut state = Self {
             db,
+            db_path,
             cache: HashMap::new(),
             block_height,
             trie: SparseMerkleTrie::new(),
@@ -494,14 +513,186 @@ impl StateManager {
 
     // ── Snapshot / restore ───────────────────────────────────────────────────
 
-    pub fn create_snapshot(&mut self) -> StateResult<()> {
+    /// Flushes state and writes a RocksDB checkpoint, serialized trie, and
+    /// integrity manifest to a unique sibling directory.
+    pub fn create_snapshot(&mut self) -> StateResult<PathBuf> {
         self.sync_trie();
-        self.flush_internal()
+        self.flush_internal()?;
+        self.db
+            .flush_wal(true)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        self.db
+            .flush()
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+
+        let chain_id = match self
+            .db
+            .get(KEY_CHAIN_ID)
+            .map_err(|e| StateError::Storage(e.to_string()))?
+        {
+            Some(value) => std::str::from_utf8(&value)
+                .map_err(|e| StateError::Snapshot(format!("invalid stored chain ID: {e}")))?
+                .to_owned(),
+            None if self.block_height == 0 => std::env::var("BLEEP_CHAIN_ID")
+                .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string()),
+            None => {
+                return Err(StateError::Snapshot(
+                    "non-genesis state is missing its chain ID".into(),
+                ));
+            }
+        };
+        let root = hex::encode(self.trie.root());
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| StateError::Snapshot(e.to_string()))?
+            .as_nanos();
+        let db_name = self
+            .db_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("bleep-state"))
+            .to_string_lossy();
+        let parent = self
+            .db_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let snapshot_path = parent.join(format!(
+            "{db_name}.snapshot-{}-{timestamp}",
+            self.block_height
+        ));
+        if snapshot_path.exists() {
+            return Err(StateError::Snapshot(format!(
+                "snapshot destination already exists: {}",
+                snapshot_path.display()
+            )));
+        }
+
+        let checkpoint = rocksdb::checkpoint::Checkpoint::new(&self.db)
+            .map_err(|e| StateError::Snapshot(e.to_string()))?;
+        if let Err(error) = checkpoint.create_checkpoint(&snapshot_path) {
+            return Err(StateError::Snapshot(error.to_string()));
+        }
+
+        let snapshot_result = (|| {
+            let trie_bytes = bincode::serde::encode_to_vec(&self.trie, bincode::config::standard())
+                .map_err(|e| StateError::Serialisation(e.to_string()))?;
+            let mut trie_file = File::options()
+                .write(true)
+                .create_new(true)
+                .open(snapshot_path.join(SNAPSHOT_TRIE))
+                .map_err(|e| StateError::Snapshot(e.to_string()))?;
+            trie_file
+                .write_all(&trie_bytes)
+                .and_then(|()| trie_file.sync_all())
+                .map_err(|e| StateError::Snapshot(e.to_string()))?;
+
+            let manifest = SnapshotManifest {
+                version: 1,
+                chain_id,
+                block_height: self.block_height,
+                state_root: root,
+                db_checksum: snapshot_db_checksum(&snapshot_path)?,
+            };
+            let manifest_path = snapshot_path.join(SNAPSHOT_MANIFEST);
+            let mut file = File::options()
+                .write(true)
+                .create_new(true)
+                .open(manifest_path)
+                .map_err(|e| StateError::Snapshot(e.to_string()))?;
+            let bytes = serde_json::to_vec(&manifest)
+                .map_err(|e| StateError::Serialisation(e.to_string()))?;
+            file.write_all(&bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|e| StateError::Snapshot(e.to_string()))
+        })();
+        if let Err(error) = snapshot_result {
+            let _ = fs::remove_dir_all(&snapshot_path);
+            return Err(error);
+        }
+        Ok(snapshot_path)
     }
 
-    pub fn restore_snapshot(_path: &str) -> StateResult<Self> {
-        log::warn!("[StateManager] WAL-based restore is Sprint 4");
-        Ok(Self::new())
+    /// Restores a verified snapshot for the configured chain ID.
+    pub fn restore_snapshot(path: &str) -> StateResult<Self> {
+        let chain_id = std::env::var("BLEEP_CHAIN_ID")
+            .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+        Self::restore_snapshot_for_chain(path, &chain_id)
+    }
+
+    /// Restores a snapshot only when its checksum, height, trie, and chain ID
+    /// match the snapshot metadata and configured chain.
+    pub fn restore_snapshot_for_chain(path: &str, expected_chain_id: &str) -> StateResult<Self> {
+        let snapshot_path = Path::new(path);
+        if !snapshot_path.is_dir() {
+            return Err(StateError::Snapshot(format!(
+                "snapshot directory does not exist: {}",
+                snapshot_path.display()
+            )));
+        }
+        let manifest_path = snapshot_path.join(SNAPSHOT_MANIFEST);
+        let manifest_bytes = fs::read(&manifest_path)
+            .map_err(|e| StateError::Snapshot(format!("cannot read snapshot manifest: {e}")))?;
+        let manifest: SnapshotManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| StateError::Snapshot(format!("invalid snapshot manifest: {e}")))?;
+        if manifest.version != 1 {
+            return Err(StateError::Snapshot(format!(
+                "unsupported snapshot version {}",
+                manifest.version
+            )));
+        }
+        if manifest.chain_id != expected_chain_id {
+            return Err(StateError::Snapshot(format!(
+                "snapshot chain ID '{}' does not match configured chain ID '{}'",
+                manifest.chain_id, expected_chain_id
+            )));
+        }
+        let actual_checksum = snapshot_db_checksum(snapshot_path)?;
+        if actual_checksum != manifest.db_checksum {
+            return Err(StateError::Snapshot(
+                "snapshot checksum verification failed".into(),
+            ));
+        }
+
+        let mut state = Self::open(snapshot_path)?;
+        if state.block_height != manifest.block_height {
+            return Err(StateError::Snapshot(format!(
+                "snapshot block height mismatch: manifest {}, database {}",
+                manifest.block_height, state.block_height
+            )));
+        }
+        let stored_chain_id = state
+            .db
+            .get(KEY_CHAIN_ID)
+            .map_err(|e| StateError::Storage(e.to_string()))?;
+        if stored_chain_id
+            .as_deref()
+            .is_some_and(|chain_id| chain_id != manifest.chain_id.as_bytes())
+            || (state.block_height > 0 && stored_chain_id.is_none())
+        {
+            return Err(StateError::Snapshot(
+                "snapshot database chain ID does not match its manifest".into(),
+            ));
+        }
+        let trie_bytes = fs::read(snapshot_path.join(SNAPSHOT_TRIE))
+            .map_err(|e| StateError::Snapshot(format!("cannot read snapshot trie: {e}")))?;
+        let (mut snapshot_trie, bytes_read): (SparseMerkleTrie, usize) =
+            bincode::serde::decode_from_slice(&trie_bytes, bincode::config::standard())
+                .map_err(|e| StateError::Snapshot(format!("invalid snapshot trie: {e}")))?;
+        if bytes_read != trie_bytes.len()
+            || hex::encode(snapshot_trie.root()) != manifest.state_root
+        {
+            return Err(StateError::Snapshot(
+                "snapshot trie verification failed".into(),
+            ));
+        }
+        let actual_root = hex::encode(state.state_root());
+        if actual_root != manifest.state_root {
+            return Err(StateError::Snapshot(
+                "snapshot state root verification failed".into(),
+            ));
+        }
+        state.trie = snapshot_trie;
+        Ok(state)
     }
 
     // ── Apply transactions ────────────────────────────────────────────────────
@@ -817,6 +1008,65 @@ impl Default for StateManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn snapshot_db_checksum(snapshot_path: &Path) -> StateResult<String> {
+    fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) -> StateResult<()> {
+        for entry in fs::read_dir(directory)
+            .map_err(|e| StateError::Snapshot(format!("cannot read snapshot: {e}")))?
+        {
+            let entry =
+                entry.map_err(|e| StateError::Snapshot(format!("cannot read snapshot: {e}")))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| StateError::Snapshot(format!("cannot inspect snapshot: {e}")))?;
+            let path = entry.path();
+            if file_type.is_symlink() {
+                return Err(StateError::Snapshot(
+                    "snapshot contains a symbolic link".into(),
+                ));
+            }
+            if file_type.is_dir() {
+                collect_files(&path, files)?;
+            } else if file_type.is_file() {
+                if path.file_name() != Some(std::ffi::OsStr::new(SNAPSHOT_MANIFEST)) {
+                    files.push(path);
+                }
+            } else {
+                return Err(StateError::Snapshot(
+                    "snapshot contains an unsupported filesystem entry".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect_files(snapshot_path, &mut files)?;
+    files.sort();
+
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    for path in files {
+        let relative = path
+            .strip_prefix(snapshot_path)
+            .map_err(|e| StateError::Snapshot(e.to_string()))?;
+        let relative = relative.to_string_lossy();
+        hasher.update(&(relative.len() as u64).to_le_bytes());
+        hasher.update(relative.as_bytes());
+        let mut file = File::open(path)
+            .map_err(|e| StateError::Snapshot(format!("cannot read snapshot data: {e}")))?;
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|e| StateError::Snapshot(format!("cannot read snapshot data: {e}")))?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn account_key(address: &str) -> Vec<u8> {
@@ -1161,9 +1411,96 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_ok() {
-        let mut m = fresh();
-        m.mint("carol", 9999).expect("mint");
-        assert!(m.create_snapshot().is_ok());
+    fn snapshot_restores_state_and_validates_chain_and_height() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "bleep-state-snapshot-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let db_path = test_dir.join("db");
+        let mut state = StateManager::open(&db_path).expect("open state");
+        state.set_balance("carol", 9999);
+        state
+            .persist_canonical_block(
+                &"block-one",
+                1,
+                "block-one-hash",
+                "genesis-hash",
+                "snapshot-test-chain",
+                "genesis-hash",
+            )
+            .expect("persist block");
+        let expected_root = state.state_root();
+        let snapshot_path = state.create_snapshot().expect("create snapshot");
+        drop(state);
+
+        assert!(StateManager::restore_snapshot_for_chain(
+            snapshot_path.to_str().expect("snapshot path"),
+            "another-chain"
+        )
+        .is_err());
+        let restored = StateManager::restore_snapshot_for_chain(
+            snapshot_path.to_str().expect("snapshot path"),
+            "snapshot-test-chain",
+        )
+        .expect("restore snapshot");
+        assert_eq!(restored.block_height(), 1);
+        assert_eq!(restored.get_balance("carol"), 9999);
+        assert_eq!(restored.trie.clone().root(), expected_root);
+        drop(restored);
+
+        let manifest_path = snapshot_path.join(SNAPSHOT_MANIFEST);
+        let mut manifest: SnapshotManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        manifest.block_height = 2;
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+        assert!(StateManager::restore_snapshot_for_chain(
+            snapshot_path.to_str().expect("snapshot path"),
+            "snapshot-test-chain"
+        )
+        .is_err());
+        fs::remove_dir_all(test_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn snapshot_rejects_missing_and_corrupt_files() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "bleep-state-snapshot-corrupt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let db_path = test_dir.join("db");
+        let mut state = StateManager::open(&db_path).expect("open state");
+        let snapshot_path = state.create_snapshot().expect("create snapshot");
+        drop(state);
+
+        assert!(StateManager::restore_snapshot_for_chain(
+            test_dir.join("missing").to_str().expect("missing path"),
+            bleep_crypto::DEFAULT_CHAIN_ID
+        )
+        .is_err());
+        fs::OpenOptions::new()
+            .append(true)
+            .open(snapshot_path.join(SNAPSHOT_TRIE))
+            .expect("open trie")
+            .write_all(b"corruption")
+            .expect("corrupt trie");
+        assert!(StateManager::restore_snapshot_for_chain(
+            snapshot_path.to_str().expect("snapshot path"),
+            bleep_crypto::DEFAULT_CHAIN_ID
+        )
+        .is_err());
+        fs::remove_dir_all(test_dir).expect("remove test directory");
     }
 }

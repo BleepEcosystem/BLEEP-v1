@@ -21,6 +21,7 @@ sha2         = "0.10.8"
 sha3         = "0.10"
 rand         = "0.8.5"
 hex          = "0.4.3"
+bleep-crypto = { path = "../bleep-crypto" }
 pqcrypto     = "0.18.1"
 pqcrypto-mlkem = "0.1.1"
 pqcrypto-sphincsplus = "0.7.1"

@@ -3,8 +3,9 @@
 use bleep_core::block::Transaction;
 use bleep_core::transaction::ZKTransaction;
 use bleep_core::{Block, Blockchain, Mempool, TransactionPool};
-use bleep_crypto::quantum_secure::QuantumSecure;
-use bleep_crypto::tx_signer::generate_tx_keypair;
+use bleep_crypto::tx_signer::{
+    derive_account_address, generate_tx_keypair, sign_tx_payload, tx_payload, DEFAULT_CHAIN_ID,
+};
 
 use log::{error, info, warn};
 use std::error::Error;
@@ -29,10 +30,24 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
         blockchain.chain.len()
     );
 
-    let quantum_secure = QuantumSecure::keygen();
-    let pending_tx = ZKTransaction::new("alice", "bob", 42, &quantum_secure);
+    let (public_key, secret_key) = generate_tx_keypair();
+    let sender = derive_account_address(&public_key);
+    let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
+    let payload = tx_payload(DEFAULT_CHAIN_ID, &sender, "bob", 42, timestamp, 0);
+    let signature = sign_tx_payload(&payload, &secret_key)?;
+    let mut signed_bytes = public_key;
+    signed_bytes.extend_from_slice(&signature);
+    let pending_tx = ZKTransaction {
+        chain_id: DEFAULT_CHAIN_ID.to_string(),
+        sender,
+        receiver: "bob".to_string(),
+        amount: 42,
+        timestamp,
+        nonce: 0,
+        signature: signed_bytes,
+    };
 
-    let mempool = Mempool::new();
+    let mempool = Mempool::new(DEFAULT_CHAIN_ID, Mempool::embedded_sender_public_key);
     if !mempool.add_transaction(pending_tx.clone()).await {
         warn!("Transaction already existed in mempool");
     }
@@ -40,7 +55,7 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
     let zk_txs = mempool.get_pending_transactions().await;
     let mut pending_txs: Vec<Transaction> = Vec::with_capacity(zk_txs.len());
     for tx in zk_txs {
-        if !tx.verify(&quantum_secure) {
+        if !tx.verify_account_authorization() {
             warn!(
                 "Skipping invalid transaction from {} to {}",
                 tx.sender, tx.receiver

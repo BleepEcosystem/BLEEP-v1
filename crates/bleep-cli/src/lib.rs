@@ -204,7 +204,10 @@ pub enum GovernanceCommand {
 #[derive(Subcommand)]
 pub enum StateCommand {
     Snapshot,
-    Restore { snapshot_path: String },
+    Restore {
+        #[arg(long = "path")]
+        snapshot_path: String,
+    },
 }
 
 // ── PAT ───────────────────────────────────────────────────────────────────────

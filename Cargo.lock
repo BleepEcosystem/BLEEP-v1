@@ -1671,6 +1671,7 @@ version = "1.0.0"
 dependencies = [
  "bincode 2.0.1",
  "blake3",
+ "bleep-crypto",
  "dashmap 5.5.3",
  "hex",
  "log",

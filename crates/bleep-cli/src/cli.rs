@@ -528,16 +528,18 @@ async fn run(cmd: Commands) -> Result<()> {
                     .unwrap_or_else(|_| "/tmp/bleep-state".to_string());
                 let mut state = StateManager::open(&state_dir)
                     .map_err(|e| anyhow!("State open failed: {}", e))?;
-                state
+                let snapshot_path = state
                     .create_snapshot()
                     .map_err(|e| anyhow!("Snapshot failed: {}", e))?;
                 let root = state.state_root();
-                println!("✅ Snapshot written to {}", state_dir);
+                println!("✅ Snapshot written to {}", snapshot_path.display());
                 println!("   Merkle root: {}", hex::encode(root));
                 println!("   Block height: {}", state.block_height());
             }
             StateCommand::Restore { snapshot_path } => {
-                let _state = StateManager::restore_snapshot(&snapshot_path)
+                let chain_id = std::env::var("BLEEP_CHAIN_ID")
+                    .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+                let _state = StateManager::restore_snapshot_for_chain(&snapshot_path, &chain_id)
                     .map_err(|e| anyhow!("Restore failed: {}", e))?;
                 println!("✅ State restored from {}", snapshot_path);
             }
