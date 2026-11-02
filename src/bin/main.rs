@@ -591,42 +591,56 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // ── Step 6b: ValidatorRegistry + SlashingEngine ───────────────────────────
     info!("🗳  [7/16] Initialising ValidatorRegistry and SlashingEngine…");
-    let validator_registry = Arc::new(Mutex::new(ValidatorRegistry::new()));
-    let slashing_engine = Arc::new(Mutex::new(SlashingEngine::new()));
+    const VALIDATOR_REGISTRY_KEY: &str = "consensus/validator_registry/v1";
+    let validator_registry = {
+        let mut state_guard = state.lock();
+        match state_guard
+            .get_application_data(VALIDATOR_REGISTRY_KEY)
+            .map_err(|error| format!("Validator registry load failed: {error}"))?
+        {
+            Some(bytes) => ValidatorRegistry::from_persistent_bytes(&bytes)
+                .map_err(|error| format!("Persisted validator registry is invalid: {error}"))?,
+            None if state_guard.block_height() == 0 => {
+                let validator_id = hex::encode(&sphincs_pk[..8]);
+                let identity = ValidatorIdentity::new_with_vrf_public_key(
+                    validator_id.clone(),
+                    kyber_pk.as_bytes().to_vec(),
+                    hex::encode(&sphincs_pk),
+                    bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(
+                        &sphincs_sk,
+                    )?,
+                    1_000_000u128,
+                    0,
+                )
+                .map_err(|error| format!("Genesis validator initialization failed: {error}"))?;
 
-    // Register the local node as the genesis validator with the real Kyber-1024 public key.
-    {
-        let mut reg = validator_registry.lock();
-        // Use the first 8 bytes of the SPHINCS+ PK as the validator ID
-        let validator_id = hex::encode(&sphincs_pk[..8]);
-        // Real Kyber-1024 PK bytes (1568 bytes) — wired from Step 1 keygen
-        let real_kyber_pk = kyber_pk.as_bytes().to_vec();
-        // S-06: pass the real SPHINCS+ public key bytes so SlashingEngine can
-        // cryptographically verify evidence before slashing this validator.
-        let signing_key_id = hex::encode(&sphincs_pk);
-        let vrf_public_key =
-            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&sphincs_sk)?;
-        let genesis_validator = ValidatorIdentity::new_with_vrf_public_key(
-            validator_id.clone(),
-            real_kyber_pk,
-            signing_key_id,
-            vrf_public_key,
-            1_000_000u128, // initial stake (matches BlockProducer config)
-            0,             // genesis epoch
-        );
-        match genesis_validator {
-            Ok(v) => {
-                reg.register_validator(v)
-                    .and_then(|_| reg.activate_validator(&validator_id))
-                    .map_err(|e| format!("Genesis validator activation failed: {e}"))?;
+                let mut registry = ValidatorRegistry::new();
+                registry
+                    .register_validator(identity)
+                    .and_then(|_| registry.activate_validator(&validator_id))
+                    .map_err(|error| format!("Genesis validator activation failed: {error}"))?;
+                let snapshot = registry
+                    .to_persistent_bytes()
+                    .map_err(|error| format!("Genesis validator registry encoding failed: {error}"))?;
+                state_guard
+                    .put_application_data(VALIDATOR_REGISTRY_KEY, &snapshot)
+                    .map_err(|error| format!("Genesis validator registry persistence failed: {error}"))?;
                 info!(
-                    "  ✅ Genesis validator registered: id={} (Kyber-1024 + SPHINCS+ PKs wired)",
-                    validator_id
+                    "  ✅ Genesis validator registered and persisted: id={validator_id}"
                 );
+                registry
             }
-            Err(e) => warn!("  ⚠️  Genesis validator registration skipped: {}", e),
+            None => {
+                return Err(format!(
+                    "Validator registry is missing at chain height {}; refusing to bootstrap a new genesis validator. Restore the registry snapshot before joining this chain.",
+                    state_guard.block_height()
+                )
+                .into());
+            }
         }
-    }
+    };
+    let validator_registry = Arc::new(Mutex::new(validator_registry));
+    let slashing_engine = Arc::new(Mutex::new(SlashingEngine::new()));
 
     // ── Step 6c: STARK initialization ─────────────────────────────────────────
     info!("🔐 [8/16] Initializing STARK prover/verifier (no trusted setup required)…");
@@ -651,9 +665,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
             current_supply
         );
 
-        // Register genesis validator with economics engine
-        let genesis_val_id = hex::encode(&sphincs_pk[..8]);
-        let _ = rt.register_validator(genesis_val_id.as_bytes().to_vec(), 1_000_000u128);
+        for validator in validator_registry.lock().get_all_validators() {
+            rt.register_validator(validator.id.as_bytes().to_vec(), validator.effective_stake())
+                .map_err(|error| format!("Economics validator initialization failed: {error}"))?;
+        }
 
         info!(
             "  ✅ EconomicsRuntime: genesis supply=0, base_fee={} µBLEEP; oracle operators must be registered with a valid public key",

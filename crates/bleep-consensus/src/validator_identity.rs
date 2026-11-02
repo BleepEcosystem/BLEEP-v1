@@ -306,6 +306,7 @@ impl fmt::Display for ValidatorState {
 ///
 /// SAFETY: This is the authoritative validator set.
 /// All consensus operations reference this registry.
+#[derive(Clone)]
 pub struct ValidatorRegistry {
     /// Map of validator ID to validator identity
     validators: HashMap<String, ValidatorIdentity>,
@@ -331,6 +332,51 @@ impl ValidatorRegistry {
             active_validators: BTreeSet::new(),
             total_active_stake: 0,
         }
+    }
+
+    /// Encode the canonical validator set for durable local storage.
+    pub fn to_persistent_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut validators = self.validators.values().cloned().collect::<Vec<_>>();
+        validators.sort_by(|left, right| left.id.cmp(&right.id));
+        serde_json::to_vec(&ValidatorRegistrySnapshot {
+            version: 1,
+            validators,
+        })
+        .map_err(|error| format!("Serialize validator registry: {error}"))
+    }
+
+    /// Restore a registry and rebuild derived active-set indexes from identities.
+    pub fn from_persistent_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let snapshot: ValidatorRegistrySnapshot = serde_json::from_slice(bytes)
+            .map_err(|error| format!("Deserialize validator registry: {error}"))?;
+        if snapshot.version != 1 {
+            return Err(format!(
+                "Unsupported validator registry version {}",
+                snapshot.version
+            ));
+        }
+
+        let mut registry = Self::new();
+        for validator in snapshot.validators {
+            if validator.id.is_empty() || validator.stake == 0 {
+                return Err("Persisted validator identity has an empty ID or zero stake".into());
+            }
+            if validator.can_participate() {
+                registry.total_active_stake = registry
+                    .total_active_stake
+                    .checked_add(validator.stake)
+                    .ok_or_else(|| "Persisted active validator stake overflow".to_string())?;
+                registry.active_validators.insert(validator.id.clone());
+            }
+            if registry
+                .validators
+                .insert(validator.id.clone(), validator)
+                .is_some()
+            {
+                return Err("Persisted validator registry contains duplicate IDs".into());
+            }
+        }
+        Ok(registry)
     }
 
     /// Number of validators participating in the current active set.
@@ -499,6 +545,12 @@ impl ValidatorRegistry {
     pub fn can_participate(&self, id: &str) -> bool {
         self.get(id).map(|v| v.can_participate()).unwrap_or(false)
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ValidatorRegistrySnapshot {
+    version: u32,
+    validators: Vec<ValidatorIdentity>,
 }
 
 impl Default for ValidatorRegistry {
