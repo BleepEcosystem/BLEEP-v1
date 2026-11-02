@@ -26,6 +26,8 @@ use crate::quantum_crypto::{
 };
 use crate::types::{unix_now, MessageType, NodeId, SecureMessage};
 
+pub type InboundMessage = (NodeId, SecureMessage, Vec<u8>);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,7 +131,7 @@ pub struct MessageProtocol {
     /// Anti-replay cache.
     nonce_cache: Arc<Mutex<NonceCache>>,
     /// Inbound message channel — consumers subscribe to this.
-    inbound_tx: mpsc::Sender<(NodeId, SecureMessage, Vec<u8>)>,
+    inbound_tx: mpsc::Sender<InboundMessage>,
     peer_manager: Arc<PeerManager>,
 }
 
@@ -139,7 +141,7 @@ impl MessageProtocol {
         local_sphincs: SphincsKeypair,
         local_kyber: KyberKeypair,
         peer_manager: Arc<PeerManager>,
-    ) -> (Arc<Self>, mpsc::Receiver<(NodeId, SecureMessage, Vec<u8>)>) {
+    ) -> (Arc<Self>, mpsc::Receiver<InboundMessage>) {
         let local_id = NodeId::from_bytes(&local_identity.public_key_bytes());
         let (tx, rx) = mpsc::channel(4096);
         let proto = Arc::new(MessageProtocol {

@@ -32,18 +32,13 @@ const ENCRYPTED_KEY_MAGIC: &[u8; 4] = b"BWK2";
 const ARGON2_SALT_LEN: usize = 16;
 const AES_GCM_NONCE_LEN: usize = 12;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum KeyProtection {
     Argon2id,
     PlaintextDev,
+    #[default]
     Legacy,
-}
-
-impl Default for KeyProtection {
-    fn default() -> Self {
-        Self::Legacy
-    }
 }
 
 // ─── EncryptedWallet ──────────────────────────────────────────────────────────

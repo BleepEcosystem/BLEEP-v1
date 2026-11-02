@@ -1707,13 +1707,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     .collect();
                             match state.apply_canonical_block(
                                 &block,
-                                block.index,
-                                &block.compute_hash(),
-                                &block.previous_hash,
-                                &inbound_chain_id,
-                                &inbound_genesis_hash,
-                                &block.shard_state_root,
-                                &transfers,
+                                bleep_state::state_manager::CanonicalBlockContext {
+                                    index: block.index,
+                                    block_hash: &block.compute_hash(),
+                                    previous_hash: &block.previous_hash,
+                                    chain_id: &inbound_chain_id,
+                                    genesis_hash: &inbound_genesis_hash,
+                                    expected_post_state_root: &block.shard_state_root,
+                                    transfers: &transfers,
+                                },
                             ) {
                                 Ok(()) => chain.add_block_with_validator_set(
                                     block.clone(),

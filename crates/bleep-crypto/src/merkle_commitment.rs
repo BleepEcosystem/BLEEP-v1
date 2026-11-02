@@ -70,7 +70,9 @@ pub fn merkle_root_from_hashes(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     level.resize(padded_len, merkle_empty_leaf());
     while level.len() > 1 {
         level = level
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .enumerate()
             .map(|(position, pair)| merkle_hash_node(&pair[0], &pair[1], position as u64))
             .collect();
@@ -334,7 +336,9 @@ impl MerkleTree {
 
         while nodes.len() > 1 {
             nodes = nodes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .enumerate()
                 .map(|(position, pair)| {
                     MerkleNode::branch(pair[0].clone(), pair[1].clone(), position as u64)
@@ -379,7 +383,9 @@ impl MerkleTree {
         while current_level.len() > 1 {
             path.push(current_level[current_index ^ 1]);
             current_level = current_level
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .enumerate()
                 .map(|(position, pair)| merkle_hash_node(&pair[0], &pair[1], position as u64))
                 .collect();

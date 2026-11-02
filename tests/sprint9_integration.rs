@@ -448,10 +448,13 @@ mod security_audit_integration {
                 .map(|f| &f.id)
                 .collect::<Vec<_>>()
         );
-        for id in ["SA-H1", "SA-H3"] {
-            let finding = report.findings.iter().find(|f| f.id == id).unwrap();
-            assert!(matches!(finding.status, FindingStatus::Open { .. }));
-        }
+        let resolved_high = report.findings.iter().find(|f| f.id == "SA-H1").unwrap();
+        assert!(matches!(
+            resolved_high.status,
+            FindingStatus::Resolved { .. }
+        ));
+        let open_high = report.findings.iter().find(|f| f.id == "SA-H3").unwrap();
+        assert!(matches!(open_high.status, FindingStatus::Open { .. }));
     }
 
     #[test]

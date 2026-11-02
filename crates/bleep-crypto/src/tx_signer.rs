@@ -104,19 +104,26 @@ pub fn tx_payload(
 ///
 /// The destination commits to the Kyber and VRF public keys so the signing key
 /// proves ownership of both validator keys in the stake request.
+pub struct ValidatorKeyBindings<'a> {
+    pub label: &'a str,
+    pub kyber_public_key: &'a [u8],
+    pub vrf_public_key: &'a [u8],
+}
+
 pub fn validator_stake_payload(
     chain_id: &str,
     sender: &str,
-    label: &str,
+    validator: ValidatorKeyBindings<'_>,
     amount: u64,
     timestamp: u64,
     nonce: u64,
-    kyber_public_key: &[u8],
-    vrf_public_key: &[u8],
 ) -> [u8; 32] {
-    let kem_commitment = hex::encode(Sha256::digest(kyber_public_key));
-    let vrf_commitment = hex::encode(Sha256::digest(vrf_public_key));
-    let receiver = format!("validator:{label}:kem:{kem_commitment}:vrf:{vrf_commitment}");
+    let kem_commitment = hex::encode(Sha256::digest(validator.kyber_public_key));
+    let vrf_commitment = hex::encode(Sha256::digest(validator.vrf_public_key));
+    let receiver = format!(
+        "validator:{}:kem:{kem_commitment}:vrf:{vrf_commitment}",
+        validator.label
+    );
     tx_payload(chain_id, sender, &receiver, amount, timestamp, nonce)
 }
 

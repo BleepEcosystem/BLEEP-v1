@@ -699,13 +699,16 @@ impl HashFunctions {
 /// Hybrid encryption: Kyber KEM + AES-256-GCM
 pub struct HybridEncryption;
 
+/// Ciphertext, Kyber encapsulation, AES-GCM nonce, and HKDF salt.
+pub type HybridEncryptionResult = (Vec<u8>, KyberCiphertext, Vec<u8>, Vec<u8>);
+
 impl HybridEncryption {
     /// Encrypt data using Kyber + AES-256-GCM
     /// Returns (ciphertext, kyber_ciphertext, nonce, HKDF salt).
     pub fn encrypt(
         data: &[u8],
         kyber_public_key: &KyberPublicKey,
-    ) -> CryptoResult<(Vec<u8>, KyberCiphertext, Vec<u8>, Vec<u8>)> {
+    ) -> CryptoResult<HybridEncryptionResult> {
         use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
         use rand::RngCore;

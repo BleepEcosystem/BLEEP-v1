@@ -1141,6 +1141,7 @@ dependencies = [
 name = "bleep-connect-executor"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bleep-connect-adapters",
  "bleep-connect-commitment-chain",
  "bleep-connect-crypto",

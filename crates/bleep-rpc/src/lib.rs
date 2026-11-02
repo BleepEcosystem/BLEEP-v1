@@ -459,22 +459,13 @@ impl StakeRequest {
 fn validator_stake_payload(
     chain_id: &str,
     account: &str,
-    label: &str,
+    validator: bleep_crypto::tx_signer::ValidatorKeyBindings<'_>,
     amount: u64,
     timestamp: u64,
     nonce: u64,
-    kyber_public_key: &[u8],
-    vrf_public_key: &[u8],
 ) -> [u8; 32] {
     bleep_crypto::tx_signer::validator_stake_payload(
-        chain_id,
-        account,
-        label,
-        amount,
-        timestamp,
-        nonce,
-        kyber_public_key,
-        vrf_public_key,
+        chain_id, account, validator, amount, timestamp, nonce,
     )
 }
 
@@ -536,12 +527,14 @@ fn register_validator_stake(
     let request_hash = validator_stake_payload(
         &chain_id,
         &account,
-        &req.label,
+        bleep_crypto::tx_signer::ValidatorKeyBindings {
+            label: &req.label,
+            kyber_public_key: &kyber_public_key,
+            vrf_public_key: &vrf_public_key,
+        },
         req.amount,
         req.timestamp,
         nonce,
-        &kyber_public_key,
-        &vrf_public_key,
     );
     if !verify_tx_signature(&request_hash, &proof, &signing_public_key) {
         return Err((
@@ -3950,7 +3943,7 @@ fn explorer_api_blocks(
                     .chain
                     .iter()
                     .rev()
-                    .filter(|block| query.before.map_or(true, |before| block.index < before))
+                    .filter(|block| query.before.is_none_or(|before| block.index < before))
                     .take(limit)
                     .map(explorer_block_summary)
                     .collect();
@@ -4344,18 +4337,21 @@ mod tests {
         let substituted_key = substituted_key.to_vec();
         let vrf_secret = [0x29; 128];
         let vrf_public_key =
-            PoSConsensusEngine::derive_vrf_public_key(&vrf_secret).unwrap();
+            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&vrf_secret)
+                .unwrap();
         let amount = 3_000;
         let timestamp = now_secs();
         let payload = validator_stake_payload(
             bleep_crypto::DEFAULT_CHAIN_ID,
             &account,
-            "candidate-a",
+            bleep_crypto::tx_signer::ValidatorKeyBindings {
+                label: "candidate-a",
+                kyber_public_key: &kyber_public_key,
+                vrf_public_key: &vrf_public_key,
+            },
             amount,
             timestamp,
             0,
-            &kyber_public_key,
-            &vrf_public_key,
         );
         let proof = sign_tx_payload(&payload, &secret_key).unwrap();
         let req = StakeRequest {

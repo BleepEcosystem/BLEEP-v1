@@ -394,7 +394,10 @@ mod tests {
         exec.deposit_capital(ChainId::Ethereum, 100_000_000_000)
             .await;
 
-        let layer4 = Arc::new(Layer4Instant::new(chain));
+        let layer4 = Arc::new(Layer4Instant::new_with_escrow_verifier(
+            chain,
+            Some(Arc::new(TestEscrowVerifier)),
+        ));
         layer4.register_executor(ExecutorProfile {
             address: addr,
             tier: ExecutorTier::Standard,
@@ -437,6 +440,21 @@ mod tests {
             signature: vec![1],
             escrow_tx_hash: "0xescrow".into(),
             escrow_proof: vec![1, 2, 3],
+        }
+    }
+
+    struct TestEscrowVerifier;
+
+    #[async_trait::async_trait]
+    impl bleep_connect_layer4_instant::EscrowVerifier for TestEscrowVerifier {
+        async fn verify_escrow(
+            &self,
+            intent: &InstantIntent,
+        ) -> Result<bleep_connect_layer4_instant::VerifiedEscrow, String> {
+            Ok(bleep_connect_layer4_instant::VerifiedEscrow {
+                amount: intent.source_amount,
+                recipient: intent.recipient.address.clone(),
+            })
         }
     }
 

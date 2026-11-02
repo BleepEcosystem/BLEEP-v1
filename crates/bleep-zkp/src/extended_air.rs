@@ -197,8 +197,10 @@ impl Air for ExtendedBlockValidityAir {
 
         let mut reconstructed = E::ZERO;
         let mut bit_weight = E::ONE;
-        for bit_column in COL_RANGE_BITS_START..=COL_RANGE_BITS_END {
-            let bit = current[bit_column];
+        for bit in current[COL_RANGE_BITS_START..=COL_RANGE_BITS_END]
+            .iter()
+            .copied()
+        {
             result[index] = bit * (bit - one);
             index += 1;
             reconstructed += bit * bit_weight;
@@ -281,7 +283,7 @@ pub(crate) fn range_values(
 
 fn push_u64_limbs(values: &mut Vec<BaseElement>, value: u64) {
     for shift in [0, 16, 32, 48] {
-        values.push(BaseElement::from(((value >> shift) & 0xffff) as u64));
+        values.push(BaseElement::from((value >> shift) & 0xffff));
     }
 }
 

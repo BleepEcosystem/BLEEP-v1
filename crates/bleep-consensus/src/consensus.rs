@@ -73,7 +73,7 @@ const SPHINCS_PK_LEN: usize = 32;
 // ── Reputation thresholds ─────────────────────────────────────────────────────
 
 /// Validators must meet this minimum to be eligible to vote in PBFT.
-
+///
 /// Validators below this threshold are flagged and deactivated by monitoring.
 const REPUTATION_SUSPECT_THRESHOLD: f64 = 0.30;
 

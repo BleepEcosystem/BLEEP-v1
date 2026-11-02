@@ -74,6 +74,16 @@ pub struct CanonicalTransfer {
     pub nonce: u64,
 }
 
+pub struct CanonicalBlockContext<'a> {
+    pub index: u64,
+    pub block_hash: &'a str,
+    pub previous_hash: &'a str,
+    pub chain_id: &'a str,
+    pub genesis_hash: &'a str,
+    pub expected_post_state_root: &'a str,
+    pub transfers: &'a [CanonicalTransfer],
+}
+
 impl AccountState {
     /// Default account state with 10 BLEEP initial balance for pre-testnet
     pub fn pretestnet_default() -> Self {
@@ -274,19 +284,18 @@ impl StateManager {
     pub fn apply_canonical_block<T: serde::Serialize>(
         &mut self,
         block: &T,
-        index: u64,
-        block_hash: &str,
-        previous_hash: &str,
-        chain_id: &str,
-        genesis_hash: &str,
-        expected_post_state_root: &str,
-        transfers: &[CanonicalTransfer],
+        context: CanonicalBlockContext<'_>,
     ) -> StateResult<()> {
-        self.check_next_canonical_block(index, previous_hash, chain_id, genesis_hash)?;
+        self.check_next_canonical_block(
+            context.index,
+            context.previous_hash,
+            context.chain_id,
+            context.genesis_hash,
+        )?;
 
         let original_cache = self.cache.clone();
         let original_trie = self.trie.clone();
-        for transfer in transfers {
+        for transfer in context.transfers {
             if self.get_nonce(&transfer.sender) != transfer.nonce
                 || !self.apply_transfer_with_nonce(
                     &transfer.sender,
@@ -298,27 +307,31 @@ impl StateManager {
                 self.cache = original_cache.clone();
                 return Err(StateError::Storage(format!(
                     "block {} transaction state transition rejected for {}",
-                    index, transfer.sender
+                    context.index, transfer.sender
                 )));
             }
         }
 
         let actual_post_state_root = hex::encode(self.state_root());
-        if actual_post_state_root != expected_post_state_root {
+        if actual_post_state_root != context.expected_post_state_root {
             self.cache = original_cache;
             self.trie = original_trie;
             return Err(StateError::Storage(format!(
                 "block {} post-state root mismatch: expected {}, computed {}",
-                index, expected_post_state_root, actual_post_state_root
+                context.index, context.expected_post_state_root, actual_post_state_root
             )));
         }
 
-        self.block_height = index;
+        self.block_height = context.index;
         self.sync_trie();
-        if let Err(e) =
-            self.flush_with_canonical_block(block, index, block_hash, previous_hash, chain_id)
-        {
-            self.block_height = index.saturating_sub(1);
+        if let Err(e) = self.flush_with_canonical_block(
+            block,
+            context.index,
+            context.block_hash,
+            context.previous_hash,
+            context.chain_id,
+        ) {
+            self.block_height = context.index.saturating_sub(1);
             self.cache = original_cache;
             self.trie = original_trie;
             return Err(e);
@@ -1302,13 +1315,15 @@ mod tests {
         assert!(state
             .apply_canonical_block(
                 &"block-one",
-                1,
-                block_hash,
-                genesis_hash,
-                chain_id,
-                genesis_hash,
-                "",
-                &[rejected_transfer],
+                CanonicalBlockContext {
+                    index: 1,
+                    block_hash,
+                    previous_hash: genesis_hash,
+                    chain_id,
+                    genesis_hash,
+                    expected_post_state_root: "",
+                    transfers: &[rejected_transfer],
+                },
             )
             .is_err());
         assert_eq!(state.block_height(), 0);
@@ -1328,13 +1343,15 @@ mod tests {
         assert!(state
             .apply_canonical_block(
                 &"block-one",
-                1,
-                block_hash,
-                genesis_hash,
-                chain_id,
-                genesis_hash,
-                "incorrect-root",
-                std::slice::from_ref(&valid_transfer),
+                CanonicalBlockContext {
+                    index: 1,
+                    block_hash,
+                    previous_hash: genesis_hash,
+                    chain_id,
+                    genesis_hash,
+                    expected_post_state_root: "incorrect-root",
+                    transfers: std::slice::from_ref(&valid_transfer),
+                },
             )
             .is_err());
         assert_eq!(state.block_height(), 0);
@@ -1344,13 +1361,15 @@ mod tests {
         state
             .apply_canonical_block(
                 &"block-one",
-                1,
-                block_hash,
-                genesis_hash,
-                chain_id,
-                genesis_hash,
-                &expected_post_state_root,
-                &[valid_transfer],
+                CanonicalBlockContext {
+                    index: 1,
+                    block_hash,
+                    previous_hash: genesis_hash,
+                    chain_id,
+                    genesis_hash,
+                    expected_post_state_root: &expected_post_state_root,
+                    transfers: &[valid_transfer],
+                },
             )
             .expect("apply inbound block");
         drop(state);

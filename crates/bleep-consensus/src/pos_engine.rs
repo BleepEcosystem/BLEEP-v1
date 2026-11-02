@@ -26,6 +26,8 @@ const VRF_INPUT_DOMAIN: &[u8] = b"BLEEP_POS_VRF_INPUT_V1";
 const VRF_OUTPUT_DOMAIN: &[u8] = b"BLEEP_POS_VRF_OUTPUT_V1";
 const GENESIS_RANDOMNESS_DOMAIN: &[u8] = b"BLEEP_POS_GENESIS_RANDOMNESS_V1";
 
+pub type VrfStarkEnvelopeParts<'a> = (&'a [u8], &'a [u8], &'a [u8]);
+
 /// Validator stake information.
 #[derive(Debug, Clone)]
 pub struct ValidatorStake {
@@ -169,7 +171,7 @@ impl PoSConsensusEngine {
         envelope
     }
 
-    pub fn decode_vrf_stark_envelope(envelope: &[u8]) -> Result<(&[u8], &[u8], &[u8]), String> {
+    pub fn decode_vrf_stark_envelope(envelope: &[u8]) -> Result<VrfStarkEnvelopeParts<'_>, String> {
         if !envelope.starts_with(VRF_STARK_ENVELOPE_MAGIC)
             || envelope.len() <= VRF_STARK_ENVELOPE_HEADER_LEN
         {
