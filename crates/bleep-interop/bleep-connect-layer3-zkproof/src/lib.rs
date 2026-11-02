@@ -283,7 +283,7 @@ impl BatchAggregator {
 
         let proof_ids: Vec<[u8; 32]> = batch.iter().map(|p| p.proof_id).collect();
         let leaves: Vec<[u8; 32]> = proof_ids.clone();
-        let aggregated_root = merkle_root(&leaves);
+        let aggregated_root = merkle_root(&leaves)?;
 
         let mut batch_id_data = Vec::new();
         batch_id_data.extend_from_slice(b"L3-BATCH");

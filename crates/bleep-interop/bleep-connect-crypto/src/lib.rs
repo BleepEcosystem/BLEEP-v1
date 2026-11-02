@@ -14,6 +14,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use blake2::Blake2b512;
+use bleep_crypto::merkle_commitment::merkle_root_from_hashes;
 use hkdf::Hkdf;
 use pqcrypto_mlkem::mlkem1024;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
@@ -278,34 +279,11 @@ pub fn blake3_hash(data: &[u8]) -> [u8; 32] {
     blake2b_32(data)
 }
 
-/// Compute a Merkle root from a list of 32-byte leaf hashes.
-pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
-    if leaves.is_empty() {
-        return [0u8; 32];
-    }
-    if leaves.len() == 1 {
-        return leaves[0];
-    }
-    let mut current = leaves.to_vec();
-    while current.len() > 1 {
-        let mut next = Vec::new();
-        let mut i = 0;
-        while i < current.len() {
-            let left = current[i];
-            let right = if i + 1 < current.len() {
-                current[i + 1]
-            } else {
-                current[i]
-            };
-            let mut combined = Vec::with_capacity(64);
-            combined.extend_from_slice(&left);
-            combined.extend_from_slice(&right);
-            next.push(sha256(&combined));
-            i += 2;
-        }
-        current = next;
-    }
-    current[0]
+/// Compute the canonical, domain-separated Merkle root from pre-hashed leaves.
+///
+/// Empty input or a leaf count whose padded tree width overflows returns `None`.
+pub fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
+    merkle_root_from_hashes(leaves)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -424,11 +402,20 @@ mod tests {
     #[test]
     fn test_merkle_root() {
         let leaves: Vec<[u8; 32]> = (0u8..4).map(|i| sha256(&[i])).collect();
-        let root = merkle_root(&leaves);
+        let root = merkle_root(&leaves).unwrap();
         assert_ne!(root, [0u8; 32]);
         // Same leaves, same root
         let root2 = merkle_root(&leaves);
-        assert_eq!(root, root2);
+        assert_eq!(Some(root), root2);
+        assert_eq!(
+            Some(root),
+            bleep_crypto::merkle_commitment::merkle_root_from_hashes(&leaves)
+        );
+    }
+
+    #[test]
+    fn test_merkle_root_rejects_empty_tree() {
+        assert_eq!(merkle_root(&[]), None);
     }
 
     #[test]

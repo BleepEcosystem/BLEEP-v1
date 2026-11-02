@@ -1123,6 +1123,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "blake2",
+ "bleep-crypto",
  "hex",
  "hkdf",
  "pqcrypto-mlkem",

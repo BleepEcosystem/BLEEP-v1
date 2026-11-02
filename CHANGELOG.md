@@ -12,6 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- Identity Merkle paths and BLEEP Connect L3 batch roots now use the shared domain-separated, position-bound, versioned commitment format; legacy Merkle roots are incompatible, and empty L3 trees return no root
 - P2P encoded frame-body limit reduced to 2 MiB and enforced before receive-side allocation/deserialization; SAL payload allowance reserves transport overhead
 - Non-genesis block protocol version bumped to 3: block signatures and emergency PoW now use `Block::compute_hash()`; genesis remains pinned to v2 to preserve the chain anchor. v2 nodes are incompatible and must be upgraded together before activation
 - Repository documentation updated to Protocol Version 5 narrative: Proven Execution · Quantum Foundation · Intent Native
