@@ -12,6 +12,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- L3 proof generators and verifiers can now only be created as a matched pair from one shared SPHINCS+ keypair; removed independent random-key constructors
+- Hybrid AES-GCM decryption in `KyberAESHybrid` returns authentication and input-validation errors instead of panicking
 - ML-KEM hybrid encryption in BLEEP crypto and BLEEP Connect now derives AES-256 keys with HKDF-SHA256, per-message random salts, and protocol-specific info labels; serialized payloads carry the salt
 - Identity Merkle paths and BLEEP Connect L3 batch roots now use the shared domain-separated, position-bound, versioned commitment format; legacy Merkle roots are incompatible, and empty L3 trees return no root
 - P2P encoded frame-body limit reduced to 2 MiB and enforced before receive-side allocation/deserialization; SAL payload allowance reserves transport overhead

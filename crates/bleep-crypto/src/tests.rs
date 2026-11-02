@@ -46,25 +46,22 @@ fn kyber_aes_round_trip_and_tamper_rejection() {
     assert_eq!(salt.len(), 32);
     assert_ne!(salt, second_salt);
     assert_eq!(
-        hybrid.decrypt(&ciphertext, &encapsulated_key, &nonce, &salt),
+        hybrid
+            .decrypt(&ciphertext, &encapsulated_key, &nonce, &salt)
+            .unwrap(),
         plaintext
     );
 
     let mut tampered_salt = salt.clone();
     tampered_salt[0] ^= 1;
-    assert!(std::panic::catch_unwind(|| {
-        hybrid.decrypt(&ciphertext, &encapsulated_key, &nonce, &tampered_salt)
-    })
-    .is_err());
+    assert!(hybrid
+        .decrypt(&ciphertext, &encapsulated_key, &nonce, &tampered_salt)
+        .is_err());
 
     ciphertext[0] ^= 1;
-    assert!(std::panic::catch_unwind(|| hybrid.decrypt(
-        &ciphertext,
-        &encapsulated_key,
-        &nonce,
-        &salt
-    ))
-    .is_err());
+    assert!(hybrid
+        .decrypt(&ciphertext, &encapsulated_key, &nonce, &salt)
+        .is_err());
 }
 
 #[test]

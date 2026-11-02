@@ -60,9 +60,19 @@ impl KyberAESHybrid {
         ct: &mlkem1024::Ciphertext,
         nonce_bytes: &[u8],
         salt: &[u8],
-    ) -> Vec<u8> {
-        assert_eq!(nonce_bytes.len(), 12, "invalid AES-GCM nonce length");
-        assert_eq!(salt.len(), HKDF_SALT_LEN, "invalid HKDF salt length");
+    ) -> Result<Vec<u8>, crate::pq_crypto::CryptoError> {
+        if nonce_bytes.len() != 12 {
+            return Err(crate::pq_crypto::CryptoError::InvalidNonce(format!(
+                "AES-GCM nonce must be 12 bytes, got {}",
+                nonce_bytes.len()
+            )));
+        }
+        if salt.len() != HKDF_SALT_LEN {
+            return Err(crate::pq_crypto::CryptoError::InvalidKeyFormat(format!(
+                "HKDF salt must be {HKDF_SALT_LEN} bytes, got {}",
+                salt.len()
+            )));
+        }
         let ss = self.decapsulate(ct);
         let key_bytes = derive_aes_key(&ss, salt);
         let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
@@ -70,7 +80,7 @@ impl KyberAESHybrid {
         let nonce = Nonce::from_slice(nonce_bytes);
         cipher
             .decrypt(nonce, ciphertext)
-            .expect("decryption failure!")
+            .map_err(|_| crate::pq_crypto::CryptoError::DecryptionFailed)
     }
 }
 
