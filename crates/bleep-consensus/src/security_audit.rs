@@ -128,8 +128,8 @@ impl AuditReport {
                     location: "POST /faucet/{address}".into(),
                     title: "Faucet IP rate limit bypassable via X-Forwarded-For header spoofing".into(),
                     description: "The faucet reads the client IP from X-Forwarded-For (first hop) without validating that the request passed through a trusted reverse proxy. An attacker can set arbitrary X-Forwarded-For values to bypass the per-IP cooldown.".into(),
-                    status: FindingStatus::Open {
-                        reason: "The claimed trusted-proxy CIDR validation is not implemented. X-Forwarded-For is read without a trusted-proxy check, so callers can spoof the address used by the faucet rate limit.".into(),
+                    status: FindingStatus::Resolved {
+                        fix_description: "Faucet IP cooldowns now use warp's transport peer address and ignore caller-supplied forwarding headers. Expired address and peer entries are pruned on each request. The faucet_ip_spoofing_blocked route test verifies different X-Forwarded-For values from one peer share a cooldown bucket.".into(),
                     },
                     cwe: Some("CWE-290: Authentication Bypass by Spoofing".into()),
                 },
@@ -333,9 +333,9 @@ mod tests {
     fn audit_report_counts_open_findings() {
         let report = AuditReport::report();
         let summary = report.summary();
-        assert_eq!(summary.resolved, 9);
+        assert_eq!(summary.resolved, 10);
         assert_eq!(summary.acknowledged, 2);
-        assert_eq!(summary.open, 3);
+        assert_eq!(summary.open, 2);
         assert!(!summary.all_resolved);
     }
 
@@ -361,7 +361,7 @@ mod tests {
         let h1 = report.findings.iter().find(|f| f.id == "SA-H1").unwrap();
         let h2 = report.findings.iter().find(|f| f.id == "SA-H2").unwrap();
         let h3 = report.findings.iter().find(|f| f.id == "SA-H3").unwrap();
-        assert!(matches!(h1.status, FindingStatus::Open { .. }));
+        assert!(matches!(h1.status, FindingStatus::Resolved { .. }));
         assert!(matches!(h2.status, FindingStatus::Resolved { .. }));
         assert!(matches!(h3.status, FindingStatus::Open { .. }));
     }

@@ -58,6 +58,8 @@ use bleep_pat::PATRegistry;
 use bleep_state::state_manager::StateManager;
 use bleep_state::state_merkle::MerkleProof;
 
+const FAUCET_TREASURY_ADDRESS: &str = "BLEEP_FAUCET_TREASURY";
+
 // ─── Shared live state ────────────────────────────────────────────────────────
 
 /// Live counters + shared subsystems updated by the running node.
@@ -3197,33 +3199,41 @@ struct AuthTokenResp {
 //
 // Dispenses 1,000 test BLEEP to `address`.
 // Rate limits: one drip per address per 24 h AND one drip per IP per 24 h.
-// `X-Forwarded-For` header used for IP extraction (first hop).
+// The transport peer address is the sole IP rate-limit key. Forwarding headers
+// are deliberately ignored.
 fn faucet_drip(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("faucet" / String)
         .and(warp::post())
-        .and(warp::header::optional::<String>("x-forwarded-for"))
+        .and(warp::addr::remote())
         .and(with_arc_state(state))
-        .map(|address: String, xff: Option<String>, st: Arc<RpcState>| {
-            let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
-            if !is_dev_or_test_network(&network_mode) {
-                return Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: "The faucet is available only on explicit dev/test networks.".into(),
-                    }),
-                    warp::http::StatusCode::FORBIDDEN,
-                )) as Box<dyn warp::Reply + Send>;
-            }
+        .map(
+            |address: String, peer: Option<std::net::SocketAddr>, st: Arc<RpcState>| {
+                let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
+                if !is_dev_or_test_network(&network_mode) {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "The faucet is available only on explicit dev/test networks."
+                                .into(),
+                        }),
+                        warp::http::StatusCode::FORBIDDEN,
+                    )) as Box<dyn warp::Reply + Send>;
+                }
 
-            let now = now_secs();
-            let ip = xff
-                .and_then(|h| h.split(',').next().map(|s| s.trim().to_string()))
-                .unwrap_or_else(|| "unknown".to_string());
+                let now = now_secs();
+                let ip = peer
+                    .map(|socket| socket.ip().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
 
-            // ── Address cooldown check ──
-            {
-                let drips = st.faucet_drips.lock();
+                // Hold both limiter locks across validation and reservation so
+                // concurrent requests from one address or peer cannot pass together.
+                let mut drips = st.faucet_drips.lock();
+                let mut ip_drips = st.faucet_ip_drips.lock();
+                drips.retain(|_, last| now.saturating_sub(*last) < RpcState::FAUCET_COOLDOWN_SECS);
+                ip_drips
+                    .retain(|_, last| now.saturating_sub(*last) < RpcState::FAUCET_COOLDOWN_SECS);
+
                 if let Some(&last) = drips.get(&address) {
                     let elapsed = now.saturating_sub(last);
                     if elapsed < RpcState::FAUCET_COOLDOWN_SECS {
@@ -3242,11 +3252,6 @@ fn faucet_drip(
                         )) as Box<dyn warp::Reply + Send>;
                     }
                 }
-            }
-
-            // ── IP cooldown check ──
-            {
-                let ip_drips = st.faucet_ip_drips.lock();
                 if let Some(&last) = ip_drips.get(&ip) {
                     let elapsed = now.saturating_sub(last);
                     if elapsed < RpcState::FAUCET_COOLDOWN_SECS {
@@ -3259,55 +3264,145 @@ fn faucet_drip(
                         )) as Box<dyn warp::Reply + Send>;
                     }
                 }
-            }
 
-            // ── Balance check ──
-            let balance = st.faucet_balance.load(std::sync::atomic::Ordering::SeqCst);
-            if balance < RpcState::FAUCET_DRIP_AMOUNT {
-                return Box::new(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: "Faucet balance depleted.".into(),
-                    }),
-                    warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                )) as Box<dyn warp::Reply + Send>;
-            }
+                let reserved_balance = st.faucet_balance.fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |balance| balance.checked_sub(RpcState::FAUCET_DRIP_AMOUNT),
+                );
+                if reserved_balance.is_err() {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Faucet balance depleted.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )) as Box<dyn warp::Reply + Send>;
+                }
 
-            // ── Dispense ──
-            st.faucet_balance.fetch_sub(
-                RpcState::FAUCET_DRIP_AMOUNT,
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            st.faucet_drips.lock().insert(address.clone(), now);
-            st.faucet_ip_drips.lock().insert(ip, now);
+                let Some(state_mgr) = &st.state_mgr else {
+                    st.faucet_balance.fetch_add(
+                        RpcState::FAUCET_DRIP_AMOUNT,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Faucet state is unavailable.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )) as Box<dyn warp::Reply + Send>;
+                };
 
-            // Credit the account in StateManager
-            if let Some(state_mgr) = &st.state_mgr {
                 let mut mgr = state_mgr.lock();
-                let current = mgr.get_balance(&address);
-                mgr.set_balance(&address, current + RpcState::FAUCET_DRIP_AMOUNT as u128);
-            }
+                let checkpoint = mgr.checkpoint();
+                let source_nonce = mgr.get_nonce(FAUCET_TREASURY_ADDRESS);
+                let state_result = mgr
+                    .mint(
+                        FAUCET_TREASURY_ADDRESS,
+                        RpcState::FAUCET_DRIP_AMOUNT as u128,
+                    )
+                    .map_err(|error| error.to_string())
+                    .and_then(|_| {
+                        if mgr.apply_transfer(
+                            FAUCET_TREASURY_ADDRESS,
+                            &address,
+                            RpcState::FAUCET_DRIP_AMOUNT as u128,
+                            source_nonce,
+                            now,
+                        ) {
+                            Ok(())
+                        } else {
+                            Err("Faucet transfer was rejected by the state machine.".to_string())
+                        }
+                    });
+                if let Err(error) = state_result {
+                    mgr.restore_checkpoint(checkpoint);
+                    st.faucet_balance.fetch_add(
+                        RpcState::FAUCET_DRIP_AMOUNT,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    log::error!("Faucet state transition failed: {error}");
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Faucet transfer failed.".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )) as Box<dyn warp::Reply + Send>;
+                }
 
-            // Also update the legacy in-memory blockchain state used by consensus
-            if let Some(blockchain) = &st.blockchain {
-                let bc = blockchain.read().unwrap();
-                let mut core_state = bc.state.write().unwrap();
-                core_state.credit(&address, RpcState::FAUCET_DRIP_AMOUNT);
-            }
+                if let Some(blockchain) = &st.blockchain {
+                    let bc = blockchain.read().unwrap();
+                    let mut core_state = bc.state.write().unwrap();
+                    let previous_balances = core_state.balances.clone();
+                    if core_state
+                        .balance_of(FAUCET_TREASURY_ADDRESS)
+                        .checked_add(RpcState::FAUCET_DRIP_AMOUNT)
+                        .is_none()
+                        || core_state
+                            .balance_of(&address)
+                            .checked_add(RpcState::FAUCET_DRIP_AMOUNT)
+                            .is_none()
+                    {
+                        mgr.restore_checkpoint(checkpoint);
+                        st.faucet_balance.fetch_add(
+                            RpcState::FAUCET_DRIP_AMOUNT,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        return Box::new(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Faucet transfer failed.".into(),
+                            }),
+                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                        )) as Box<dyn warp::Reply + Send>;
+                    }
+                    core_state.credit(FAUCET_TREASURY_ADDRESS, RpcState::FAUCET_DRIP_AMOUNT);
+                    let legacy_tx = bleep_core::block::Transaction {
+                        chain_id: std::env::var("BLEEP_CHAIN_ID")
+                            .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string()),
+                        sender: FAUCET_TREASURY_ADDRESS.to_string(),
+                        receiver: address.clone(),
+                        amount: RpcState::FAUCET_DRIP_AMOUNT,
+                        timestamp: now,
+                        nonce: source_nonce,
+                        signature: Vec::new(),
+                    };
+                    if let Err(error) = core_state.apply_transaction(&legacy_tx) {
+                        core_state.balances = previous_balances;
+                        mgr.restore_checkpoint(checkpoint);
+                        st.faucet_balance.fetch_add(
+                            RpcState::FAUCET_DRIP_AMOUNT,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        log::error!("Legacy faucet state transition failed: {error}");
+                        return Box::new(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Faucet transfer failed.".into(),
+                            }),
+                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                        )) as Box<dyn warp::Reply + Send>;
+                    }
+                }
+                drop(mgr);
 
-            Box::new(warp::reply::with_status(
-                warp::reply::json(&FaucetDripResp {
-                    address: address.clone(),
-                    amount_bleep: 10,
-                    amount_micro: RpcState::FAUCET_DRIP_AMOUNT,
-                    cooldown_secs: RpcState::FAUCET_COOLDOWN_SECS,
-                    message: format!(
-                        "10 test BLEEP sent to {}. Valid on bleep-testnet-1.",
-                        address
-                    ),
-                }),
-                warp::http::StatusCode::OK,
-            )) as Box<dyn warp::Reply + Send>
-        })
+                drips.insert(address.clone(), now);
+                ip_drips.insert(ip, now);
+                drop(ip_drips);
+                drop(drips);
+
+                Box::new(warp::reply::with_status(
+                    warp::reply::json(&FaucetDripResp {
+                        address: address.clone(),
+                        amount_bleep: 10,
+                        amount_micro: RpcState::FAUCET_DRIP_AMOUNT,
+                        cooldown_secs: RpcState::FAUCET_COOLDOWN_SECS,
+                        message: format!(
+                            "10 test BLEEP sent to {}. Valid on bleep-testnet-1.",
+                            address
+                        ),
+                    }),
+                    warp::http::StatusCode::OK,
+                )) as Box<dyn warp::Reply + Send>
+            },
+        )
 }
 
 // ── GET /faucet/status ────────────────────────────────────────────────────────
@@ -4110,6 +4205,8 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use warp::test::request;
 
+    static FAUCET_NETWORK_MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn escrow_proof_input_has_no_placeholder_fallback() {
         assert_eq!(decode_escrow_proof(None), Err("MissingEscrowProof"));
@@ -4490,6 +4587,7 @@ mod tests {
 
     #[tokio::test]
     async fn faucet_drip_updates_both_state_manager_and_blockchain_state() {
+        let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
         let address = "BLEEP1faucetaddress".to_string();
 
         let state_mgr = Arc::new(Mutex::new(StateManager::new()));
@@ -4524,6 +4622,7 @@ mod tests {
 
         let balance = state_mgr.lock().get_balance(&address);
         assert_eq!(balance, RpcState::FAUCET_DRIP_AMOUNT as u128);
+        assert_eq!(state_mgr.lock().get_nonce(FAUCET_TREASURY_ADDRESS), 1);
 
         let core_bal = blockchain
             .read()
@@ -4536,6 +4635,61 @@ mod tests {
             .copied()
             .unwrap_or(0);
         assert_eq!(core_bal, RpcState::FAUCET_DRIP_AMOUNT);
+    }
+
+    #[tokio::test]
+    async fn faucet_ip_spoofing_blocked() {
+        let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
+        let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
+        std::env::set_var("BLEEP_NETWORK_MODE", "test");
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let rpc_state = RpcState::new().with_state_manager(Arc::clone(&state_mgr));
+        let peer = std::net::SocketAddr::from(([192, 0, 2, 10], 44321));
+        let expired_at = now_secs().saturating_sub(RpcState::FAUCET_COOLDOWN_SECS + 1);
+        rpc_state
+            .faucet_drips
+            .lock()
+            .insert("expired-address".into(), expired_at);
+        rpc_state
+            .faucet_ip_drips
+            .lock()
+            .insert("192.0.2.99".into(), expired_at);
+        let routes = rpc_routes_with_state(rpc_state.clone());
+
+        let first = request()
+            .method("POST")
+            .path("/faucet/BLEEP1faucet-peer-first")
+            .remote_addr(peer)
+            .header("x-forwarded-for", "10.0.0.1")
+            .reply(&routes)
+            .await;
+        assert_eq!(first.status(), warp::http::StatusCode::OK);
+
+        let second = request()
+            .method("POST")
+            .path("/faucet/BLEEP1faucet-peer-second")
+            .remote_addr(peer)
+            .header("x-forwarded-for", "10.0.0.2")
+            .reply(&routes)
+            .await;
+
+        if let Some(network_mode) = previous_network_mode {
+            std::env::set_var("BLEEP_NETWORK_MODE", network_mode);
+        } else {
+            std::env::remove_var("BLEEP_NETWORK_MODE");
+        }
+
+        assert_eq!(second.status(), warp::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            state_mgr.lock().get_balance("BLEEP1faucet-peer-first"),
+            RpcState::FAUCET_DRIP_AMOUNT as u128
+        );
+        assert_eq!(state_mgr.lock().get_balance("BLEEP1faucet-peer-second"), 0);
+        assert!(!rpc_state
+            .faucet_drips
+            .lock()
+            .contains_key("expired-address"));
+        assert!(!rpc_state.faucet_ip_drips.lock().contains_key("192.0.2.99"));
     }
 
     #[tokio::test]
