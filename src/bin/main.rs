@@ -870,6 +870,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             .map(|(_, public_key)| public_key.clone())
                             .collect::<Vec<_>>();
                         if !inbound_pbft_finality.matches_committee(&committee_keys) {
+                            if let Err(e) =
+                                inbound_pbft_finality.sync_committee(committee_keys.clone())
+                            {
+                                warn!("[InboundBlockHandler] PBFT committee sync failed: {}", e);
+                                continue;
+                            }
+                        }
+                        if !inbound_pbft_finality.matches_committee(&committee_keys) {
                             warn!(
                                 "[InboundBlockHandler] Ignoring PBFT message for a stale committee"
                             );

@@ -405,11 +405,15 @@ impl BlockProducer {
                 .iter()
                 .map(|(_, public_key)| public_key.clone())
                 .collect::<Vec<_>>();
-            if !self
-                .pbft_finality
-                .as_ref()
-                .is_some_and(|finality| finality.matches_committee(&committee_keys))
-            {
+            let Some(finality) = self.pbft_finality.as_ref() else {
+                return Err(
+                    "Live PBFT committee does not match the active validator registry".into(),
+                );
+            };
+            if !finality.matches_committee(&committee_keys) {
+                finality.sync_committee(committee_keys.clone())?;
+            }
+            if !finality.matches_committee(&committee_keys) {
                 return Err(
                     "Live PBFT committee does not match the active validator registry".into(),
                 );
