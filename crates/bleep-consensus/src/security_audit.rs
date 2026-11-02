@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use bleep_core::block::CURRENT_PROTOCOL_VERSION;
+
 // ── Severity ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,7 +85,7 @@ impl AuditReport {
             auditor:          "BLEEP Engineering (internal audit)".into(),
             third_party_attested: false,
             audit_date:       "2026-Q2".into(),
-            protocol_version: 3,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
             phase:            "hardening".into(),
             scope: vec![
                 "bleep-crypto".into(),

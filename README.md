@@ -852,6 +852,13 @@ The faucet is disabled unless `BLEEP_FAUCET_ENABLED=true` and
 `BLEEP_NETWORK_MODE` is `dev`, `development`, or `test`. It is not available in
 `testnet` or `pretestnet` modes.
 
+At startup, `BLEEP_NETWORK_MODE=mainnet` selects the embedded
+`config/mainnet_config.json`; `testnet`, `pretestnet`, and development/test modes
+select `config/testnet_config.json`. When unset, the build's default network
+feature selects the configuration. `BLEEP_CHAIN_ID` can explicitly override
+the configured chain ID. The selected ID is included in every block's canonical
+hash.
+
 ---
 
 ## Protocol Parameters

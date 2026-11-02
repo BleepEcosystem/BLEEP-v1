@@ -7,9 +7,7 @@
 /// ARCHITECTURAL PRINCIPLE:
 /// The invariant engine cannot be bypassed. All mutations go through these hooks.
 /// No unchecked state changes are possible anywhere in the system.
-use crate::protocol_invariants::{
-    ProtocolInvariantEngine, ValidatorRecord, ValidatorState, BLEEP_UNIT,
-};
+use crate::protocol_invariants::{ProtocolInvariantEngine, ValidatorRecord, ValidatorState};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -517,6 +515,7 @@ impl ProtectedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol_invariants::BLEEP_UNIT;
 
     #[test]
     fn test_protected_state_creation() {

@@ -193,25 +193,80 @@ async fn main() {
     }
 }
 
-fn load_blocks_per_epoch() -> Result<u64, Box<dyn Error>> {
-    let path =
-        std::env::var("BLEEP_GENESIS_CONFIG").unwrap_or_else(|_| "config/genesis.json".to_string());
-    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    Ok(parse_blocks_per_epoch(&config)?)
+struct NetworkConfig {
+    chain_id: String,
+    blocks_per_epoch: u64,
 }
 
-fn parse_blocks_per_epoch(config: &serde_json::Value) -> Result<u64, std::io::Error> {
-    config
-        .pointer("/consensus/blocks_per_epoch")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|blocks_per_epoch| *blocks_per_epoch > 0)
+fn embedded_network_config(network_mode: Option<&str>) -> Result<&'static str, std::io::Error> {
+    let default_mode = if cfg!(feature = "mainnet") {
+        "mainnet"
+    } else {
+        "pretestnet"
+    };
+    match network_mode
+        .unwrap_or(default_mode)
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mainnet" => Ok(include_str!("../../config/mainnet_config.json")),
+        "testnet" | "pretestnet" | "devnet" | "dev" | "development" | "test" => {
+            Ok(include_str!("../../config/testnet_config.json"))
+        }
+        mode => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported BLEEP_NETWORK_MODE: {mode}"),
+        )),
+    }
+}
+
+fn parse_network_config(
+    raw: &str,
+    chain_id_override: Option<&str>,
+) -> Result<NetworkConfig, Box<dyn Error>> {
+    let config: serde_json::Value = serde_json::from_str(raw)?;
+    let configured_chain_id = config
+        .get("chain_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|chain_id| !chain_id.trim().is_empty())
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "genesis config must define a positive consensus.blocks_per_epoch",
+                "network config must define a non-empty chain_id",
             )
-            .into()
-        })
+        })?;
+    let chain_id = chain_id_override.unwrap_or(configured_chain_id).trim();
+    if chain_id.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "BLEEP_CHAIN_ID must not be empty",
+        )
+        .into());
+    }
+    Ok(NetworkConfig {
+        chain_id: chain_id.to_string(),
+        blocks_per_epoch: config
+            .pointer("/consensus/blocks_per_epoch")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|blocks_per_epoch| *blocks_per_epoch > 0)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "network config must define a positive consensus.blocks_per_epoch",
+                )
+            })?,
+    })
+}
+
+fn load_network_config() -> Result<NetworkConfig, Box<dyn Error>> {
+    let raw = if let Ok(path) = std::env::var("BLEEP_GENESIS_CONFIG") {
+        std::fs::read_to_string(path)?
+    } else {
+        embedded_network_config(std::env::var("BLEEP_NETWORK_MODE").ok().as_deref())?.to_string()
+    };
+    let chain_id_override = std::env::var("BLEEP_CHAIN_ID").ok();
+    parse_network_config(&raw, chain_id_override.as_deref())
 }
 
 #[cfg(test)]
@@ -219,23 +274,37 @@ mod epoch_config_tests {
     use super::*;
 
     #[test]
-    fn reads_positive_blocks_per_epoch_from_genesis() {
-        let config = serde_json::json!({"consensus": {"blocks_per_epoch": 1000}});
-        assert_eq!(parse_blocks_per_epoch(&config).unwrap(), 1000);
+    fn network_mode_loads_the_matching_chain_configuration() {
+        let mainnet =
+            parse_network_config(embedded_network_config(Some("mainnet")).unwrap(), None).unwrap();
+        let testnet =
+            parse_network_config(embedded_network_config(Some("testnet")).unwrap(), None).unwrap();
+        assert_eq!(mainnet.chain_id, "BLEEP-Mainnet");
+        assert_eq!(mainnet.blocks_per_epoch, 1000);
+        assert_eq!(testnet.chain_id, "BLEEP-PreTestnet-001");
+        assert_eq!(testnet.blocks_per_epoch, 100);
     }
 
     #[test]
-    fn rejects_missing_or_zero_blocks_per_epoch() {
-        assert!(parse_blocks_per_epoch(&serde_json::json!({"consensus": {}})).is_err());
-        assert!(
-            parse_blocks_per_epoch(&serde_json::json!({"consensus": {"blocks_per_epoch": 0}}))
-                .is_err()
-        );
+    fn rejects_invalid_network_config_and_empty_chain_override() {
+        assert!(parse_network_config(r#"{"chain_id":"x","consensus":{}}"#, None).is_err());
+        assert!(parse_network_config(
+            r#"{"chain_id":"x","consensus":{"blocks_per_epoch":1}}"#,
+            Some(" ")
+        )
+        .is_err());
+        assert!(embedded_network_config(Some("unknown")).is_err());
     }
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    let blocks_per_epoch = load_blocks_per_epoch()?;
+    let network_config = load_network_config()?;
+    std::env::set_var("BLEEP_CHAIN_ID", &network_config.chain_id);
+    let blocks_per_epoch = network_config.blocks_per_epoch;
+    info!(
+        "🌐 Loaded network config: chain_id={}, blocks_per_epoch={}",
+        network_config.chain_id, blocks_per_epoch
+    );
     let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -304,8 +373,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 2: State + genesis ───────────────────────────────────────────────
     info!("⛓  [2/16] Initialising genesis block and persistent state…");
 
-    let chain_id = std::env::var("BLEEP_CHAIN_ID")
-        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+    let chain_id = network_config.chain_id;
     let state_dir =
         std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
 
@@ -366,7 +434,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .rebuild_trie_from_db()
         .map_err(|e| format!("Persisted state trie rebuild failed: {e}"))?;
 
-    let genesis = Block::genesis();
+    let genesis = Block::genesis_for_chain(chain_id.clone());
     let genesis_hash = genesis.compute_hash();
     let canonical_blocks = state
         .load_canonical_blocks(&chain_id, &genesis_hash, |block: &Block| {
@@ -974,6 +1042,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 }
                             };
                             if !proposal_valid
+                                || block.chain_id != inbound_chain_id
                                 || block
                                     .transactions
                                     .iter()
@@ -1045,10 +1114,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let valid = BlockValidator::validate_block_with_validator_set(
                         &block,
                         &epoch_validator_keys,
-                    ) && block
-                        .transactions
-                        .iter()
-                        .all(|tx| tx.chain_id == inbound_chain_id);
+                    ) && block.chain_id == inbound_chain_id
+                        && block
+                            .transactions
+                            .iter()
+                            .all(|tx| tx.chain_id == inbound_chain_id);
                     if !valid {
                         warn!(
                             "[InboundBlockHandler] Block {} failed block-level validation — discarding",

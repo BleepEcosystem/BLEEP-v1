@@ -47,11 +47,11 @@ pub const SPHINCS_PK_LEN: usize = 64;
 pub const SPHINCS_SIG_LEN: usize = 49_856;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
-/// Current non-genesis block protocol version. Version 3 unifies block
-/// signatures and emergency PoW commitments on the canonical semantic hash.
-pub const CURRENT_PROTOCOL_VERSION: u32 = 3;
-/// Genesis remains pinned to its original protocol version to preserve the
-/// existing chain anchor across the v3 activation.
+/// Current non-genesis block protocol version. Version 4 binds the network
+/// chain ID into the canonical semantic block hash.
+pub const CURRENT_PROTOCOL_VERSION: u32 = 4;
+/// Genesis uses a separately pinned version; its chain ID is now committed in
+/// the canonical header hash as part of the network-specific genesis anchor.
 pub const GENESIS_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +116,8 @@ pub enum ConsensusMode {
 pub struct BlockHeader {
     pub index: u64,
     pub timestamp: u64,
+    #[serde(default)]
+    pub chain_id: String,
     pub previous_hash: String,
     pub merkle_root: String,
     pub validator_signature: Vec<u8>,
@@ -165,6 +167,7 @@ impl BlockHeader {
         Self {
             index: block.index,
             timestamp: block.timestamp,
+            chain_id: block.chain_id.clone(),
             previous_hash: block.previous_hash.clone(),
             merkle_root: block.merkle_root.clone(),
             validator_signature: block.validator_signature.clone(),
@@ -190,6 +193,7 @@ impl BlockHeader {
         bytes.extend_from_slice(BLOCK_HEADER_HASH_DOMAIN);
         bytes.extend_from_slice(&self.index.to_le_bytes());
         bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        append_fixed_hash_field(&mut bytes, &self.chain_id);
         append_fixed_hash_field(&mut bytes, &self.previous_hash);
         append_fixed_hash_field(&mut bytes, &self.merkle_root);
         bytes.extend_from_slice(&self.epoch_id.to_le_bytes());
@@ -209,8 +213,8 @@ impl BlockHeader {
     }
 }
 
-const BLOCK_HEADER_HASH_DOMAIN: &[u8] = b"BLEEP_BLOCK_HEADER_V1";
-const BLOCK_HEADER_HASH_PREIMAGE_LEN: usize = BLOCK_HEADER_HASH_DOMAIN.len() + 197;
+const BLOCK_HEADER_HASH_DOMAIN: &[u8] = b"BLEEP_BLOCK_HEADER_V2";
+const BLOCK_HEADER_HASH_PREIMAGE_LEN: usize = BLOCK_HEADER_HASH_DOMAIN.len() + 229;
 
 fn append_fixed_hash_field(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(&Sha3_256::digest(value.as_bytes()));
@@ -243,6 +247,8 @@ impl CompactBlock {
 pub struct Block {
     pub index: u64,
     pub timestamp: u64,
+    #[serde(default)]
+    pub chain_id: String,
     pub transactions: Vec<Transaction>,
     pub previous_hash: String,
     pub merkle_root: String,
@@ -278,12 +284,19 @@ impl Block {
         genesis
     }
 
+    pub fn genesis_for_chain(chain_id: impl Into<String>) -> Self {
+        let mut genesis = Self::genesis();
+        genesis.chain_id = chain_id.into();
+        genesis
+    }
+
     pub fn new(index: u64, transactions: Vec<Transaction>, previous_hash: String) -> Self {
         let timestamp = Utc::now().timestamp() as u64;
         let merkle_root = Block::calculate_merkle_root(&transactions);
         Self {
             index,
             timestamp,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             transactions,
             previous_hash,
             merkle_root,
@@ -316,6 +329,7 @@ impl Block {
         Self {
             index,
             timestamp,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             transactions,
             previous_hash,
             merkle_root,
@@ -836,5 +850,18 @@ mod tests {
         block.validator_signature = vec![1, 2, 3];
         block.zk_proof = vec![4, 5, 6];
         assert_eq!(block.compute_hash(), hash);
+    }
+
+    #[test]
+    fn legacy_headers_default_chain_id_to_empty() {
+        let header = BlockHeader::from_block(&Block::new(1, vec![], "parent".to_string()));
+        let mut serialized = serde_json::to_value(header).unwrap();
+        serialized.as_object_mut().unwrap().remove("chain_id");
+        let deserialized: BlockHeader = serde_json::from_value(serialized).unwrap();
+        assert!(deserialized.chain_id.is_empty());
+        assert_eq!(
+            deserialized.canonical_hash_preimage().len(),
+            BLOCK_HEADER_HASH_PREIMAGE_LEN
+        );
     }
 }

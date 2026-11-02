@@ -624,6 +624,7 @@ impl BlockProducer {
             0,                              // shard_id: main chain
             hex::encode(state_root),        // shard_state_root = full state root
         );
+        block.chain_id = self.config.chain_id.clone();
 
         // ── 7a: Compute sig_commitment_root from raw signatures ───────────────
         // Must happen BEFORE signing so the commitment is bound into the
@@ -686,7 +687,7 @@ impl BlockProducer {
                     &block.compute_hash(),
                     &block.previous_hash,
                     &self.config.chain_id,
-                    &Block::genesis().compute_hash(),
+                    &Block::genesis_for_chain(self.config.chain_id.clone()).compute_hash(),
                 ) {
                     chain.rollback();
                     return Err(format!(
