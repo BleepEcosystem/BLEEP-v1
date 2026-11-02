@@ -1,8 +1,8 @@
 //! bleep-consensus/src/security_audit.rs
 //! Security Audit Report
 //!
-//! Machine-readable record of all audit findings from the independent
-//! security review. Each finding maps to a crate, severity, status, and fix commit.
+//! Machine-readable record of findings from BLEEP Engineering's internal
+//! security audit. Each finding maps to a crate, severity, status, and fix commit.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -36,6 +36,7 @@ impl fmt::Display for Severity {
 pub enum FindingStatus {
     Resolved { fix_description: String },
     Acknowledged { reason: String },
+    Open { reason: String },
     WontFix { reason: String },
 }
 
@@ -44,6 +45,7 @@ impl fmt::Display for FindingStatus {
         match self {
             Self::Resolved { fix_description } => write!(f, "RESOLVED — {}", fix_description),
             Self::Acknowledged { reason } => write!(f, "ACKNOWLEDGED — {}", reason),
+            Self::Open { reason } => write!(f, "OPEN — {}", reason),
             Self::WontFix { reason } => write!(f, "WONT_FIX — {}", reason),
         }
     }
@@ -67,6 +69,7 @@ pub struct AuditFinding {
 
 pub struct AuditReport {
     pub auditor: String,
+    pub third_party_attested: bool,
     pub audit_date: String,
     pub protocol_version: u32,
     pub phase: String,
@@ -77,7 +80,8 @@ pub struct AuditReport {
 impl AuditReport {
     pub fn report() -> Self {
         Self {
-            auditor:          "Trail of BLEEP Security (Independent Audit)".into(),
+            auditor:          "BLEEP Engineering (internal audit)".into(),
+            third_party_attested: false,
             audit_date:       "2026-Q2".into(),
             protocol_version: 3,
             phase:            "hardening".into(),
@@ -121,11 +125,11 @@ impl AuditReport {
                     id: "SA-H1".into(),
                     severity: Severity::High,
                     crate_name: "bleep-rpc".into(),
-                    location: "faucet::handle_drip".into(),
+                    location: "POST /faucet/{address}".into(),
                     title: "Faucet IP rate limit bypassable via X-Forwarded-For header spoofing".into(),
                     description: "The faucet reads the client IP from X-Forwarded-For (first hop) without validating that the request passed through a trusted reverse proxy. An attacker can set arbitrary X-Forwarded-For values to bypass the per-IP cooldown.".into(),
-                    status: FindingStatus::Resolved {
-                        fix_description: "Added TRUSTED_PROXY_CIDRS allowlist (default: 127.0.0.1/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16). X-Forwarded-For is only honoured when the direct peer IP is in the trusted CIDR. Otherwise the peer IP is used directly. Covered by test faucet_ip_spoofing_blocked.".into(),
+                    status: FindingStatus::Open {
+                        reason: "The claimed trusted-proxy CIDR validation is not implemented. X-Forwarded-For is read without a trusted-proxy check, so callers can spoof the address used by the faucet rate limit.".into(),
                     },
                     cwe: Some("CWE-290: Authentication Bypass by Spoofing".into()),
                 },
@@ -145,11 +149,11 @@ impl AuditReport {
                     id: "SA-H3".into(),
                     severity: Severity::High,
                     crate_name: "bleep-p2p".into(),
-                    location: "gossip::handle_block".into(),
+                    location: "bleep-p2p::message_protocol".into(),
                     title: "Missing block size cap allows memory exhaustion via oversized gossip messages".into(),
-                    description: "The P2P gossip handler deserialises incoming block messages before validating their size. A malicious peer can send a message up to the TCP window size (typically 64 KB–4 MB), causing large allocations before the SPHINCS+ signature check.".into(),
-                    status: FindingStatus::Resolved {
-                        fix_description: "Added MAX_GOSSIP_MSG_BYTES = 2_097_152 (2 MiB) gate at the receive boundary before any deserialisation. Messages exceeding the cap are dropped and the peer's message-rate counter is incremented. Three oversized messages from the same peer within 60 s triggers a temporary ban.".into(),
+                    description: "The P2P protocol enforces a 4 MiB MAX_FRAME_BYTES cap, but the claimed 2 MiB gossip cap and repeat-offender rate counter/temporary ban are not implemented. This finding remains open for the missing tighter gossip-specific limit and peer penalty.".into(),
+                    status: FindingStatus::Open {
+                        reason: "No MAX_GOSSIP_MSG_BYTES gate or oversized-message peer counter/ban is present; the existing frame cap is 4 MiB.".into(),
                     },
                     cwe: Some("CWE-789: Memory Allocation with Excessive Size Value".into()),
                 },
@@ -183,11 +187,11 @@ impl AuditReport {
                     id: "SA-M3".into(),
                     severity: Severity::Medium,
                     crate_name: "bleep-rpc".into(),
-                    location: "rpc_routes::json_body_limit".into(),
+                    location: "rpc::{pat_create,connect_intent,oracle_update}".into(),
                     title: "JSON request body limit not enforced on all POST endpoints".into(),
-                    description: "/rpc/tx has a 64 KB body limit via warp::body::content_length_limit but /rpc/pat/create, /rpc/connect/intent, and /rpc/oracle/update do not. A large request body can cause excessive memory allocation.".into(),
-                    status: FindingStatus::Resolved {
-                        fix_description: "Applied content_length_limit(65_536) to all POST routes in rpc_routes_with_state via a shared helper. Covered by integration test post_body_limit_enforced.".into(),
+                    description: "The /rpc/pat/create, /rpc/connect/intent, and /rpc/oracle/update JSON POST routes do not enforce a request body limit, allowing excessive allocation from large request bodies.".into(),
+                    status: FindingStatus::Open {
+                        reason: "The three content_length_limit checks are on other routes and do not protect the affected POST endpoints. No shared limit helper or test covering these routes exists.".into(),
                     },
                     cwe: Some("CWE-400: Uncontrolled Resource Consumption".into()),
                 },
@@ -209,11 +213,11 @@ impl AuditReport {
                     id: "SA-L1".into(),
                     severity: Severity::Low,
                     crate_name: "bleep-auth".into(),
-                    location: "audit::AuditLog".into(),
+                    location: "bleep-auth::audit_store::AuditLogStore".into(),
                     title: "Audit log stored in-memory; lost on node restart".into(),
                     description: "AuditLog is a Vec<AuditEntry> in RpcState memory. A node restart or crash discards all audit history. The NDJSON export endpoint cannot replay events prior to the current process start.".into(),
                     status: FindingStatus::Resolved {
-                        fix_description: "Added RocksDB-backed AuditLogStore in bleep-auth/src/audit_store.rs. Each entry is written to the audit_log column family synchronously before returning the HTTP response. On startup, the in-memory log is bootstrapped from the last 10,000 entries in RocksDB. Covered by test audit_log_survives_restart.".into(),
+                        fix_description: "RocksDB-backed AuditLogStore in bleep-auth/src/audit_store.rs persists entries in the audit_log column family with synchronous writes and restores recent entries on startup. Covered by test persists_across_logical_restart.".into(),
                     },
                     cwe: Some("CWE-778: Insufficient Logging".into()),
                 },
@@ -275,11 +279,13 @@ impl AuditReport {
         let mut by_sev: HashMap<String, usize> = HashMap::new();
         let mut resolved = 0usize;
         let mut acknowledged = 0usize;
+        let mut open = 0usize;
         for f in &self.findings {
             *by_sev.entry(f.severity.to_string()).or_insert(0) += 1;
             match &f.status {
                 FindingStatus::Resolved { .. } => resolved += 1,
                 FindingStatus::Acknowledged { .. } => acknowledged += 1,
+                FindingStatus::Open { .. } => open += 1,
                 FindingStatus::WontFix { .. } => {}
             }
         }
@@ -292,6 +298,7 @@ impl AuditReport {
             informational: *by_sev.get("INFO").unwrap_or(&0),
             resolved,
             acknowledged,
+            open,
             all_resolved: resolved + acknowledged == self.findings.len(),
         }
     }
@@ -307,6 +314,7 @@ pub struct AuditSummary {
     pub informational: usize,
     pub resolved: usize,
     pub acknowledged: usize,
+    pub open: usize,
     pub all_resolved: bool,
 }
 
@@ -315,14 +323,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audit_report_all_findings_resolved_or_acknowledged() {
+    fn report_identifies_internal_audit_without_external_attestation() {
+        let report = AuditReport::report();
+        assert_eq!(report.auditor, "BLEEP Engineering (internal audit)");
+        assert!(!report.third_party_attested);
+    }
+
+    #[test]
+    fn audit_report_counts_open_findings() {
         let report = AuditReport::report();
         let summary = report.summary();
-        assert!(
-            summary.all_resolved,
-            "{} findings neither resolved nor acknowledged",
-            summary.total - summary.resolved - summary.acknowledged
-        );
+        assert_eq!(summary.resolved, 9);
+        assert_eq!(summary.acknowledged, 2);
+        assert_eq!(summary.open, 3);
+        assert!(!summary.all_resolved);
     }
 
     #[test]
@@ -342,19 +356,28 @@ mod tests {
     }
 
     #[test]
-    fn high_findings_all_resolved() {
+    fn high_findings_report_open_items() {
         let report = AuditReport::report();
-        for f in report
-            .findings
-            .iter()
-            .filter(|f| f.severity == Severity::High)
-        {
-            assert!(
-                matches!(f.status, FindingStatus::Resolved { .. }),
-                "high finding {} must be resolved",
-                f.id
-            );
-        }
+        let h1 = report.findings.iter().find(|f| f.id == "SA-H1").unwrap();
+        let h2 = report.findings.iter().find(|f| f.id == "SA-H2").unwrap();
+        let h3 = report.findings.iter().find(|f| f.id == "SA-H3").unwrap();
+        assert!(matches!(h1.status, FindingStatus::Open { .. }));
+        assert!(matches!(h2.status, FindingStatus::Resolved { .. }));
+        assert!(matches!(h3.status, FindingStatus::Open { .. }));
+    }
+
+    #[test]
+    fn body_limit_finding_remains_open_and_audit_log_fix_is_supported() {
+        let report = AuditReport::report();
+        let m3 = report.findings.iter().find(|f| f.id == "SA-M3").unwrap();
+        let l1 = report.findings.iter().find(|f| f.id == "SA-L1").unwrap();
+        assert!(matches!(m3.status, FindingStatus::Open { .. }));
+        assert!(matches!(l1.status, FindingStatus::Resolved { .. }));
+        assert!(matches!(
+            &l1.status,
+            FindingStatus::Resolved { fix_description }
+                if fix_description.contains("persists_across_logical_restart")
+        ));
     }
 
     #[test]

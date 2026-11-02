@@ -704,9 +704,9 @@ The current build enforces configured tokenomics and finality limits through run
 
 ## Security
 
-### Independent Security Audit — Sprint 9
+### Security Audit Status
 
-16,127 lines of Rust across six crates reviewed.
+An internal engineering audit of the six core crates (49,677 lines) was completed. An independent third-party security audit has not been performed. No external party has attested to the security of this software.
 
 | Severity | Count | Resolved | Acknowledged |
 |---|---|---|---|
@@ -716,9 +716,7 @@ The current build enforces configured tokenomics and finality limits through run
 | **Low** | 3 | ✅ 3 | 0 |
 | **Informational** | 2 | ✅ 1 | 1 (SA-I2: NTP drift guard — mainnet gate) |
 
-All Critical and High findings resolved. Cleared for Phase 6 public testnet preparation.
-
-Full report: [`docs/SECURITY_AUDIT_SPRINT9.md`](docs/SECURITY_AUDIT_SPRINT9.md) · Threat model: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+Threat model: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
 
 ### Adversarial Test Suite (72-hour Continuous)
 
@@ -841,7 +839,6 @@ AI Attestation
 Protocol Hardening
   GET  /rpc/chaos/status
   GET  /rpc/benchmark/latest
-  GET  /rpc/audit/report
   GET  /rpc/ceremony/status           STARK proof-system transparency status
                                       (no MPC ceremony — transparent, no trusted setup)
 

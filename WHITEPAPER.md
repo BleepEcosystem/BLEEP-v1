@@ -585,9 +585,9 @@ BLEEP's security analysis considers three adversary classes:
 - Quantum QPT adversary — BLEEP's post-quantum boundary maintains 256-bit security; no path is broken by Shor's algorithm.
 - Byzantine validator adversary — controls f \< S/3 of staked supply; BFT safety holds unconditionally.
 
-### 9.2 Independent Security Audit — Sprint 9
+### 9.2 Security Audit Status
 
-16,127 lines of Rust across six crates reviewed.
+An internal engineering audit of the six core crates (49,677 lines) was completed. An independent third-party security audit has not been performed. No external party has attested to the security of this software.
 
 | **Severity**  | **Count** | **Resolved** | **Acknowledged** | **Outcome**                                                    |
 |---------------|-----------|--------------|------------------|----------------------------------------------------------------|
@@ -596,7 +596,7 @@ BLEEP's security analysis considers three adversary classes:
 | Medium        | 4         | 3            | 1                | SA-M4: EIP-1559 design property; documented in THREAT_MODEL.md |
 | Low           | 3         | 3            | 0                | All resolved                                                   |
 | Informational | 2         | 1            | 1                | SA-I2: NTP drift guard — mainnet gate                          |
-| Total         | 14        | 12           | 2                | Cleared for Phase 6 public testnet                             |
+| Total         | 14        | 12           | 2                | Internal engineering audit; no third-party attestation          |
 
 ### 9.3 Adversarial Test Suite (72-hour Continuous)
 

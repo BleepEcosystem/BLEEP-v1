@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: ["main", "dev"]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -396,7 +399,9 @@ jobs:
       - test
       - integration
       - audit
+      - dep-review
       - invariants
+      - stub-verifier-gate
       - pq-smoke
     if: always()
     steps:

@@ -1339,7 +1339,6 @@ pub fn rpc_routes_with_state(
         .or(layer3_intents_route(Arc::clone(&state_inner)))
         .or(layer3_intent_submit_route(Arc::clone(&state_inner)))
         .or(benchmark_result_route(Arc::clone(&state_inner)))
-        .or(audit_report_route(Arc::clone(&state_inner)))
         .recover(handle_rpc_rejection)
         .boxed()
 }
@@ -5049,54 +5048,5 @@ pub fn benchmark_result_route(
                     )) as Box<dyn warp::Reply>
                 }
             }
-        })
-}
-
-// ── GET /rpc/audit/report ────────────────────────────────────────────────────
-// Returns the Sprint 9 security audit summary.
-
-pub fn audit_report_route(
-    state: Arc<RpcState>,
-) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let _st = Arc::clone(&state);
-    warp::path!("rpc" / "audit" / "report")
-        .and(warp::get())
-        .map(move || {
-            let json = serde_json::json!({
-                "auditor":          "Trail of BLEEP Security",
-                "audit_date":       "2026-Q2",
-                "protocol_version": 3,
-                "sprint":           9,
-                "scope":            ["bleep-crypto","bleep-consensus","bleep-state","bleep-interop","bleep-auth","bleep-rpc"],
-                "summary": {
-                    "total":          14,
-                    "critical":        2,
-                    "high":            3,
-                    "medium":          4,
-                    "low":             3,
-                    "informational":   2,
-                    "resolved":       12,
-                    "acknowledged":    2,
-                    "all_resolved":   true
-                },
-                "findings": [
-                    { "id":"SA-C1","severity":"CRITICAL","crate":"bleep-interop","status":"RESOLVED","title":"Missing nullifier uniqueness check allows double-spend on L3 bridge","fix":"Added GlobalNullifierSet with RocksDB backing; atomic CAS on proof submission" },
-                    { "id":"SA-C2","severity":"CRITICAL","crate":"bleep-auth","status":"RESOLVED","title":"JWT rotation accepts any base64 input without entropy check","fix":"Added Shannon entropy gate >= 3.5 bits/byte" },
-                    { "id":"SA-H1","severity":"HIGH","crate":"bleep-rpc","status":"RESOLVED","title":"Faucet IP rate limit bypassable via X-Forwarded-For spoofing","fix":"Added TRUSTED_PROXY_CIDRS allowlist; X-Forwarded-For only honoured from trusted CIDRs" },
-                    { "id":"SA-H2","severity":"HIGH","crate":"bleep-state","status":"RESOLVED","title":"TOCTOU race condition in concurrent balance reads","fix":"RocksDB compare-and-swap loop in apply_tx" },
-                    { "id":"SA-H3","severity":"HIGH","crate":"bleep-p2p","status":"RESOLVED","title":"Missing block size cap allows memory exhaustion","fix":"MAX_GOSSIP_MSG_BYTES = 2 MiB gate before deserialisation" },
-                    { "id":"SA-M1","severity":"MEDIUM","crate":"bleep-zkp","status":"RESOLVED","title":"MPC ceremony does not verify SPHINCS+ signature over contribution","fix":"Added SPHINCS+ signature verification in contribute()" },
-                    { "id":"SA-M2","severity":"MEDIUM","crate":"bleep-consensus","status":"RESOLVED","title":"Slash underflow possible with concurrent unstake","fix":"saturating_sub for all stake arithmetic; assertion post-slash <= pre-slash" },
-                    { "id":"SA-M3","severity":"MEDIUM","crate":"bleep-rpc","status":"RESOLVED","title":"JSON body limit not enforced on all POST endpoints","fix":"content_length_limit(65536) applied to all POST routes" },
-                    { "id":"SA-M4","severity":"MEDIUM","crate":"bleep-economics","status":"ACKNOWLEDGED","title":"Base fee can be pinned at MAX by adversarial proposers","reason":"EIP-1559 design property; mitigated by proposer rotation" },
-                    { "id":"SA-L1","severity":"LOW","crate":"bleep-auth","status":"RESOLVED","title":"Audit log lost on node restart","fix":"AuditLogStore backed by RocksDB audit_log column family" },
-                    { "id":"SA-L2","severity":"LOW","crate":"bleep-rpc","status":"RESOLVED","title":"Block explorer uses XOR hash instead of real block hash","fix":"Explorer now calls StateManager::block_hash()" },
-                    { "id":"SA-L3","severity":"LOW","crate":"bleep-crypto","status":"RESOLVED","title":"SPHINCS+ SK not zeroized after signing","fix":"Wrapped in zeroize::Zeroizing<Vec<u8>>" },
-                    { "id":"SA-I1","severity":"INFO","crate":"bleep-rpc","status":"RESOLVED","title":"Prometheus output missing HELP/TYPE lines","fix":"Added # HELP and # TYPE for all 8 metrics" },
-                    { "id":"SA-I2","severity":"INFO","crate":"bleep-consensus","status":"ACKNOWLEDGED","title":"Block timestamp without NTP drift guard","reason":"Accepted for testnet; mainnet gate adds NTP check" }
-                ],
-                "verdict": "PASS — all critical and high findings resolved; 2 medium/informational acknowledged with documented rationale; cleared for Sprint 10 mainnet preparation"
-            });
-            warp::reply::json(&json)
         })
 }

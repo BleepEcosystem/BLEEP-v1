@@ -1240,7 +1240,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // it is NOT an MPC trusted-setup ceremony. See bleep-rpc/src/lib.rs: ceremony_status_route.
     info!("   STARK Setup:  http://0.0.0.0:8545/rpc/ceremony/status  [transparent — no MPC]");
     info!("   Benchmark:    http://0.0.0.0:8545/rpc/benchmark/latest");
-    info!("   Audit:        http://0.0.0.0:8545/rpc/audit/report");
     info!("══ DevNet UI ════════════════════════════════════════════════════════");
     info!("   Explorer:     http://0.0.0.0:8545/explorer");
     info!("   Faucet:       POST http://0.0.0.0:8545/faucet/{{address}}");

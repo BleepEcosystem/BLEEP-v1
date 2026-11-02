@@ -97,8 +97,8 @@ This document describes the development trajectory for the BLEEP Quantum Trust N
 - ✅ `bleep-crypto` fuzz targets: transaction signing, Merkle commitment
 - ✅ `bleep-state`: 40+ property-based tests (`proptest_sprint8.rs`)
 - ✅ `tests/sprint9_integration.rs`: end-to-end suite — validator lifecycle, cross-shard 2PC, governance, RPC
-- ✅ Internal security audit: 2 Critical, 3 High, 4 Medium, 3 Low, 2 Informational — all Critical and High resolved
-- ✅ `docs/THREAT_MODEL.md`, `docs/SECURITY_AUDIT_SPRINT9.md`, `docs/CHAOS_TESTING.md`
+- ✅ Internal engineering audit completed — independent third-party audit pending
+- ✅ `docs/THREAT_MODEL.md`, `docs/CHAOS_TESTING.md`
 - ✅ `docs/specs/rpc_api_spec.md`, `docs/specs/state_transition.md`
 - ✅ `docs/tutorials/build_node.md`, `docs/tutorials/write_contract.md`
 - ✅ `docs/glossary.md`
@@ -213,7 +213,7 @@ These are honest gaps documented for contributors and researchers. See [`WHITEPA
 - ✅ `bleep-crypto` fuzz targets: transaction signing, Merkle commitment
 - ✅ `bleep-state`: 40+ property-based tests (`proptest_sprint8.rs`)
 - ✅ `tests/sprint9_integration.rs`: end-to-end integration suite
-- ✅ `docs/THREAT_MODEL.md`, `docs/SECURITY_AUDIT_SPRINT9.md`
+- ✅ `docs/THREAT_MODEL.md`
 - ✅ All `docs/specs/` and `docs/tutorials/` placeholders replaced with full content
 - ✅ `docs/glossary.md` populated
 - ✅ Per-crate `README.md` files for all 18 workspace crates

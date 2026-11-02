@@ -54,7 +54,7 @@ pub enum GossipError {
 ///
 /// Implementors MUST:
 /// - Fan out to at least `min(fanout, connected_peer_count)` peers.
-/// - Enforce the `MAX_GOSSIP_MSG_BYTES = 2 MiB` limit from `bleep-p2p`.
+/// - Enforce the `MAX_SAL_MSG_BYTES` outbound payload limit.
 /// - Return `Err(GossipError::NoPeers)` when the local peer has zero connections.
 ///
 /// Implementors MUST NOT block the calling task for more than ~1 ms. Use an
@@ -71,9 +71,8 @@ pub trait GossipBroadcaster: Send + Sync {
 // Outbound helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Maximum size of a single SAL gossip payload.
-/// Derived from `MAX_GOSSIP_MSG_BYTES = 2 MiB` in `bleep-p2p`, with 1 KiB
-/// reserved for framing overhead added by the transport layer.
+/// Maximum size of a single SAL gossip payload. This is separate from the
+/// 4 MiB P2P frame limit.
 pub const MAX_SAL_MSG_BYTES: usize = 2 * 1024 * 1024 - 1024;
 
 /// Broadcast a typed `SigAvailabilityMessage` through `broadcaster`.
