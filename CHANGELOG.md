@@ -12,6 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- Non-genesis block protocol version bumped to 3: block signatures and emergency PoW now use `Block::compute_hash()`; genesis remains pinned to v2 to preserve the chain anchor. v2 nodes are incompatible and must be upgraded together before activation
 - Repository documentation updated to Protocol Version 5 narrative: Proven Execution · Quantum Foundation · Intent Native
 - README, ROADMAP, CONTRIBUTING, NOTICE, and BUILDING updated to reflect current architecture and strategic positioning
 - SECURITY.md restored as the vulnerability-disclosure policy with a private reporting address, response SLA, and explicit in-scope components

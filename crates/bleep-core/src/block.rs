@@ -47,6 +47,12 @@ pub const SPHINCS_PK_LEN: usize = 64;
 pub const SPHINCS_SIG_LEN: usize = 49_856;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
+/// Current non-genesis block protocol version. Version 3 unifies block
+/// signatures and emergency PoW commitments on the canonical semantic hash.
+pub const CURRENT_PROTOCOL_VERSION: u32 = 3;
+/// Genesis remains pinned to its original protocol version to preserve the
+/// existing chain anchor across the v3 activation.
+pub const GENESIS_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
@@ -268,6 +274,7 @@ impl Block {
     pub fn genesis() -> Self {
         let mut genesis = Self::new(0, vec![], "0".to_string());
         genesis.timestamp = 0;
+        genesis.protocol_version = GENESIS_PROTOCOL_VERSION;
         genesis
     }
 
@@ -284,7 +291,7 @@ impl Block {
             zk_proof: vec![],
             epoch_id: 0,
             consensus_mode: ConsensusMode::PosNormal,
-            protocol_version: 2, // Sprint 6 bumps protocol version
+            protocol_version: CURRENT_PROTOCOL_VERSION,
             shard_registry_root: "0".repeat(64),
             shard_id: 0,
             shard_state_root: "0".repeat(64),

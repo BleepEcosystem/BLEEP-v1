@@ -250,7 +250,7 @@ impl ConsensusEngine for PoSConsensusEngine {
             previous_hash,
             epoch_state.epoch_id,
             ConsensusMode::PosNormal,
-            1,             // protocol_version
+            bleep_core::block::CURRENT_PROTOCOL_VERSION,
             String::new(), // shard_registry_root
             0,             // shard_id - default to main shard
             String::new(), // shard_state_root

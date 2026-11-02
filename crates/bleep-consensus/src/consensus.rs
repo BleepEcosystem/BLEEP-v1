@@ -27,7 +27,7 @@
 //! at nonce N included all bytes from nonces 0..N, making PoW unverifiable.
 //!
 //! **Fix:** A fresh `sha2::Sha256` is constructed per iteration over
-//! `block_commitment(32B) || nonce_le8(8B)`.
+//! `block.compute_hash()` (decoded to 32 bytes) || `nonce_le8(8B)`.
 //!
 //! ### S-04 — PBFT requires authenticated quorum evidence
 //!
@@ -48,7 +48,6 @@ use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use bincode;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use sha2::{Digest, Sha256};
@@ -293,18 +292,17 @@ impl BLEEPAdaptiveConsensus {
     /// Old code used `ring::digest::Context::update` inside the loop, accumulating
     /// all previous nonce bytes — producing a non-deterministic, unverifiable hash.
     ///
-    /// Fix: `block_commitment = SHA-256(bincode(block))` computed once.
-    /// Each iteration: `SHA-256(block_commitment || nonce_le8)` with a fresh hasher.
+    /// The canonical SHA3-256 block hash is shared with block signing.
+    /// Each iteration hashes `block_hash_bytes || nonce_le8` with a fresh hasher.
     #[allow(dead_code)]
     fn pow_algorithm(&mut self, block: &Block) -> bool {
-        let block_bytes = match bincode::serde::encode_to_vec(block, bincode::config::standard()) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("PoW: serialise failed: {}", e);
+        let commitment = match canonical_block_hash_bytes(block) {
+            Ok(hash) => hash,
+            Err(error) => {
+                warn!("PoW: invalid canonical block hash: {}", error);
                 return false;
             }
         };
-        let commitment: [u8; 32] = Sha256::digest(&block_bytes).into();
         let target = "0".repeat(self.pow_difficulty);
 
         for nonce in 0u64..10_000_000 {
@@ -391,11 +389,9 @@ impl BLEEPAdaptiveConsensus {
     ///
     /// This implementation uses `self.signing_key.sk_bytes` (set once at init).
     ///
-    /// **Signed payload:** `SHA-256(bincode(block))` — 32 bytes.
+    /// **Signed payload:** the 32-byte canonical SHA3-256 block hash.
     pub fn sign_block(&self, block: &Block, _validator_id: &str) -> Result<Vec<u8>, String> {
-        let block_bytes = bincode::serde::encode_to_vec(block, bincode::config::standard())
-            .map_err(|e| format!("Serialise failed for block {}: {}", block.index, e))?;
-        let block_hash: [u8; 32] = Sha256::digest(&block_bytes).into();
+        let block_hash = canonical_block_hash_bytes(block)?;
 
         let sk = sphincsshake256fsimple::SecretKey::from_bytes(&self.signing_key.sk_bytes)
             .map_err(|e| format!("Invalid signing key: {:?}", e))?;
@@ -456,14 +452,13 @@ impl BLEEPAdaptiveConsensus {
             }
         };
 
-        let block_bytes = match bincode::serde::encode_to_vec(block, bincode::config::standard()) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("verify_signature: serialise failed: {}", e);
+        let block_hash = match canonical_block_hash_bytes(block) {
+            Ok(hash) => hash,
+            Err(error) => {
+                warn!("verify_signature: invalid canonical block hash: {}", error);
                 return false;
             }
         };
-        let block_hash: [u8; 32] = Sha256::digest(&block_bytes).into();
 
         let ok = sphincsshake256fsimple::verify_detached_signature(&sig, &block_hash, &pk).is_ok();
         if !ok {
@@ -493,6 +488,21 @@ impl BLEEPAdaptiveConsensus {
         let d = h.finalize();
         u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
     }
+}
+
+fn canonical_block_hash_bytes(block: &Block) -> Result<[u8; 32], String> {
+    if block.protocol_version != bleep_core::block::CURRENT_PROTOCOL_VERSION {
+        return Err(format!(
+            "unsupported block protocol version {} (expected {})",
+            block.protocol_version,
+            bleep_core::block::CURRENT_PROTOCOL_VERSION
+        ));
+    }
+    let hash = block.compute_hash();
+    let mut bytes = [0u8; 32];
+    hex::decode_to_slice(&hash, &mut bytes)
+        .map_err(|error| format!("invalid canonical block hash: {error}"))?;
+    Ok(bytes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -537,6 +547,33 @@ mod tests {
         assert!(
             c.verify_signature(&block, &sig, &vid),
             "S-01: round-trip must pass"
+        );
+    }
+
+    #[test]
+    fn test_block_signature_uses_canonical_hash() {
+        let key = ValidatorSigningKey::generate();
+        let public_key = key.pk_bytes.clone();
+        let mut pubkeys = HashMap::new();
+        pubkeys.insert("v1".to_string(), public_key.clone());
+        let consensus = make_consensus(key, pubkeys);
+        let block = make_block(42);
+        let signature = consensus.sign_block(&block, "v1").unwrap();
+
+        let canonical_hash: [u8; 32] = hex::decode(block.compute_hash())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let pk = sphincsshake256fsimple::PublicKey::from_bytes(&public_key).unwrap();
+        let sig = sphincsshake256fsimple::DetachedSignature::from_bytes(&signature).unwrap();
+        assert!(
+            sphincsshake256fsimple::verify_detached_signature(&sig, &canonical_hash, &pk).is_ok()
+        );
+
+        let encoded = bincode::serde::encode_to_vec(&block, bincode::config::standard()).unwrap();
+        let legacy_hash: [u8; 32] = Sha256::digest(encoded).into();
+        assert!(
+            sphincsshake256fsimple::verify_detached_signature(&sig, &legacy_hash, &pk).is_err()
         );
     }
 
@@ -614,8 +651,10 @@ mod tests {
     #[test]
     fn test_pow_hash_deterministic_per_nonce() {
         let block = make_block(0);
-        let bytes = bincode::serde::encode_to_vec(block, bincode::config::standard()).unwrap();
-        let commit: [u8; 32] = Sha256::digest(&bytes).into();
+        let commit: [u8; 32] = hex::decode(block.compute_hash())
+            .unwrap()
+            .try_into()
+            .unwrap();
 
         let hash_fn = |n: u64| {
             let mut h = Sha256::new();
@@ -633,6 +672,23 @@ mod tests {
             hash_fn(0),
             hash_fn(1),
             "S-03: different nonces must give different hashes"
+        );
+    }
+
+    #[test]
+    fn test_default_block_uses_current_protocol_version() {
+        let block = make_block(0);
+        assert_eq!(
+            block.protocol_version,
+            bleep_core::block::CURRENT_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn test_genesis_keeps_its_original_protocol_version() {
+        assert_eq!(
+            Block::genesis().protocol_version,
+            bleep_core::block::GENESIS_PROTOCOL_VERSION
         );
     }
 

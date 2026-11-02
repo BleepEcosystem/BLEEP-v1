@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub fn run_consensus_engine() -> Result<(), Box<dyn std::error::Error>> {
-    let config = EpochConfig::new(100, 0, 2)
+    let config = EpochConfig::new(100, 0, bleep_core::block::CURRENT_PROTOCOL_VERSION)
         .map_err(|e| format!("Consensus epoch configuration failed: {}", e))?;
 
     let mut engines: HashMap<EpochConsensusMode, Arc<dyn ConsensusEngine>> = HashMap::new();

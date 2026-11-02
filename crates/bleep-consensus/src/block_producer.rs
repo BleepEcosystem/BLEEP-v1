@@ -80,7 +80,7 @@ pub struct FinalizedBlock {
 pub const MAX_TXS_PER_BLOCK: usize = 4_096;
 pub const BLOCK_INTERVAL_MS: u64 = 3_000;
 const BLOCKS_PER_EPOCH: u64 = 1_000;
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = bleep_core::block::CURRENT_PROTOCOL_VERSION;
 /// BLEEP native chain ID for intent routing
 const BLEEP_CHAIN_ID: ChainId = ChainId::Bleep;
 
