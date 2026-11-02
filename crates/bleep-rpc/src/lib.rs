@@ -1527,38 +1527,40 @@ fn auth_filter_with_permission(
     state: Arc<RpcState>,
     permission: Option<Permission>,
 ) -> impl Filter<Extract = (SessionClaims,), Error = warp::Rejection> + Clone {
-    warp::header::<String>("authorization")
+    warp::header::optional::<String>("authorization")
         .and(with_arc_state(Arc::clone(&state)))
-        .and_then(move |auth_header: String, st: Arc<RpcState>| async move {
-            if !auth_header.starts_with("Bearer ") {
-                return Err(warp::reject::custom(AuthRejection(
-                    AuthError::InvalidSession,
-                )));
-            }
-            let token = &auth_header[7..];
-            let auth_service = st.auth_service.as_ref().ok_or_else(|| {
-                warp::reject::custom(AuthRejection(AuthError::Unauthorized(
-                    "Auth service not available".to_string(),
-                )))
-            })?;
-            let claims = auth_service
-                .sessions
-                .validate(token)
-                .await
-                .map_err(|e| warp::reject::custom(AuthRejection(e)))?;
+        .and_then(
+            move |auth_header: Option<String>, st: Arc<RpcState>| async move {
+                let token = auth_header
+                    .as_deref()
+                    .and_then(|header| header.strip_prefix("Bearer "))
+                    .ok_or_else(|| {
+                        warp::reject::custom(AuthRejection(AuthError::InvalidSession))
+                    })?;
+                let auth_service = st.auth_service.as_ref().ok_or_else(|| {
+                    warp::reject::custom(AuthRejection(AuthError::Unauthorized(
+                        "Auth service not available".to_string(),
+                    )))
+                })?;
+                let claims = auth_service
+                    .sessions
+                    .validate(token)
+                    .await
+                    .map_err(|e| warp::reject::custom(AuthRejection(e)))?;
 
-            if let Some(required) = permission {
-                if !auth_service.rbac.check(&claims.sub, required).is_granted() {
-                    return Err(warp::reject::custom(AuthRejection(
-                        AuthError::Unauthorized(format!(
-                            "Missing required permission: {required:?}"
-                        )),
-                    )));
+                if let Some(required) = permission {
+                    if !auth_service.rbac.check(&claims.sub, required).is_granted() {
+                        return Err(warp::reject::custom(AuthRejection(
+                            AuthError::Unauthorized(format!(
+                                "Missing required permission: {required:?}"
+                            )),
+                        )));
+                    }
                 }
-            }
 
-            Ok(claims)
-        })
+                Ok(claims)
+            },
+        )
 }
 
 fn public_native_mint_enabled() -> bool {
@@ -3512,40 +3514,46 @@ fn auth_register_dapp(
     warp::path!("rpc" / "auth" / "register" / "dapp")
         .and(warp::post())
         .and(limited_json_body::<AuthRegisterDappReq>())
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::AdministerSystem),
+        ))
         .and(with_arc_state(state))
-        .and_then(|req: AuthRegisterDappReq, st: Arc<RpcState>| async move {
-            let auth_service = match &st.auth_service {
-                Some(svc) => Arc::clone(svc),
-                None => {
-                    return Ok::<_, warp::Rejection>(warp::reply::with_status(
-                        warp::reply::json(&ErrResp {
-                            error: "Auth service not mounted in RPC state.".into(),
-                        }),
-                        warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    ));
-                }
-            };
+        .and_then(
+            |req: AuthRegisterDappReq, _claims: SessionClaims, st: Arc<RpcState>| async move {
+                let auth_service = match &st.auth_service {
+                    Some(svc) => Arc::clone(svc),
+                    None => {
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "Auth service not mounted in RPC state.".into(),
+                            }),
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
+                    }
+                };
 
-            match auth_service
-                .register_dapp(req.developer_handle, req.display_name, req.password)
-                .await
-            {
-                Ok((_identity, token)) => Ok(warp::reply::with_status(
-                    warp::reply::json(&AuthTokenResp {
-                        token: token.token,
-                        jti: token.jti,
-                        expires_at: token.expires_at.to_rfc3339(),
-                    }),
-                    warp::http::StatusCode::CREATED,
-                )),
-                Err(err) => Ok(warp::reply::with_status(
-                    warp::reply::json(&ErrResp {
-                        error: format!("Auth registration failed: {}", err),
-                    }),
-                    warp::http::StatusCode::BAD_REQUEST,
-                )),
-            }
-        })
+                match auth_service
+                    .register_dapp(req.developer_handle, req.display_name, req.password)
+                    .await
+                {
+                    Ok((_identity, token)) => Ok(warp::reply::with_status(
+                        warp::reply::json(&AuthTokenResp {
+                            token: token.token,
+                            jti: token.jti,
+                            expires_at: token.expires_at.to_rfc3339(),
+                        }),
+                        warp::http::StatusCode::CREATED,
+                    )),
+                    Err(err) => Ok(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Auth registration failed: {}", err),
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    )),
+                }
+            },
+        )
 }
 
 fn auth_login(
@@ -4909,6 +4917,111 @@ mod tests_sprint8 {
         assert!(response.is_err());
     }
 
+    #[tokio::test]
+    async fn dapp_registration_requires_system_admin() {
+        use bleep_auth::Role;
+
+        let auth = Arc::new(AuthService::new((0u8..32).collect()).unwrap());
+        let routes = rpc_routes_with_state(RpcState::new().with_auth_service(Arc::clone(&auth)));
+        let request_body = serde_json::json!({
+            "developer_handle": "new-developer",
+            "display_name": "New Developer",
+            "password": "a-secure-test-password"
+        });
+
+        let unauthenticated = warp::test::request()
+            .method("POST")
+            .path("/rpc/auth/register/dapp")
+            .json(&request_body)
+            .reply(&routes)
+            .await;
+        assert_eq!(
+            unauthenticated.status(),
+            warp::http::StatusCode::UNAUTHORIZED
+        );
+
+        let (_, dapp_token) = auth
+            .register_dapp(
+                "existing-developer".into(),
+                "Existing Developer".into(),
+                "another-secure-password".into(),
+            )
+            .await
+            .unwrap();
+        let dapp_bearer = format!("Bearer {}", dapp_token.token);
+        let dapp_response = warp::test::request()
+            .method("POST")
+            .path("/rpc/auth/register/dapp")
+            .header("authorization", dapp_bearer.as_str())
+            .json(&request_body)
+            .reply(&routes)
+            .await;
+        assert_eq!(dapp_response.status(), warp::http::StatusCode::FORBIDDEN);
+
+        auth.rbac.assign_role("admin-session", Role::SystemAdmin);
+        let admin_token = auth
+            .sessions
+            .issue(
+                "admin-session",
+                &[Role::SystemAdmin],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        let admin_bearer = format!("Bearer {}", admin_token.token);
+        let admin_response = warp::test::request()
+            .method("POST")
+            .path("/rpc/auth/register/dapp")
+            .header("authorization", admin_bearer.as_str())
+            .json(&request_body)
+            .reply(&routes)
+            .await;
+        assert_eq!(admin_response.status(), warp::http::StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn chaos_status_requires_auditor_and_does_not_claim_unrun_tests_passed() {
+        use bleep_auth::Role;
+
+        let auth = Arc::new(AuthService::new((0u8..32).collect()).unwrap());
+        auth.rbac
+            .assign_role("operator-session", Role::NodeOperator);
+        let token = auth
+            .sessions
+            .issue(
+                "operator-session",
+                &[Role::NodeOperator],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        let routes = rpc_routes_with_state(RpcState::new().with_auth_service(auth));
+
+        let unauthenticated = warp::test::request()
+            .method("GET")
+            .path("/rpc/chaos/status")
+            .reply(&routes)
+            .await;
+        assert_eq!(
+            unauthenticated.status(),
+            warp::http::StatusCode::UNAUTHORIZED
+        );
+
+        let bearer = format!("Bearer {}", token.token);
+        let response = warp::test::request()
+            .method("GET")
+            .path("/rpc/chaos/status")
+            .header("authorization", bearer.as_str())
+            .reply(&routes)
+            .await;
+        assert_eq!(response.status(), warp::http::StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["status"], "NOT_RUN");
+        assert!(body["all_passed"].is_null());
+        assert_eq!(body["scenarios"], serde_json::json!([]));
+        assert!(!body.to_string().contains("PASS"));
+    }
+
     #[test]
     fn production_and_unknown_networks_never_enable_dev_gates() {
         assert!(!is_dev_or_test_network("mainnet"));
@@ -5000,7 +5113,7 @@ mod tests_sprint8 {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── GET /rpc/chaos/status ────────────────────────────────────────────────────
-// Returns the current chaos suite status: pass/fail per scenario.
+// Returns recorded chaos results, or NOT_RUN when no results are available.
 
 pub fn chaos_status_route(
     state: Arc<RpcState>,
@@ -5008,32 +5121,18 @@ pub fn chaos_status_route(
     let st = Arc::clone(&state);
     warp::path!("rpc" / "chaos" / "status")
         .and(warp::get())
-        .map(move || {
+        .and(auth_filter_with_permission(
+            Arc::clone(&state),
+            Some(Permission::ViewAuditLog),
+        ))
+        .map(move |_claims: SessionClaims| {
             let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
             let json = serde_json::json!({
-                "chain_height":     height,
-                "chaos_suite":      "sprint9-14-scenarios",
-                "validator_count":  7,
-                "bft_bound_f":      2,
-                "scenarios": [
-                    { "name": "ValidatorCrash(1)",           "result": "PASS", "note": "1/7 crash within BFT bound; consensus resumed" },
-                    { "name": "ValidatorCrash(2)",           "result": "PASS", "note": "2/7 crash within BFT bound; consensus resumed" },
-                    { "name": "NetworkPartition(4/3)",       "result": "PASS", "note": "majority partition (4) met quorum; minority stalled; healed cleanly" },
-                    { "name": "NetworkPartition(5/2)",       "result": "PASS", "note": "majority partition (5) met quorum; minority stalled; healed cleanly" },
-                    { "name": "LongRangeReorg(10)",          "result": "PASS", "note": "rejected at FinalityManager (I-CON3)" },
-                    { "name": "LongRangeReorg(50)",          "result": "PASS", "note": "rejected at FinalityManager (I-CON3)" },
-                    { "name": "DoubleSign(validator-0)",     "result": "PASS", "note": "33% slashed; evidence committed; tombstoned" },
-                    { "name": "DoubleSign(validator-3)",     "result": "PASS", "note": "33% slashed; evidence committed; tombstoned" },
-                    { "name": "TxReplay",                    "result": "PASS", "note": "rejected by nonce check (I-S5)" },
-                    { "name": "EclipseAttack(validator-6)",  "result": "PASS", "note": "mitigated by Kademlia k=20 and DNS seeds" },
-                    { "name": "InvalidBlockFlood(1000)",     "result": "PASS", "note": "rejected at SPHINCS+ gate; peer rate-limited" },
-                    { "name": "LoadStress(1000tps,60s)",     "result": "PASS", "note": "4096 tx/block; 1000 TPS sustained" },
-                    { "name": "LoadStress(5000tps,60s)",     "result": "PASS", "note": "4096 tx/block; 5000 TPS sustained" },
-                    { "name": "LoadStress(10000tps,60s)",    "result": "PASS", "note": "4096 tx/block saturated; 10000 TPS at capacity" },
-                ],
-                "all_passed":       true,
-                "continuous_hours": 72,
-                "status":           "PASS"
+                "chain_height": height,
+                "scenarios": [],
+                "all_passed": null,
+                "status": "NOT_RUN",
+                "message": "No chaos test results are recorded by this RPC process."
             });
             warp::reply::json(&json)
         })
