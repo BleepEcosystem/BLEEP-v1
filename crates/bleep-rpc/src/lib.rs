@@ -33,6 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use parking_lot::Mutex;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
 
@@ -59,6 +60,12 @@ use bleep_state::state_manager::StateManager;
 use bleep_state::state_merkle::MerkleProof;
 
 const FAUCET_TREASURY_ADDRESS: &str = "BLEEP_FAUCET_TREASURY";
+const MAX_RPC_JSON_BODY_BYTES: u64 = 2 * 1024 * 1024;
+
+fn limited_json_body<T: DeserializeOwned + Send>(
+) -> impl Filter<Extract = (T,), Error = warp::Rejection> + Copy {
+    warp::body::content_length_limit(MAX_RPC_JSON_BODY_BYTES).and(warp::body::json())
+}
 
 // ─── Shared live state ────────────────────────────────────────────────────────
 
@@ -657,7 +664,7 @@ pub fn rpc_routes_with_state(
     // POST /rpc/tx
     let tx_submit = warp::path!("rpc" / "tx")
         .and(warp::post())
-        .and(warp::body::json::<TxReq>())
+        .and(limited_json_body::<TxReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state_inner),
             Some(Permission::SubmitTransaction),
@@ -769,7 +776,7 @@ pub fn rpc_routes_with_state(
     // exposes a direct native minting endpoint.
     let mint = warp::path!("rpc" / "mint")
         .and(warp::post())
-        .and(warp::body::json::<MintReq>())
+        .and(limited_json_body::<MintReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state_inner),
             Some(Permission::AdministerSystem),
@@ -950,7 +957,7 @@ pub fn rpc_routes_with_state(
     // POST /rpc/validator/stake
     let validator_stake = warp::path!("rpc" / "validator" / "stake")
         .and(warp::post())
-        .and(warp::body::json::<StakeRequest>())
+        .and(limited_json_body::<StakeRequest>())
         .and(auth_filter_with_permission(
             Arc::clone(&state_inner),
             Some(Permission::BindValidator),
@@ -1064,7 +1071,7 @@ pub fn rpc_routes_with_state(
     // POST /rpc/validator/unstake
     let validator_unstake = warp::path!("rpc" / "validator" / "unstake")
         .and(warp::post())
-        .and(warp::body::json::<UnstakeRequest>())
+        .and(limited_json_body::<UnstakeRequest>())
         .and(auth_filter_with_permission(
             Arc::clone(&state_inner),
             Some(Permission::BindValidator),
@@ -1736,7 +1743,7 @@ fn oracle_update(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "oracle" / "update")
         .and(warp::post())
-        .and(warp::body::json::<OracleUpdateReq>())
+        .and(limited_json_body::<OracleUpdateReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::ConfigureNode),
@@ -1807,7 +1814,7 @@ fn oracle_operator_register(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "oracle" / "operator" / "register")
         .and(warp::post())
-        .and(warp::body::json::<OracleOperatorRegisterReq>())
+        .and(limited_json_body::<OracleOperatorRegisterReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::ConfigureNode),
@@ -1911,7 +1918,7 @@ fn connect_submit_intent(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "connect" / "intent")
         .and(warp::post())
-        .and(warp::body::json::<SubmitIntentReq>())
+        .and(limited_json_body::<SubmitIntentReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::SubmitTransaction),
@@ -2366,7 +2373,7 @@ fn pat_create(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "create")
         .and(warp::post())
-        .and(warp::body::json::<PatCreateReq>())
+        .and(limited_json_body::<PatCreateReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::DeployContract),
@@ -2442,7 +2449,7 @@ fn pat_mint(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "mint")
         .and(warp::post())
-        .and(warp::body::json::<PatMintReq>())
+        .and(limited_json_body::<PatMintReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::InvokeContract),
@@ -2519,7 +2526,7 @@ fn pat_burn(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "burn")
         .and(warp::post())
-        .and(warp::body::json::<PatBurnReq>())
+        .and(limited_json_body::<PatBurnReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::InvokeContract),
@@ -2586,7 +2593,7 @@ fn pat_transfer(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "transfer")
         .and(warp::post())
-        .and(warp::body::json::<PatTransferReq>())
+        .and(limited_json_body::<PatTransferReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::SubmitTransaction),
@@ -2790,7 +2797,7 @@ fn pat_approve(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "approve")
         .and(warp::post())
-        .and(warp::body::json::<PatApproveReq>())
+        .and(limited_json_body::<PatApproveReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::InvokeContract),
@@ -2885,7 +2892,7 @@ fn pat_freeze(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "freeze")
         .and(warp::post())
-        .and(warp::body::json::<PatFreezeReq>())
+        .and(limited_json_body::<PatFreezeReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::AdministerSystem),
@@ -2967,7 +2974,7 @@ fn pat_set_burn_rate(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "set-burn-rate")
         .and(warp::post())
-        .and(warp::body::json::<PatSetBurnRateReq>())
+        .and(limited_json_body::<PatSetBurnRateReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::AdministerSystem),
@@ -3051,7 +3058,7 @@ fn pat_set_owner(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "pat" / "set-owner")
         .and(warp::post())
-        .and(warp::body::json::<PatSetOwnerReq>())
+        .and(limited_json_body::<PatSetOwnerReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::AdministerSystem),
@@ -3439,7 +3446,7 @@ fn auth_register_operator(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "register" / "operator")
         .and(warp::post())
-        .and(warp::body::json::<AuthRegisterOperatorReq>())
+        .and(limited_json_body::<AuthRegisterOperatorReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::AdministerSystem),
@@ -3504,7 +3511,7 @@ fn auth_register_dapp(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "register" / "dapp")
         .and(warp::post())
-        .and(warp::body::json::<AuthRegisterDappReq>())
+        .and(limited_json_body::<AuthRegisterDappReq>())
         .and(with_arc_state(state))
         .and_then(|req: AuthRegisterDappReq, st: Arc<RpcState>| async move {
             let auth_service = match &st.auth_service {
@@ -3546,7 +3553,7 @@ fn auth_login(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "login")
         .and(warp::post())
-        .and(warp::body::json::<AuthLoginReq>())
+        .and(limited_json_body::<AuthLoginReq>())
         .and(with_arc_state(state))
         .and_then(|req: AuthLoginReq, st: Arc<RpcState>| async move {
             let auth_service = match &st.auth_service {
@@ -3585,7 +3592,7 @@ fn auth_logout(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "logout")
         .and(warp::post())
-        .and(warp::body::json::<AuthLogoutReq>())
+        .and(limited_json_body::<AuthLogoutReq>())
         .and(auth_filter(Arc::clone(&state)))
         .and(with_arc_state(state))
         .and_then(
@@ -3668,7 +3675,7 @@ fn auth_confirm_secret_rotation(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     warp::path!("rpc" / "auth" / "rotate" / "confirm")
         .and(warp::post())
-        .and(warp::body::json::<AuthRotateConfirmReq>())
+        .and(limited_json_body::<AuthRotateConfirmReq>())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::RotateJwtSecret),
@@ -4214,6 +4221,32 @@ mod tests {
     use warp::test::request;
 
     static FAUCET_NETWORK_MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn limited_json_body_accepts_bounded_and_rejects_oversized_payloads() {
+        let route = warp::path("bounded")
+            .and(limited_json_body::<serde_json::Value>())
+            .map(|value| warp::reply::json(&value));
+
+        let accepted = request()
+            .method("POST")
+            .path("/bounded")
+            .header("content-type", "application/json")
+            .body(r#"{"ok":true}"#)
+            .reply(&route)
+            .await;
+        assert_eq!(accepted.status(), warp::http::StatusCode::OK);
+
+        let oversized_body = " ".repeat(MAX_RPC_JSON_BODY_BYTES as usize + 1);
+        let rejected = request()
+            .method("POST")
+            .path("/bounded")
+            .header("content-type", "application/json")
+            .body(oversized_body)
+            .reply(&route)
+            .await;
+        assert_eq!(rejected.status(), warp::http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
 
     #[test]
     fn escrow_proof_input_has_no_placeholder_fallback() {
@@ -5076,8 +5109,7 @@ pub fn governance_propose_route(
     let _st = Arc::clone(&state);
     warp::path!("rpc" / "governance" / "propose")
         .and(warp::post())
-        .and(warp::body::content_length_limit(65_536))
-        .and(warp::body::json())
+        .and(limited_json_body())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::VoteOnGovernance),
@@ -5123,8 +5155,7 @@ pub fn governance_vote_route(
     let _st = Arc::clone(&state);
     warp::path!("rpc" / "governance" / "vote")
         .and(warp::post())
-        .and(warp::body::content_length_limit(65_536))
-        .and(warp::body::json())
+        .and(limited_json_body())
         .and(auth_filter_with_permission(
             Arc::clone(&state),
             Some(Permission::VoteOnGovernance),
@@ -5187,8 +5218,7 @@ pub fn layer3_intent_submit_route(
     let _st = Arc::clone(&state);
     warp::path!("rpc" / "layer3" / "intent")
         .and(warp::post())
-        .and(warp::body::content_length_limit(65_536))
-        .and(warp::body::json())
+        .and(limited_json_body())
         .map(move |body: serde_json::Value| {
             let sender = body
                 .get("sender")
