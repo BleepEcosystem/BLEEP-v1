@@ -1364,6 +1364,7 @@ dependencies = [
  "anyhow",
  "approx 0.5.1",
  "bincode 2.0.1",
+ "bleep-core",
  "dashmap 5.5.3",
  "env_logger",
  "hex",

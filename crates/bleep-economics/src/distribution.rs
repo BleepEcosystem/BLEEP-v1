@@ -38,13 +38,14 @@
 //! | Ecosystem Fund      |  5,000,000    |
 //! | Foundation          |  5,000,000    |
 
+use bleep_core::protocol_invariants::MAX_TOKEN_SUPPLY;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // ── Allocation constants (microBLEEP) ─────────────────────────────────────────
 
 /// Protocol maximum supply.  IMMUTABLE — cannot be changed by governance.
-pub const MAX_SUPPLY_MICRO: u128 = 200_000_000 * 100_000_000; // 20_000_000_000_000_000
+pub const MAX_SUPPLY_MICRO: u128 = MAX_TOKEN_SUPPLY;
 
 // Individual allocation ceilings (microBLEEP)
 pub const ALLOC_VALIDATOR_REWARDS: u128 = 60_000_000 * 100_000_000; // 30%

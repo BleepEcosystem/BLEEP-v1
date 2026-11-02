@@ -1,3 +1,4 @@
+use bleep_core::protocol_invariants::MAX_TOKEN_SUPPLY;
 /// CANONICAL TOKENOMICS ENGINE
 ///
 /// This module enforces hard-coded, invariant-protected rules for token supply,
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Maximum possible supply: 200 million BLEEP (IMMUTABLE — cannot be changed by governance)
-pub const MAX_SUPPLY: u128 = 200_000_000 * 10u128.pow(8); // 8 decimals = 20_000_000_000_000_000 µBLEEP
+pub const MAX_SUPPLY: u128 = MAX_TOKEN_SUPPLY;
 
 /// Initial supply at genesis (before any distribution unlocks)
 pub const GENESIS_SUPPLY: u128 = 0;
