@@ -56,11 +56,14 @@ use bleep_core::run_mempool_bridge;
 use bleep_core::transaction_pool::TransactionPool;
 
 // ── State ─────────────────────────────────────────────────────────────────────
+use bleep_state::cross_shard_2pc::CoordinatorManager;
 use bleep_state::state_manager::StateManager;
 
 // ── Consensus ─────────────────────────────────────────────────────────────────
 use bleep_consensus::slashing_engine::SlashingEngine;
-use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
+use bleep_consensus::validator_identity::{
+    ValidatorIdentity, ValidatorRegistry, VALIDATOR_REGISTRY_STORAGE_KEY,
+};
 use bleep_consensus::BlockProducer;
 use bleep_sig_availability::{
     AvailabilityConfig, MempoolSigCache, SigAvailabilityGossipHandler, SigAvailabilityLayer,
@@ -68,7 +71,9 @@ use bleep_sig_availability::{
 };
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
-use bleep_scheduler::{BlockTick, Scheduler};
+use bleep_scheduler::{
+    BlockTick, RegisteredTask, Scheduler, SchedulerError, TaskContext, TaskKind,
+};
 
 // ── Governance ────────────────────────────────────────────────────────────────
 use bleep_auth::AuthService;
@@ -109,6 +114,64 @@ use bleep_rpc::{rpc_routes_with_state, RpcState};
 
 struct ValidatorRegistryAdapter {
     inner: Arc<Mutex<ValidatorRegistry>>,
+}
+
+fn persist_validator_registry(
+    state: &Arc<Mutex<StateManager>>,
+    registry: &Arc<Mutex<ValidatorRegistry>>,
+) -> Result<(), String> {
+    let registry = registry.lock();
+    let snapshot = registry.to_persistent_bytes()?;
+    state
+        .lock()
+        .put_application_data(VALIDATOR_REGISTRY_STORAGE_KEY, &snapshot)
+        .map_err(|error| format!("Persist validator registry: {error}"))
+}
+
+fn process_completed_economics_epoch(
+    context: TaskContext,
+    runtime: &Arc<Mutex<BleepEconomicsRuntime>>,
+    fee_revenue: &Arc<Mutex<u128>>,
+    blocks_per_epoch: u64,
+) -> Result<(), String> {
+    let Some(epoch) = context.epoch.checked_sub(1) else {
+        return Ok(());
+    };
+
+    let mut runtime = runtime.lock();
+    if epoch < runtime.last_epoch || runtime.get_epoch_output(epoch).is_some() {
+        return Ok(());
+    }
+
+    let fees = {
+        let mut accumulated = fee_revenue.lock();
+        std::mem::take(&mut *accumulated)
+    };
+    match runtime.process_epoch(EpochInput {
+        epoch,
+        block_count: blocks_per_epoch,
+        fee_revenue: fees,
+        avg_utilisation_bps: 5000,
+        validator_metrics: vec![],
+        oracle_updates: vec![],
+    }) {
+        Ok(output) => {
+            info!(
+                "💰 Epoch {} economics: emitted={} burned={} supply={} base_fee={}",
+                output.epoch,
+                output.total_emitted,
+                output.total_burned,
+                output.circulating_supply,
+                output.new_base_fee
+            );
+            Ok(())
+        }
+        Err(error) => {
+            let mut accumulated = fee_revenue.lock();
+            *accumulated = accumulated.saturating_add(fees);
+            Err(error.to_string())
+        }
+    }
 }
 
 impl SalValidatorRegistry for ValidatorRegistryAdapter {
@@ -585,17 +648,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // ── Step 6: Governance ────────────────────────────────────────────────────
     info!("🏛  [6/16] Initialising governance engine…");
-    let governance = GovernanceEngine::new(1_000_000_000u128);
-    governance.persist()?;
+    let governance = Arc::new(Mutex::new(GovernanceEngine::new(1_000_000_000u128)));
+    governance.lock().persist()?;
     info!("  ✅ Governance online (1B total stake).");
 
     // ── Step 6b: ValidatorRegistry + SlashingEngine ───────────────────────────
     info!("🗳  [7/16] Initialising ValidatorRegistry and SlashingEngine…");
-    const VALIDATOR_REGISTRY_KEY: &str = "consensus/validator_registry/v1";
     let validator_registry = {
         let mut state_guard = state.lock();
         match state_guard
-            .get_application_data(VALIDATOR_REGISTRY_KEY)
+            .get_application_data(VALIDATOR_REGISTRY_STORAGE_KEY)
             .map_err(|error| format!("Validator registry load failed: {error}"))?
         {
             Some(bytes) => ValidatorRegistry::from_persistent_bytes(&bytes)
@@ -623,7 +685,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     .to_persistent_bytes()
                     .map_err(|error| format!("Genesis validator registry encoding failed: {error}"))?;
                 state_guard
-                    .put_application_data(VALIDATOR_REGISTRY_KEY, &snapshot)
+                    .put_application_data(VALIDATOR_REGISTRY_STORAGE_KEY, &snapshot)
                     .map_err(|error| format!("Genesis validator registry persistence failed: {error}"))?;
                 info!(
                     "  ✅ Genesis validator registered and persisted: id={validator_id}"
@@ -830,11 +892,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let mut block_rx_sched = block_rx;
 
-    // Build scheduler
-    let scheduler = Arc::new(Scheduler::new());
-    scheduler.register_built_in_tasks();
-    let (interval_handle, block_sched_handle) = scheduler.start();
-
     // Build live AuthService for the RPC auth subsystem.
     let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").unwrap_or_else(|_| {
         error!("BLEEP_JWT_SECRET must be explicitly configured; refusing to start.");
@@ -857,6 +914,327 @@ async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to initialize AuthService: {}", e);
         std::process::exit(1);
     }));
+
+    let scheduler = Arc::new(Scheduler::new());
+    scheduler.register_built_in_tasks();
+    let epoch_fee_revenue = Arc::new(Mutex::new(0u128));
+
+    let epoch_governance = Arc::clone(&governance);
+    scheduler.registry.register(RegisteredTask::epoch_boundary(
+        "epoch_advance",
+        TaskKind::Epoch,
+        "Advance governance state at epoch boundaries",
+        blocks_per_epoch,
+        60,
+        move |ctx| {
+            let governance = Arc::clone(&epoch_governance);
+            async move {
+                let mut governance = governance.lock();
+                governance
+                    .advance_epoch(ctx.epoch)
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
+                governance
+                    .persist()
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
+            }
+        },
+    ));
+
+    let proposal_governance = Arc::clone(&governance);
+    scheduler.registry.register(RegisteredTask::interval(
+        "governance_proposal_advance",
+        TaskKind::Governance,
+        "Advance governance proposals through their epoch state machine",
+        120,
+        30,
+        move |ctx| {
+            let governance = Arc::clone(&proposal_governance);
+            async move {
+                let mut governance = governance.lock();
+                governance
+                    .advance_epoch(ctx.epoch)
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
+                governance
+                    .persist()
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
+            }
+        },
+    ));
+
+    let voting_governance = Arc::clone(&governance);
+    scheduler.registry.register(RegisteredTask::epoch_boundary(
+        "governance_voting_window_close",
+        TaskKind::Governance,
+        "Close governance voting windows at epoch boundaries",
+        blocks_per_epoch,
+        30,
+        move |ctx| {
+            let governance = Arc::clone(&voting_governance);
+            async move {
+                let mut governance = governance.lock();
+                governance
+                    .advance_epoch(ctx.epoch)
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
+                governance
+                    .persist()
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
+            }
+        },
+    ));
+
+    let scheduler_metrics = Arc::clone(&scheduler.metrics);
+    scheduler.registry.register(RegisteredTask::every_n_blocks(
+        "epoch_metrics_snapshot",
+        TaskKind::Epoch,
+        "Log scheduler metrics at the current block height",
+        100,
+        10,
+        move |ctx| {
+            let metrics = Arc::clone(&scheduler_metrics);
+            async move {
+                let snapshot = metrics.snapshot();
+                info!(
+                    "[Epoch] Metrics snapshot: height={} epoch={} runs={} ok={} failed={} timeouts={}",
+                    ctx.block_height,
+                    ctx.epoch,
+                    snapshot.total_runs,
+                    snapshot.total_ok,
+                    snapshot.total_failed,
+                    snapshot.total_timeouts
+                );
+                Ok(())
+            }
+        },
+    ));
+
+    let decay_registry = Arc::clone(&validator_registry);
+    let decay_state = Arc::clone(&state);
+    scheduler.registry.register(RegisteredTask::interval(
+        "validator_trust_decay",
+        TaskKind::Consensus,
+        "Decay active validator reputation and persist the registry",
+        600,
+        15,
+        move |_| {
+            let registry = Arc::clone(&decay_registry);
+            let state = Arc::clone(&decay_state);
+            async move {
+                registry
+                    .lock()
+                    .apply_reputation_decay(0.995, 0.10)
+                    .map_err(SchedulerError::ExecutionFailed)?;
+                persist_validator_registry(&state, &registry)
+                    .map_err(SchedulerError::ExecutionFailed)
+            }
+        },
+    ));
+
+    let slashing_registry = Arc::clone(&validator_registry);
+    let slashing_state = Arc::clone(&state);
+    scheduler.registry.register(RegisteredTask::interval(
+        "slashing_evidence_sweep",
+        TaskKind::Consensus,
+        "Persist validator registry changes produced by accepted slashing evidence",
+        300,
+        30,
+        move |_| {
+            let registry = Arc::clone(&slashing_registry);
+            let state = Arc::clone(&slashing_state);
+            async move {
+                persist_validator_registry(&state, &registry)
+                    .map_err(SchedulerError::ExecutionFailed)
+            }
+        },
+    ));
+
+    let supply_runtime = Arc::clone(&economics_runtime);
+    scheduler.registry.register(RegisteredTask::epoch_boundary(
+        "supply_state_verify",
+        TaskKind::Economics,
+        "Verify economic supply invariants at epoch boundaries",
+        blocks_per_epoch,
+        15,
+        move |_| {
+            let runtime = Arc::clone(&supply_runtime);
+            async move {
+                runtime
+                    .lock()
+                    .state
+                    .verify_epoch_invariants()
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
+            }
+        },
+    ));
+
+    let fee_runtime = Arc::clone(&economics_runtime);
+    scheduler.registry.register(RegisteredTask::every_n_blocks(
+        "fee_market_update",
+        TaskKind::Economics,
+        "Update the base fee from the current utilization estimate",
+        30,
+        10,
+        move |ctx| {
+            let runtime = Arc::clone(&fee_runtime);
+            async move {
+                runtime
+                    .lock()
+                    .state
+                    .fee_market
+                    .update_base_fee(ctx.epoch, 5000)
+                    .map(|_| ())
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
+            }
+        },
+    ));
+
+    let reward_runtime = Arc::clone(&economics_runtime);
+    let reward_fees = Arc::clone(&epoch_fee_revenue);
+    scheduler.registry.register(RegisteredTask::epoch_boundary(
+        "validator_reward_distribution",
+        TaskKind::Consensus,
+        "Process completed epoch validator rewards and fee distribution",
+        blocks_per_epoch,
+        60,
+        move |ctx| {
+            let runtime = Arc::clone(&reward_runtime);
+            let fees = Arc::clone(&reward_fees);
+            async move {
+                process_completed_economics_epoch(ctx, &runtime, &fees, blocks_per_epoch)
+                    .map_err(SchedulerError::ExecutionFailed)
+            }
+        },
+    ));
+
+    let burn_runtime = Arc::clone(&economics_runtime);
+    let burn_fees = Arc::clone(&epoch_fee_revenue);
+    scheduler.registry.register(RegisteredTask::interval(
+        "token_burn_execution",
+        TaskKind::Economics,
+        "Process any completed epoch fee burns not yet recorded",
+        21600,
+        30,
+        move |ctx| {
+            let runtime = Arc::clone(&burn_runtime);
+            let fees = Arc::clone(&burn_fees);
+            async move {
+                process_completed_economics_epoch(ctx, &runtime, &fees, blocks_per_epoch)
+                    .map_err(SchedulerError::ExecutionFailed)
+            }
+        },
+    ));
+
+    let sessions = Arc::clone(&auth_service.sessions);
+    scheduler.registry.register(RegisteredTask::interval(
+        "session_revocation_purge",
+        TaskKind::Maintenance,
+        "Purge expired session revocations",
+        300,
+        5,
+        move |_| {
+            let sessions = Arc::clone(&sessions);
+            async move {
+                sessions.purge_expired_revocations(chrono::Duration::hours(24));
+                Ok(())
+            }
+        },
+    ));
+
+    let rate_limiter = Arc::clone(&auth_service.rate_limiter);
+    scheduler.registry.register(RegisteredTask::interval(
+        "rate_limit_bucket_purge",
+        TaskKind::Maintenance,
+        "Purge expired rate-limit buckets",
+        60,
+        5,
+        move |_| {
+            let rate_limiter = Arc::clone(&rate_limiter);
+            async move {
+                rate_limiter.purge_expired();
+                Ok(())
+            }
+        },
+    ));
+
+    let mempool = Arc::clone(&tx_pool);
+    scheduler.registry.register(RegisteredTask::interval(
+        "mempool_prune",
+        TaskKind::Maintenance,
+        "Prune stale transactions from the transaction pool",
+        30,
+        15,
+        move |_| {
+            let mempool = Arc::clone(&mempool);
+            async move {
+                mempool.prune_expired(chrono::Duration::minutes(10)).await;
+                Ok(())
+            }
+        },
+    ));
+
+    let checkpoint_state = Arc::clone(&state);
+    scheduler.registry.register(RegisteredTask::every_n_blocks(
+        "indexer_checkpoint",
+        TaskKind::Maintenance,
+        "Persist a state snapshot at the current chain height",
+        100,
+        30,
+        move |ctx| {
+            let state = Arc::clone(&checkpoint_state);
+            async move {
+                let snapshot = state
+                    .lock()
+                    .create_snapshot()
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
+                info!(
+                    "[State] Checkpoint saved at height={} path={}",
+                    ctx.block_height,
+                    snapshot.display()
+                );
+                Ok(())
+            }
+        },
+    ));
+
+    let peers = Arc::clone(&p2p_node.peer_manager);
+    scheduler.registry.register(RegisteredTask::interval(
+        "peer_score_decay",
+        TaskKind::Networking,
+        "Refresh peer trust scores and remove stale peers",
+        300,
+        10,
+        move |_| {
+            let peers = Arc::clone(&peers);
+            async move {
+                peers.maintenance_sweep().await;
+                Ok(())
+            }
+        },
+    ));
+
+    let coordinators = Arc::new(Mutex::new(CoordinatorManager::new()));
+    let timeout_coordinators = Arc::clone(&coordinators);
+    scheduler.registry.register(RegisteredTask::interval(
+        "cross_shard_timeout_sweep",
+        TaskKind::Networking,
+        "Advance cross-shard 2PC and abort expired coordinators",
+        60,
+        20,
+        move |ctx| {
+            let coordinators = Arc::clone(&timeout_coordinators);
+            async move {
+                coordinators.lock().advance_block(ctx.block_height);
+                Ok(())
+            }
+        },
+    ));
+
+    let startup_height = state.lock().block_height();
+    scheduler.on_new_block(BlockTick {
+        height: startup_height,
+        epoch: startup_height / blocks_per_epoch,
+        timestamp: chrono::Utc::now().timestamp().max(0) as u64,
+    });
+    let (interval_handle, block_sched_handle) = scheduler.start();
 
     // Build live RpcState — wires the live StateManager for /rpc/state and
     // /rpc/proof, and shares the same atomic counters with the relay task so
@@ -881,18 +1259,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let gas_relay = gas_used_gauge.clone();
     let rpc_blocks_relay = Arc::clone(&rpc_state.blocks_produced);
     let rpc_txs_relay = Arc::clone(&rpc_state.txs_processed);
-    let economics_relay = Arc::clone(&economics_runtime);
+    let fees_relay = Arc::clone(&epoch_fee_revenue);
     let rpc_height_relay = Arc::clone(&rpc_state.chain_height);
-
-    // Track last epoch to fire economics only once per epoch boundary
-    let mut last_economics_epoch: u64 = 0;
-    // Accumulate fee revenue within an epoch
-    let mut epoch_fee_revenue: u128 = 0;
+    let registry_relay = Arc::clone(&validator_registry);
+    let state_relay = Arc::clone(&state);
 
     let relay_handle = tokio::spawn(async move {
         loop {
             match block_rx_sched.recv().await {
                 Ok(fb) => {
+                    if let Err(error) = persist_validator_registry(&state_relay, &registry_relay) {
+                        error!("[relay] Validator registry persistence failed: {error}");
+                    }
                     blocks_relay.increment();
                     rpc_blocks_relay.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     for _ in 0..fb.tx_count {
@@ -902,47 +1280,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     gas_relay.set(fb.gas_used as i64);
                     rpc_height_relay.store(fb.height, std::sync::atomic::Ordering::Relaxed);
 
-                    // Accumulate fee revenue (gas_used * base_fee approximation)
-                    epoch_fee_revenue =
-                        epoch_fee_revenue.saturating_add(fb.gas_used as u128 * 1_000);
+                    {
+                        let mut fees = fees_relay.lock();
+                        *fees = fees.saturating_add(fb.gas_used as u128 * 1_000);
+                    }
 
                     scheduler_relay.on_new_block(BlockTick {
                         height: fb.height,
                         epoch: fb.epoch,
                         timestamp: chrono::Utc::now().timestamp() as u64,
                     });
-
-                    // ── Economics epoch-end hook ───────────────────────────
-                    // Fires once when we see the first block of a new epoch.
-                    if fb.epoch > last_economics_epoch {
-                        let completed_epoch = last_economics_epoch;
-                        let fee_rev = epoch_fee_revenue;
-
-                        let input = EpochInput {
-                            epoch: completed_epoch,
-                            block_count: 100, // devnet blocks_per_epoch
-                            fee_revenue: fee_rev,
-                            avg_utilisation_bps: 5000, // 50% default; oracle will tune
-                            validator_metrics: vec![],
-                            oracle_updates: vec![],
-                        };
-
-                        let mut econ = economics_relay.lock();
-                        match econ.process_epoch(input) {
-                            Ok(out) => {
-                                info!("💰 Epoch {} economics: emitted={} burned={} supply={} base_fee={}",
-                                      out.epoch, out.total_emitted, out.total_burned,
-                                      out.circulating_supply, out.new_base_fee);
-                            }
-                            Err(e) => warn!(
-                                "⚠️  Economics epoch {} processing failed: {}",
-                                completed_epoch, e
-                            ),
-                        }
-
-                        last_economics_epoch = fb.epoch;
-                        epoch_fee_revenue = 0;
-                    }
 
                     info!(
                         "📦 Block {} | epoch={} | txs={} | gas={} | root={}",
@@ -974,6 +1321,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let inbound_tx_pool = Arc::clone(&tx_pool);
     let inbound_state = Arc::clone(&state);
     let inbound_validators = Arc::clone(&validator_registry);
+    let inbound_registry_state = Arc::clone(&state);
     let inbound_chain_id = chain_id.clone();
     let inbound_genesis_hash = genesis_hash.clone();
     let inbound_commit_lock = Arc::clone(&canonical_commit_lock);
@@ -1082,6 +1430,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     .get_active_validators()
                                     .into_iter()
                                     .filter(|validator| validator.can_participate())
+                                    .cloned()
                                     .collect();
                                 let proposer_id = active
                                     .iter()
@@ -1245,6 +1594,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             .get_active_validators()
                             .into_iter()
                             .filter(|validator| validator.can_participate())
+                            .cloned()
                             .collect();
                         let keys = active_validators
                             .iter()
@@ -1381,6 +1731,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     };
 
                     if accepted {
+                        if let Err(error) = persist_validator_registry(
+                            &inbound_registry_state,
+                            &inbound_validators,
+                        ) {
+                            error!(
+                                "[InboundBlockHandler] Validator registry persistence failed: {}",
+                                error
+                            );
+                        }
                         info!(
                             "[InboundBlockHandler] ✅ Accepted inbound block {} txs={}",
                             block.index,
@@ -1531,6 +1890,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Persist governance
     governance
+        .lock()
         .persist()
         .unwrap_or_else(|e| warn!("Governance persist: {}", e));
 

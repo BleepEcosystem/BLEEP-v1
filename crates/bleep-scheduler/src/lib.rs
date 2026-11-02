@@ -59,6 +59,7 @@ pub struct Scheduler {
     pub registry: Arc<TaskRegistry>,
     pub metrics: Arc<MetricsStore>,
     block_tick_tx: broadcast::Sender<BlockTick>,
+    latest_tick: Arc<parking_lot::RwLock<Option<BlockTick>>>,
 }
 
 impl Default for Scheduler {
@@ -74,6 +75,7 @@ impl Scheduler {
             registry: Arc::new(TaskRegistry::new()),
             metrics: Arc::new(MetricsStore::new()),
             block_tick_tx,
+            latest_tick: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -92,6 +94,7 @@ impl Scheduler {
 
     /// Signal a new block from the consensus layer.
     pub fn on_new_block(&self, tick: BlockTick) {
+        *self.latest_tick.write() = Some(tick.clone());
         let _ = self.block_tick_tx.send(tick);
     }
 
@@ -103,6 +106,7 @@ impl Scheduler {
     fn spawn_interval_loop(&self) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(&self.registry);
         let metrics = Arc::clone(&self.metrics);
+        let latest_tick = Arc::clone(&self.latest_tick);
 
         tokio::spawn(async move {
             info!("[Scheduler] Interval loop started");
@@ -112,11 +116,12 @@ impl Scheduler {
                 let now = chrono::Utc::now();
                 for task in registry.due_interval(now) {
                     registry.mark_run(&task.id, now, false);
+                    let tick = latest_tick.read().clone();
                     let (m, ctx) = (
                         Arc::clone(&metrics),
                         TaskContext {
-                            block_height: 0,
-                            epoch: 0,
+                            block_height: tick.as_ref().map_or(0, |tick| tick.height),
+                            epoch: tick.as_ref().map_or(0, |tick| tick.epoch),
                             dispatched_at: now,
                         },
                     );
@@ -306,6 +311,45 @@ mod tests {
         });
         sleep(Duration::from_millis(100)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+        bh.abort();
+    }
+
+    #[tokio::test]
+    async fn genesis_tick_does_not_fire_block_tasks() {
+        let s = Scheduler::new();
+        s.register_built_in_tasks();
+        assert!(s.registry.due_block(0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn interval_tasks_receive_latest_chain_height() {
+        let s = Arc::new(Scheduler::new());
+        let observed_height = Arc::new(AtomicU64::new(0));
+        let task_height = Arc::clone(&observed_height);
+        s.register(RegisteredTask::interval(
+            "interval-height",
+            TaskKind::Maintenance,
+            "capture current chain height",
+            1,
+            5,
+            move |ctx| {
+                let task_height = Arc::clone(&task_height);
+                async move {
+                    task_height.store(ctx.block_height, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        ));
+        s.on_new_block(BlockTick {
+            height: 42,
+            epoch: 3,
+            timestamp: 0,
+        });
+
+        let (ih, bh) = s.start();
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(observed_height.load(Ordering::SeqCst), 42);
+        ih.abort();
         bh.abort();
     }
 
