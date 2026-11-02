@@ -32,6 +32,7 @@ pub type StateResult<T> = Result<T, StateError>;
 // On-disk key prefixes
 const PREFIX_ACCOUNT: &[u8] = b"acct:";
 const PREFIX_BLOCK: &[u8] = b"chain:block:";
+const PREFIX_APPLICATION: &[u8] = b"app:";
 const KEY_HEIGHT: &[u8] = b"sys:block_height";
 const KEY_CHAIN_ID: &[u8] = b"chain:id";
 const KEY_TIP_HASH: &[u8] = b"chain:tip_hash";
@@ -194,6 +195,23 @@ impl StateManager {
 
     pub fn block_height(&self) -> u64 {
         self.block_height
+    }
+
+    /// Read application-owned metadata without adding it to the account state root.
+    pub fn get_application_data(&self, key: &str) -> StateResult<Option<Vec<u8>>> {
+        let db_key = [PREFIX_APPLICATION, key.as_bytes()].concat();
+        self.db
+            .get(db_key)
+            .map(|value| value.map(|bytes| bytes.to_vec()))
+            .map_err(|error| StateError::Storage(error.to_string()))
+    }
+
+    /// Persist application-owned metadata independently of canonical account state.
+    pub fn put_application_data(&mut self, key: &str, value: &[u8]) -> StateResult<()> {
+        let db_key = [PREFIX_APPLICATION, key.as_bytes()].concat();
+        self.db
+            .put(db_key, value)
+            .map_err(|error| StateError::Storage(error.to_string()))
     }
 
     /// Capture in-memory state so an uncommitted block proposal can be undone.

@@ -116,8 +116,8 @@ impl PoSConsensusEngine {
             .map_err(|error| format!("Invalid VRF public key: {error}"))?;
         let output = VRFPreOut::from_bytes(output)
             .map_err(|error| format!("Invalid VRF output: {error}"))?;
-        let proof = VRFProof::from_bytes(proof)
-            .map_err(|error| format!("Invalid VRF proof: {error}"))?;
+        let proof =
+            VRFProof::from_bytes(proof).map_err(|error| format!("Invalid VRF proof: {error}"))?;
         let input = Self::vrf_input(height, prev_block_hash);
         let transcript = schnorrkel::signing_context(b"BLEEP_POS_VRF_V1").bytes(&input);
         let (inout, _) = public_key
@@ -160,9 +160,8 @@ impl PoSConsensusEngine {
         proof: &[u8; VRF_PROOF_LEN],
         stark_proof: &[u8],
     ) -> Vec<u8> {
-        let mut envelope = Vec::with_capacity(
-            VRF_STARK_ENVELOPE_HEADER_LEN.saturating_add(stark_proof.len()),
-        );
+        let mut envelope =
+            Vec::with_capacity(VRF_STARK_ENVELOPE_HEADER_LEN.saturating_add(stark_proof.len()));
         envelope.extend_from_slice(VRF_STARK_ENVELOPE_MAGIC);
         envelope.extend_from_slice(output);
         envelope.extend_from_slice(proof);
@@ -170,9 +169,7 @@ impl PoSConsensusEngine {
         envelope
     }
 
-    pub fn decode_vrf_stark_envelope(
-        envelope: &[u8],
-    ) -> Result<(&[u8], &[u8], &[u8]), String> {
+    pub fn decode_vrf_stark_envelope(envelope: &[u8]) -> Result<(&[u8], &[u8], &[u8]), String> {
         if !envelope.starts_with(VRF_STARK_ENVELOPE_MAGIC)
             || envelope.len() <= VRF_STARK_ENVELOPE_HEADER_LEN
         {
@@ -212,7 +209,10 @@ impl PoSConsensusEngine {
             return Ok(Self::genesis_randomness(&parent.compute_hash()));
         }
         let public_key = parent_vrf_public_key.ok_or_else(|| {
-            format!("VRF public key for parent block {} is unavailable", parent.index)
+            format!(
+                "VRF public key for parent block {} is unavailable",
+                parent.index
+            )
         })?;
         Self::verify_block_vrf(parent, public_key)
     }
@@ -225,8 +225,7 @@ impl PoSConsensusEngine {
         hasher.update(previous_randomness);
         let digest = hasher.finalize();
         u64::from_le_bytes([
-            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
-            digest[7],
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
         ])
     }
 
@@ -586,18 +585,23 @@ mod tests {
         let public_key = PoSConsensusEngine::derive_vrf_public_key(&secret).unwrap();
         let (output, proof) =
             PoSConsensusEngine::create_vrf_proof(&secret, 7, "parent-hash").unwrap();
-        let randomness = PoSConsensusEngine::verify_vrf_proof(
-            &public_key,
-            7,
-            "parent-hash",
-            &output,
-            &proof,
-        )
-        .unwrap();
-        let (same_output, same_proof) =
+        let randomness =
+            PoSConsensusEngine::verify_vrf_proof(&public_key, 7, "parent-hash", &output, &proof)
+                .unwrap();
+        let (same_output, second_proof) =
             PoSConsensusEngine::create_vrf_proof(&secret, 7, "parent-hash").unwrap();
         assert_eq!(output, same_output);
-        assert_eq!(proof, same_proof);
+        assert_eq!(
+            randomness,
+            PoSConsensusEngine::verify_vrf_proof(
+                &public_key,
+                7,
+                "parent-hash",
+                &same_output,
+                &second_proof,
+            )
+            .unwrap()
+        );
         assert!(PoSConsensusEngine::verify_vrf_proof(
             &public_key,
             8,
@@ -625,6 +629,9 @@ mod tests {
             &tampered_proof,
         )
         .is_err());
-        assert_ne!(randomness, PoSConsensusEngine::genesis_randomness("parent-hash"));
+        assert_ne!(
+            randomness,
+            PoSConsensusEngine::genesis_randomness("parent-hash")
+        );
     }
 }
