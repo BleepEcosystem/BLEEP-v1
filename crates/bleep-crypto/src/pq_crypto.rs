@@ -15,8 +15,10 @@
 use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use argon2::Argon2;
+use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use std::{fmt, fs, io::Write, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -699,11 +701,11 @@ pub struct HybridEncryption;
 
 impl HybridEncryption {
     /// Encrypt data using Kyber + AES-256-GCM
-    /// Returns (ciphertext, kyber_ciphertext, nonce)
+    /// Returns (ciphertext, kyber_ciphertext, nonce, HKDF salt).
     pub fn encrypt(
         data: &[u8],
         kyber_public_key: &KyberPublicKey,
-    ) -> CryptoResult<(Vec<u8>, KyberCiphertext, Vec<u8>)> {
+    ) -> CryptoResult<(Vec<u8>, KyberCiphertext, Vec<u8>, Vec<u8>)> {
         use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
         use rand::RngCore;
@@ -711,8 +713,11 @@ impl HybridEncryption {
         // Encapsulate with Kyber
         let (shared_secret, kyber_ct) = KyberKem::encapsulate(kyber_public_key)?;
 
-        // Derive AES-256 key from shared secret
-        let aes_key = Key::<Aes256Gcm>::from(*shared_secret.as_bytes());
+        // Derive an application-specific AES-256 key from the KEM secret.
+        let mut salt = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut salt);
+        let aes_key_bytes = derive_hybrid_aes_key(shared_secret.as_bytes(), &salt)?;
+        let aes_key = Key::<Aes256Gcm>::from(aes_key_bytes);
         let cipher = Aes256Gcm::new(&aes_key);
 
         // Generate random nonce
@@ -725,14 +730,15 @@ impl HybridEncryption {
             CryptoError::EncryptionFailed(format!("AES-GCM encryption failed: {}", e))
         })?;
 
-        Ok((ciphertext, kyber_ct, nonce_bytes.to_vec()))
+        Ok((ciphertext, kyber_ct, nonce_bytes.to_vec(), salt))
     }
 
-    /// Decrypt data using Kyber + AES-256-GCM
+    /// Decrypt data using Kyber + AES-256-GCM and its per-message HKDF salt.
     pub fn decrypt(
         ciphertext: &[u8],
         kyber_ciphertext: &KyberCiphertext,
         nonce: &[u8],
+        salt: &[u8],
         kyber_secret_key: &KyberSecretKey,
     ) -> CryptoResult<Vec<u8>> {
         use aes_gcm::aead::Aead;
@@ -744,12 +750,19 @@ impl HybridEncryption {
                 nonce.len()
             )));
         }
+        if salt.len() != 32 {
+            return Err(CryptoError::EncryptionFailed(format!(
+                "HKDF salt must be 32 bytes, got {}",
+                salt.len()
+            )));
+        }
 
         // Decapsulate with Kyber
         let shared_secret = KyberKem::decapsulate(kyber_secret_key, kyber_ciphertext)?;
 
-        // Derive AES-256 key
-        let aes_key = Key::<Aes256Gcm>::from(*shared_secret.as_bytes());
+        // Derive the same application-specific AES-256 key.
+        let aes_key_bytes = derive_hybrid_aes_key(shared_secret.as_bytes(), salt)?;
+        let aes_key = Key::<Aes256Gcm>::from(aes_key_bytes);
         let cipher = Aes256Gcm::new(&aes_key);
 
         // Decrypt
@@ -761,6 +774,14 @@ impl HybridEncryption {
 
         Ok(plaintext)
     }
+}
+
+fn derive_hybrid_aes_key(shared_secret: &[u8], salt: &[u8]) -> CryptoResult<[u8; 32]> {
+    let hkdf = Hkdf::<Sha256>::new(Some(salt), shared_secret);
+    let mut key = [0u8; 32];
+    hkdf.expand(b"BLEEP/HybridEncryption/AES-256-GCM/v1", &mut key)
+        .map_err(|error| CryptoError::KeyDerivationFailed(error.to_string()))?;
+    Ok(key)
 }
 
 /// Calculate Shannon entropy of a byte slice
@@ -964,12 +985,19 @@ mod tests {
         let (pk, sk) = KyberKem::keygen().expect("Failed to generate keypair");
 
         let plaintext = b"secret data that needs encryption";
-        let (ct, ky_ct, nonce) =
+        let (ct, ky_ct, nonce, salt) =
             HybridEncryption::encrypt(plaintext, &pk).expect("Failed to encrypt");
+        let (_, _, _, second_salt) =
+            HybridEncryption::encrypt(plaintext, &pk).expect("Failed to encrypt");
+        assert_eq!(salt.len(), 32);
+        assert_ne!(salt, second_salt);
         let decrypted =
-            HybridEncryption::decrypt(&ct, &ky_ct, &nonce, &sk).expect("Failed to decrypt");
+            HybridEncryption::decrypt(&ct, &ky_ct, &nonce, &salt, &sk).expect("Failed to decrypt");
 
         assert_eq!(plaintext.to_vec(), decrypted);
+        let mut tampered_salt = salt;
+        tampered_salt[0] ^= 1;
+        assert!(HybridEncryption::decrypt(&ct, &ky_ct, &nonce, &tampered_salt, &sk).is_err());
     }
 
     #[test]

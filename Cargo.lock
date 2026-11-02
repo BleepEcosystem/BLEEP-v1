@@ -1328,6 +1328,7 @@ dependencies = [
  "blake3",
  "env_logger",
  "hex",
+ "hkdf",
  "hmac",
  "log",
  "merkle_light",

@@ -59,6 +59,7 @@ pqcrypto-traits = "0.3.5"
 # BIP-39 seed derivation (Sprint 4)
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 hmac   = "0.12"
+hkdf = "0.12"
 
 
 [dev-dependencies]
