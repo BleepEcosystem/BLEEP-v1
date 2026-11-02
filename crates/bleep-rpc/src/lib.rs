@@ -51,7 +51,9 @@ struct AuthRejection(AuthError);
 impl warp::reject::Reject for AuthRejection {}
 use bleep_consensus::block_producer::BlockProducer;
 use bleep_consensus::slashing_engine::{SlashingEngine, SlashingEvidence};
-use bleep_consensus::validator_identity::{ValidatorIdentity, ValidatorRegistry};
+use bleep_consensus::validator_identity::{
+    ValidatorIdentity, ValidatorRegistry, VALIDATOR_REGISTRY_STORAGE_KEY,
+};
 use bleep_economics::oracle_bridge::{OracleSource, PriceUpdate};
 use bleep_economics::BleepEconomicsRuntime;
 use bleep_interop::core::BleepConnectOrchestrator;
@@ -457,22 +459,13 @@ impl StakeRequest {
 fn validator_stake_payload(
     chain_id: &str,
     account: &str,
-    label: &str,
+    validator: bleep_crypto::tx_signer::ValidatorKeyBindings<'_>,
     amount: u64,
     timestamp: u64,
     nonce: u64,
-    kyber_public_key: &[u8],
-    vrf_public_key: &[u8],
 ) -> [u8; 32] {
     bleep_crypto::tx_signer::validator_stake_payload(
-        chain_id,
-        account,
-        label,
-        amount,
-        timestamp,
-        nonce,
-        kyber_public_key,
-        vrf_public_key,
+        chain_id, account, validator, amount, timestamp, nonce,
     )
 }
 
@@ -534,13 +527,14 @@ fn register_validator_stake(
     let request_hash = validator_stake_payload(
         &chain_id,
         &account,
-        &req.label,
+        bleep_crypto::tx_signer::ValidatorKeyBindings {
+            label: &req.label,
+            kyber_public_key: &kyber_public_key,
+            vrf_public_key: &vrf_public_key,
+        },
         req.amount,
         req.timestamp,
         nonce,
-        &kyber_public_key,
-        &vrf_public_key,
-        &vrf_public_key,
     );
     if !verify_tx_signature(&request_hash, &proof, &signing_public_key) {
         return Err((
@@ -1257,6 +1251,14 @@ pub fn rpc_routes_with_state(
 
                 match (&st.slashing_engine, &st.validator_registry) {
                     (Some(engine_arc), Some(reg_arc)) => {
+                        let Some(state_mgr) = st.state_mgr.as_ref() else {
+                            return Box::new(warp::reply::with_status(
+                                warp::reply::json(&ErrResp {
+                                    error: "StateManager unavailable; cannot persist validator registry changes".into(),
+                                }),
+                                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                            ));
+                        };
                         let Some(blocks_per_epoch) = st.blocks_per_epoch else {
                             return Box::new(warp::reply::with_status(
                                 warp::reply::json(&ErrResp {
@@ -1285,12 +1287,44 @@ pub fn rpc_routes_with_state(
                             timestamp,
                             |height, hash| canonical_block == Some((height, *hash)),
                         ) {
-                            Ok(event) => Box::new(warp::reply::json(&EvidenceResp {
-                                accepted: true,
-                                slash_amount: event.slash_amount,
-                                validator_id: event.validator_id,
-                                evidence_type: event.evidence_type,
-                            })),
+                            Ok(event) => {
+                                let snapshot = match reg.to_persistent_bytes() {
+                                    Ok(snapshot) => snapshot,
+                                    Err(error) => {
+                                        return Box::new(warp::reply::with_status(
+                                            warp::reply::json(&ErrResp {
+                                                error: format!(
+                                                    "Evidence accepted but validator registry serialization failed: {error}"
+                                                ),
+                                            }),
+                                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        ));
+                                    }
+                                };
+                                drop(engine);
+                                if let Err(error) = state_mgr
+                                    .lock()
+                                    .put_application_data(
+                                        VALIDATOR_REGISTRY_STORAGE_KEY,
+                                        &snapshot,
+                                    )
+                                {
+                                    return Box::new(warp::reply::with_status(
+                                        warp::reply::json(&ErrResp {
+                                            error: format!(
+                                                "Evidence accepted but validator registry persistence failed: {error}"
+                                            ),
+                                        }),
+                                        warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    ));
+                                }
+                                Box::new(warp::reply::json(&EvidenceResp {
+                                    accepted: true,
+                                    slash_amount: event.slash_amount,
+                                    validator_id: event.validator_id,
+                                    evidence_type: event.evidence_type,
+                                }))
+                            }
                             Err(e) => Box::new(warp::reply::with_status(
                                 warp::reply::json(&ErrResp { error: e }),
                                 warp::http::StatusCode::BAD_REQUEST,
@@ -3909,7 +3943,7 @@ fn explorer_api_blocks(
                     .chain
                     .iter()
                     .rev()
-                    .filter(|block| query.before.map_or(true, |before| block.index < before))
+                    .filter(|block| query.before.is_none_or(|before| block.index < before))
                     .take(limit)
                     .map(explorer_block_summary)
                     .collect();
@@ -4303,18 +4337,21 @@ mod tests {
         let substituted_key = substituted_key.to_vec();
         let vrf_secret = [0x29; 128];
         let vrf_public_key =
-            PoSConsensusEngine::derive_vrf_public_key(&vrf_secret).unwrap();
+            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&vrf_secret)
+                .unwrap();
         let amount = 3_000;
         let timestamp = now_secs();
         let payload = validator_stake_payload(
             bleep_crypto::DEFAULT_CHAIN_ID,
             &account,
-            "candidate-a",
+            bleep_crypto::tx_signer::ValidatorKeyBindings {
+                label: "candidate-a",
+                kyber_public_key: &kyber_public_key,
+                vrf_public_key: &vrf_public_key,
+            },
             amount,
             timestamp,
             0,
-            &kyber_public_key,
-            &vrf_public_key,
         );
         let proof = sign_tx_payload(&payload, &secret_key).unwrap();
         let req = StakeRequest {

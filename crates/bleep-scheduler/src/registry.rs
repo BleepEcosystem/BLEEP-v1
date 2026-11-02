@@ -226,6 +226,10 @@ impl TaskRegistry {
 
     /// Block-triggered tasks due at this height.
     pub fn due_block(&self, height: u64) -> Vec<RegisteredTask> {
+        if height == 0 {
+            return Vec::new();
+        }
+
         self.tasks
             .iter()
             .filter(|t| {

@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
+pub const VALIDATOR_REGISTRY_STORAGE_KEY: &str = "consensus/validator_registry/v1";
+
 /// Validator identity using post-quantum cryptography.
 ///
 /// SAFETY: This structure holds the authoritative validator record.
@@ -531,6 +533,25 @@ impl ValidatorRegistry {
         self.total_active_stake
     }
 
+    /// Apply bounded reputation decay to active validators.
+    pub fn apply_reputation_decay(&mut self, factor: f64, floor: f64) -> Result<(), String> {
+        if !factor.is_finite() || !(0.0..=1.0).contains(&factor) {
+            return Err("Validator reputation decay factor must be finite and in [0, 1]".into());
+        }
+        if !floor.is_finite() || !(0.0..=1.0).contains(&floor) {
+            return Err("Validator reputation floor must be finite and in [0, 1]".into());
+        }
+
+        for id in &self.active_validators {
+            let validator = self
+                .validators
+                .get_mut(id)
+                .ok_or_else(|| format!("Active validator {id} is missing from registry"))?;
+            validator.reputation = (validator.reputation * factor).max(floor);
+        }
+        Ok(())
+    }
+
     /// Get a validator's voting power (effective stake).
     pub fn get_voting_power(&self, id: &str) -> u128 {
         self.get(id).map(|v| v.effective_stake()).unwrap_or(0)
@@ -654,5 +675,31 @@ mod tests {
 
         registry.slash_validator_equivocation("v1", 100000).unwrap();
         assert_eq!(registry.get_voting_power("v1"), 0); // Slashed = no power
+        assert_eq!(registry.get_voting_power("v1"), 0); // Slashed = no power
+    }
+    #[test]
+    fn validator_registry_snapshot_preserves_active_set_and_decay() {
+        let mut registry = ValidatorRegistry::new();
+        registry.register_validator(create_test_identity("v1")).unwrap();
+        registry.activate_validator("v1").unwrap();
+        registry
+            .apply_reputation_decay(0.5, 0.1)
+            .expect("valid decay parameters");
+
+        let restored = ValidatorRegistry::from_persistent_bytes(
+            &registry.to_persistent_bytes().expect("serialize registry"),
+        )
+        .expect("restore registry");
+
+        assert_eq!(restored.active_validator_count(), 1);
+        assert_eq!(restored.total_active_stake(), 1_000_000);
+        assert_eq!(restored.get("v1").unwrap().reputation, 0.5);
+    }
+
+    #[test]
+    fn validator_registry_rejects_invalid_decay_parameters() {
+        let mut registry = ValidatorRegistry::new();
+        assert!(registry.apply_reputation_decay(f64::NAN, 0.1).is_err());
+        assert!(registry.apply_reputation_decay(0.5, -0.1).is_err());
     }
 }

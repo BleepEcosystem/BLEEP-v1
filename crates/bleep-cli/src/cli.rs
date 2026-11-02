@@ -42,7 +42,7 @@ use bleep_ai::{
 use bleep_core::transaction::ZKTransaction;
 use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
 use bleep_crypto::tx_signer::{
-    generate_tx_keypair, sign_tx_payload, tx_payload, validator_stake_payload,
+    generate_tx_keypair, sign_tx_payload, tx_payload, validator_stake_payload, ValidatorKeyBindings,
 };
 use bleep_economics::oracle_bridge::{oracle_signing_message, OracleSource, PriceUpdate};
 use bleep_governance::governance_core::{GovernanceEngine, Proposal, ProposalType, Vote};
@@ -1450,12 +1450,14 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
     let payload = validator_stake_payload(
         &chain_id,
         &wallet.address,
-        label,
+        ValidatorKeyBindings {
+            label,
+            kyber_public_key: &kyber_public_key,
+            vrf_public_key: &vrf_public_key,
+        },
         amount,
         timestamp,
         nonce,
-        &kyber_public_key,
-        &vrf_public_key,
     );
     let signing_key =
         unlock_wallet_key(&wallet).map_err(|error| anyhow!("Wallet unlock failed: {error}"))?;

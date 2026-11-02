@@ -357,7 +357,7 @@ impl OracleBridgeEngine {
         {
             let replace = updates_by_operator
                 .get(&update.operator_id)
-                .map_or(true, |current| update.timestamp >= current.timestamp);
+                .is_none_or(|current| update.timestamp >= current.timestamp);
             if replace {
                 updates_by_operator.insert(update.operator_id.clone(), update);
             }

@@ -172,6 +172,18 @@ impl TransactionPool {
         // Seen hashes remain to prevent cross-block replay attacks.
     }
 
+    /// Remove transactions older than the supplied age.
+    pub async fn prune_expired(&self, max_age: chrono::Duration) -> usize {
+        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let max_age_secs = max_age.num_seconds().max(0) as u64;
+        let mut pool = self.pool.lock().await;
+        let before = pool.len();
+        pool.retain(|tx| {
+            tx.timestamp <= now && now.saturating_sub(tx.timestamp) <= max_age_secs
+        });
+        before - pool.len()
+    }
+
     /// Current pool depth.
     pub async fn pool_size(&self) -> usize {
         self.pool.lock().await.len()
@@ -222,6 +234,32 @@ impl TransactionPool {
 mod tests {
     use super::*;
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+
+    #[tokio::test]
+    async fn prune_expired_removes_stale_and_future_transactions() {
+        let pool = TransactionPool::new(4);
+        let now = chrono::Utc::now().timestamp() as u64;
+        let transaction = |timestamp| ZKTransaction {
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+            sender: "sender".into(),
+            receiver: "receiver".into(),
+            amount: 1,
+            timestamp,
+            nonce: timestamp,
+            signature: vec![],
+        };
+        pool.pool.lock().await.extend([
+            transaction(now),
+            transaction(now.saturating_sub(61)),
+            transaction(now.saturating_add(60)),
+        ]);
+
+        assert_eq!(
+            pool.prune_expired(chrono::Duration::seconds(60)).await,
+            2
+        );
+        assert_eq!(pool.pool_size().await, 1);
+    }
 
     fn make_signed_tx(sender: &str, receiver: &str, amount: u64, timestamp: u64) -> ZKTransaction {
         let (pk, sk) = generate_tx_keypair();
