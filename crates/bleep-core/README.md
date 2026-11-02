@@ -64,6 +64,8 @@ The name `ZKTransaction` reflects BLEEP's broader ZK capabilities; all transacti
 pub struct Block {
     pub index:                u64,
     pub timestamp:            u64,
+    #[serde(default)]
+    pub chain_id:              String,
     pub transactions:         Vec<Transaction>,
     pub previous_hash:        String,
     pub merkle_root:          String,
@@ -79,6 +81,10 @@ pub struct Block {
     pub sig_commitment_root:  [u8; 32], // Blake3 Merkle root over SHA3-256(sig_i) — Sprint 10
 }
 ```
+
+The block header binds `chain_id` into the canonical block hash. Nodes reject
+blocks whose chain ID differs from the parent or whose transactions use another
+chain ID.
 
 `sig_commitment_root` is set by `BlockProducer` **before** SPHINCS+ signing (step 7b), so it is
 cryptographically bound into both the block signature and the extended STARK proof. `[0u8; 32]`

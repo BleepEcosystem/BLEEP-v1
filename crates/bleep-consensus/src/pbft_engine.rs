@@ -154,6 +154,32 @@ impl LivePbftFinality {
             })
     }
 
+    /// Reconcile the PBFT committee with the live validator registry.
+    ///
+    /// Call whenever the active validator set changes. Without this, committee
+    /// checks continue comparing the registry against the startup snapshot.
+    pub fn sync_committee(&self, validator_keys: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+        let mut engine = self.engine.lock();
+        let finalized_before: HashSet<u64> = engine
+            .finalized_blocks
+            .iter()
+            .filter_map(|(height, state)| (*state == PbftBlockState::Committed).then_some(*height))
+            .collect();
+        engine
+            .set_committee(validator_keys)
+            .map_err(|e| format!("PBFT committee sync failed: {e}"))?;
+        let newly_finalized = engine.finalized_blocks.iter().any(|(height, state)| {
+            *state == PbftBlockState::Committed && !finalized_before.contains(height)
+        });
+        drop(engine);
+        self.local_prepare_sent.lock().clear();
+        self.local_commit_sent.lock().clear();
+        if newly_finalized {
+            self.finalized.notify_waiters();
+        }
+        Ok(())
+    }
+
     /// Start PBFT for a locally proposed block and cast the local prepare vote.
     pub fn propose(&self, block: &Block) -> Result<(), String> {
         let signer = block
@@ -473,6 +499,101 @@ impl PbftConsensusEngine {
             validator_pubkeys,
             block_hashes: HashMap::new(),
         }
+    }
+
+    /// Atomically replace the full voting committee.
+    ///
+    /// Build and validate the replacement before changing engine state so
+    /// callers never observe a partially updated quorum or key registry.
+    pub fn set_committee(
+        &mut self,
+        validator_keys: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), ConsensusError> {
+        if validator_keys.is_empty() {
+            return Err(ConsensusError::ProposalRejected {
+                reason: "committee must contain at least one validator".to_string(),
+            });
+        }
+
+        let mut public_keys = HashMap::with_capacity(validator_keys.len());
+        for (id, key) in validator_keys {
+            if id.is_empty() || key.len() != SPHINCS_PK_LEN {
+                return Err(ConsensusError::ProposalRejected {
+                    reason: format!("Invalid validator ID or SPHINCS+ public key for '{id}'"),
+                });
+            }
+            sphincsshake256fsimple::PublicKey::from_bytes(&key).map_err(|e| {
+                ConsensusError::ProposalRejected {
+                    reason: format!("Invalid SPHINCS+ public key for '{id}': {e:?}"),
+                }
+            })?;
+            if public_keys.insert(id.clone(), key).is_some() {
+                return Err(ConsensusError::ProposalRejected {
+                    reason: format!("Duplicate validator ID '{id}'"),
+                });
+            }
+        }
+
+        let known_validators: HashSet<String> = public_keys.keys().cloned().collect();
+        let total_validators = known_validators.len();
+        let retained_voters: HashSet<String> = public_keys
+            .iter()
+            .filter_map(|(id, key)| {
+                (self.validator_pubkeys.get(id) == Some(key)).then_some(id.clone())
+            })
+            .collect();
+        for votes in self.prepare_votes.values_mut() {
+            votes.retain(|id| retained_voters.contains(id));
+        }
+        for votes in self.commit_votes.values_mut() {
+            votes.retain(|id| retained_voters.contains(id));
+        }
+
+        self.known_validators = known_validators;
+        self.validator_pubkeys = public_keys;
+        self.total_validators = total_validators;
+        self.quorum_size = (total_validators * 2) / 3 + 1;
+        let quorum_size = self.quorum_size;
+
+        let mut newly_committed = Vec::new();
+        let mut rollback_prepared = Vec::new();
+        for (height, state) in &mut self.finalized_blocks {
+            if *state == PbftBlockState::Proposed
+                && self
+                    .prepare_votes
+                    .get(height)
+                    .is_some_and(|votes| votes.len() >= quorum_size)
+            {
+                *state = PbftBlockState::Prepared;
+            }
+            if *state == PbftBlockState::Prepared
+                && !self
+                    .prepare_votes
+                    .get(height)
+                    .is_some_and(|votes| votes.len() >= quorum_size)
+            {
+                *state = PbftBlockState::Proposed;
+                rollback_prepared.push(*height);
+                continue;
+            }
+            if *state == PbftBlockState::Prepared
+                && self
+                    .commit_votes
+                    .get(height)
+                    .is_some_and(|votes| votes.len() >= quorum_size)
+            {
+                *state = PbftBlockState::Committed;
+                newly_committed.push(*height);
+            }
+        }
+        for height in newly_committed {
+            self.prepare_votes.remove(&height);
+            self.commit_votes.remove(&height);
+        }
+        for height in rollback_prepared {
+            self.commit_votes.remove(&height);
+        }
+        Ok(())
     }
 
     /// Register an ID-only validator (e.g. after an epoch rotation).
@@ -870,6 +991,57 @@ mod tests {
             .sign_block_with_pk(secret_keys.get("v1").unwrap(), public_key)
             .unwrap();
         block
+    }
+
+    #[test]
+    fn committee_tracks_validator_set_changes() {
+        let mut validator_keys = HashMap::new();
+        let mut secret_keys = HashMap::new();
+        for id in ["v1", "v2", "v3", "v4"] {
+            let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+            validator_keys.insert(id, public_key.as_bytes().to_vec());
+            secret_keys.insert(id, secret_key.as_bytes().to_vec());
+        }
+
+        let pk1 = validator_keys["v1"].clone();
+        let pk2 = validator_keys["v2"].clone();
+        let pk3 = validator_keys["v3"].clone();
+        let pk4 = validator_keys["v4"].clone();
+        let keys3 = vec![
+            ("v1".into(), pk1.clone()),
+            ("v2".into(), pk2.clone()),
+            ("v3".into(), pk3.clone()),
+        ];
+        let finality = LivePbftFinality::new(
+            "v1".into(),
+            keys3.clone(),
+            secret_keys["v1"].clone(),
+            pk1.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(finality.matches_committee(&keys3));
+
+        let keys2 = vec![("v1".into(), pk1.clone()), ("v2".into(), pk2.clone())];
+        assert!(!finality.matches_committee(&keys2));
+        finality.sync_committee(keys2.clone()).unwrap();
+        assert!(finality.matches_committee(&keys2));
+        assert_eq!(finality.validator_count(), 2);
+        assert_eq!(finality.engine.lock().quorum_size, 2);
+
+        let keys4 = vec![
+            ("v1".into(), pk1),
+            ("v2".into(), pk2),
+            ("v3".into(), pk3),
+            ("v4".into(), pk4),
+        ];
+        finality.sync_committee(keys4.clone()).unwrap();
+        assert!(finality.matches_committee(&keys4));
+        assert_eq!(finality.validator_count(), 4);
+        assert_eq!(finality.engine.lock().quorum_size, 3);
+
+        assert!(finality.sync_committee(Vec::new()).is_err());
+        assert!(finality.matches_committee(&keys4));
     }
 
     fn process_all_votes(engine: &mut PbftConsensusEngine, secret_keys: &HashMap<String, Vec<u8>>) {

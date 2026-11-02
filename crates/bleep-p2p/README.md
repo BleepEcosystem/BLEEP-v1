@@ -50,7 +50,7 @@ Every message on the BLEEP P2P network is post-quantum authenticated:
 | Onion routing per-hop | ML-KEM-1024 + AES-256-GCM | — |
 | Peer ID derivation | Deterministic hash of SPHINCS+ public key | SHA3-256 |
 
-Unauthenticated messages are dropped at the receive boundary before any deserialization. A 2 MiB size gate is enforced at the receive boundary before any deserialization — preventing memory exhaustion from oversized gossip messages.
+Length-prefixed P2P frame bodies larger than 2 MiB are rejected before allocation and bincode deserialization. The limit applies to all frame types; message authentication is verified after bounded frame decoding.
 
 ---
 
@@ -93,10 +93,11 @@ Transport-layer framing and authentication:
 | `bootstrap_peers` | `[]` | Initial peers for DHT seeding |
 | `max_peers` | `50` | Maximum connected peers |
 | `gossip_fanout` | `8` | Plumtree eager-push fanout |
-| `max_gossip_msg_bytes` | `2,097,152` (2 MiB) | Receive-boundary size gate |
 | `enable_onion` | `false` | Enable onion routing (opt-in) |
 | `quantum_mode` | `true` | Use PQC for all sessions (always enabled in production) |
 | `anti_replay_cache_slots` | `65,536` | LRU nonce cache size |
+
+All P2P frame bodies have a fixed 2 MiB maximum (`MAX_FRAME_BYTES`), enforced before deserialization. This is a protocol limit, not a configurable `P2PNodeConfig` field.
 
 The node binary also reads these environment variables:
 
@@ -144,7 +145,7 @@ async fn main() {
 
 ## Integration with Consensus
 
-`bleep-p2p` connects to `bleep-consensus` via `GossipBridge` — an async channel that forwards incoming block proposals and votes to the consensus engine, and outgoing signed blocks and votes back to the gossip network. The bridge enforces the 2 MiB size gate and SPHINCS+ authentication before any message reaches the consensus layer.
+`bleep-p2p` connects to `bleep-consensus` via `GossipBridge` — an async channel that forwards incoming block proposals and votes to the consensus engine, and outgoing signed blocks and votes back to the gossip network. The P2P transport enforces the 2 MiB frame limit before deserialization and verifies SPHINCS+ authentication before dispatching authenticated messages.
 
 ---
 

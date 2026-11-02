@@ -40,18 +40,28 @@ fn block_hash_is_deterministic_for_fixed_timestamp() {
 fn kyber_aes_round_trip_and_tamper_rejection() {
     let hybrid = KyberAESHybrid::keygen();
     let plaintext = b"confidential transaction payload";
-    let (mut ciphertext, encapsulated_key, nonce) = hybrid.encrypt(plaintext);
+    let (mut ciphertext, encapsulated_key, nonce, salt) = hybrid.encrypt(plaintext);
+    let (_, _, _, second_salt) = hybrid.encrypt(plaintext);
 
+    assert_eq!(salt.len(), 32);
+    assert_ne!(salt, second_salt);
     assert_eq!(
-        hybrid.decrypt(&ciphertext, &encapsulated_key, &nonce),
+        hybrid
+            .decrypt(&ciphertext, &encapsulated_key, &nonce, &salt)
+            .unwrap(),
         plaintext
     );
 
+    let mut tampered_salt = salt.clone();
+    tampered_salt[0] ^= 1;
+    assert!(hybrid
+        .decrypt(&ciphertext, &encapsulated_key, &nonce, &tampered_salt)
+        .is_err());
+
     ciphertext[0] ^= 1;
-    assert!(
-        std::panic::catch_unwind(|| hybrid.decrypt(&ciphertext, &encapsulated_key, &nonce))
-            .is_err()
-    );
+    assert!(hybrid
+        .decrypt(&ciphertext, &encapsulated_key, &nonce, &salt)
+        .is_err());
 }
 
 #[test]

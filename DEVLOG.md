@@ -446,13 +446,13 @@ Oracle bridge (`OracleBridge`) with 5 oracle operators and 3 initial price seeds
 
 ### Sprint 9 — Security Audit and Protocol Hardening
 
-This sprint's output was a node that could be submitted to an independent security auditor and a 72-hour adversarial test suite that could be run without modifications.
+This sprint completed an internal engineering audit and a 72-hour adversarial test suite that could be run without modifications.
 
-**Independent security audit:**
+**Internal engineering audit:**
 
 ```
-Scope    : 16,127 lines of Rust across 6 crates
-Auditor  : Independent third party
+Scope    : 49,677 lines of Rust across 6 core crates
+Auditor  : BLEEP Engineering (internal audit)
 
 Findings:
   Critical  2   Resolved: 2   Acknowledged: 0
@@ -471,6 +471,8 @@ SA-I2 (acknowledged): NTP drift guard is a mainnet gate.
                        Clock synchronisation warning at >1s, halt at >30s.
                        Mainnet requirement; testnet operates without the halt.
 ```
+
+An independent third-party security audit has not been performed. No external party has attested to the security of this software.
 
 **Chaos engine (`ChaosEngine` in `bleep-consensus`):**
 
@@ -504,13 +506,13 @@ fuzz_block_validity     Block validity circuit under malformed inputs
 
 **`bleep-consensus/src/security_audit.rs`:**
 
-On-demand audit report generation — produces a structured report of current cryptographic configuration, slashing history, validator trust scores, and constitutional parameter status. Queryable at `GET /rpc/audit/report`.
+Internal audit report generation produces a structured report of current cryptographic configuration, slashing history, validator trust scores, and constitutional parameter status. It is not exposed through a public RPC endpoint.
 
 **Documentation:**
 
 ```
 docs/THREAT_MODEL.md             Formalised threat model — 3 adversary classes
-docs/SECURITY_AUDIT_SPRINT9.md   Full audit finding record
+crates/bleep-consensus/src/security_audit.rs   Internal audit finding metadata
 docs/phase4_shard_recovery.md    Cross-shard recovery procedures
 docs/glossary.md                 Protocol terminology
 docs/specs/                      Per-subsystem specifications
@@ -768,7 +770,6 @@ Vote:          POST http://0.0.0.0:8545/rpc/governance/vote
 === Protocol Hardening ===
 Chaos suite:   http://0.0.0.0:8545/rpc/chaos/status
 Benchmark:     http://0.0.0.0:8545/rpc/benchmark/latest
-Audit:         http://0.0.0.0:8545/rpc/audit/report
 
 === Testnet UI ===
 Explorer:      http://0.0.0.0:8545/explorer
@@ -906,7 +907,7 @@ Repository
   Scheduler tasks     20
   RPC endpoints       46
   Audit findings      14  (12 resolved, 2 acknowledged)
-  Lines audited   16,127  (across 6 crates, Sprint 9)
+  Lines audited   49,677  (across 6 core crates, Sprint 9 internal engineering audit)
   Property tests     40+  (bleep-state/tests/proptest_sprint8.rs)
 
 Cryptographic parameters
@@ -928,7 +929,7 @@ Protocol parameters
   Gossip fanout             8
   Kademlia k-bucket         20
   Onion routing max hops    6
-  Max gossip message        2 MiB
+  Max P2P frame body        2 MiB (all frame types)
   SPHINCS+ signature        7,856 bytes
   Kyber-1024 public key     1,568 bytes
   SMT depth                 256 levels
@@ -1070,9 +1071,9 @@ The 7,856-byte signature is a known and accepted cost. It is the price of the mo
 ---
 
 ### Sprint 9
-**Decision:** Publish all audit findings, including acknowledged ones, in `docs/SECURITY_AUDIT_SPRINT9.md`.
+**Decision:** Keep the Sprint 9 findings as internal engineering audit metadata in `crates/bleep-consensus/src/security_audit.rs`; no standalone audit report is published.
 
-**Reasoning:** An audit report that acknowledges two findings is more credible than an audit report that resolves fourteen. SA-M4 (EIP-1559 base fee as design property) and SA-I2 (NTP drift guard as mainnet gate) are documented with full reasoning. Concealing findings from a published audit creates a misleading picture of security posture. Transparency about acknowledged findings allows validators, developers, and auditors to make informed deployment decisions.
+**Reasoning:** An internal engineering record must not be presented as an independent audit or external attestation. SA-M4 (EIP-1559 base fee as design property) and SA-I2 (NTP drift guard as mainnet gate) remain recorded as acknowledged findings.
 
 ---
 

@@ -286,14 +286,25 @@ impl BlockValidator {
         true
     }
 
+    fn validate_chain_id(prev_block: &Block, block: &Block) -> bool {
+        !block.chain_id.is_empty()
+            && block.chain_id == prev_block.chain_id
+            && block
+                .transactions
+                .iter()
+                .all(|transaction| transaction.chain_id == block.chain_id)
+    }
+
     /// **Full block validation pipeline**
     ///
-    /// SAFETY: Executes all validation steps in strict order:
-    /// 1. Signature validation
-    /// 2. Link validation
-    /// 3. Network consensus checks
-    /// 4. AI anomaly detection
+    /// SAFETY: Checks chain identity, then executes all validation steps in
+    /// strict order: signature, link, network consensus, and anomaly checks.
     pub fn validate_full_block(prev_block: &Block, block: &Block, public_key: &[u8]) -> bool {
+        if !Self::validate_chain_id(prev_block, block) {
+            log::error!("Block {} has an invalid chain ID", block.index);
+            return false;
+        }
+
         // Step 1: Verify block signature
         if !Self::validate_block(block, public_key) {
             log::error!("Block {} failed signature validation", block.index);
@@ -332,6 +343,11 @@ impl BlockValidator {
         block: &Block,
         validator_keys: &[Vec<u8>],
     ) -> bool {
+        if !Self::validate_chain_id(prev_block, block) {
+            log::error!("Block {} has an invalid chain ID", block.index);
+            return false;
+        }
+
         if !Self::validate_block_with_validator_set(block, validator_keys) {
             log::error!(
                 "Block {} failed epoch validator-set signature validation",
@@ -363,6 +379,7 @@ mod tests {
         let block = Block {
             index: 1,
             timestamp: 1,
+            chain_id: "test-chain".to_string(),
             transactions: vec![Transaction {
                 chain_id: "test-chain".to_string(),
                 sender: "alice".to_string(),
@@ -397,6 +414,27 @@ mod tests {
         block_b.shard_state_root = "1".repeat(64);
 
         assert_ne!(block_a.compute_hash(), block_b.compute_hash());
+    }
+
+    #[test]
+    fn block_hash_changes_when_chain_id_changes() {
+        let mut block = Block::new(1, vec![], "prev".to_string());
+        let original_hash = block.compute_hash();
+        block.chain_id = "another-chain".to_string();
+        assert_ne!(block.compute_hash(), original_hash);
+    }
+
+    #[test]
+    fn full_block_validation_rejects_wrong_chain_id() {
+        let previous = Block::genesis_for_chain("expected-chain");
+        let mut block = Block::new(1, vec![], previous.compute_hash());
+        block.chain_id = "other-chain".into();
+
+        assert!(!BlockValidator::validate_full_block(
+            &previous,
+            &block,
+            &[0; crate::block::SPHINCS_PK_LEN]
+        ));
     }
 
     #[test]

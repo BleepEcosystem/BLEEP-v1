@@ -515,6 +515,7 @@ impl ProtectedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol_invariants::BLEEP_UNIT;
 
     #[test]
     fn test_protected_state_creation() {
@@ -566,7 +567,7 @@ mod tests {
         let state = ProtectedState::new(1_000_000).unwrap();
 
         let record = state
-            .hook_activate_validator("validator_1".to_string(), 32 * 10_u128.pow(18), 0)
+            .hook_activate_validator("validator_1".to_string(), 32 * BLEEP_UNIT, 0)
             .unwrap();
 
         assert_eq!(record.id, "validator_1");
@@ -579,15 +580,15 @@ mod tests {
 
         // Register validator
         state
-            .hook_activate_validator("validator_1".to_string(), 32 * 10_u128.pow(18), 0)
+            .hook_activate_validator("validator_1".to_string(), 32 * BLEEP_UNIT, 0)
             .unwrap();
 
         // Slash validator
         let remaining = state
-            .hook_slash_validator("validator_1", 10 * 10_u128.pow(18), "consensus_violation")
+            .hook_slash_validator("validator_1", 10 * BLEEP_UNIT, "consensus_violation")
             .unwrap();
 
-        assert_eq!(remaining, 22 * 10_u128.pow(18));
+        assert_eq!(remaining, 22 * BLEEP_UNIT);
     }
 
     #[test]

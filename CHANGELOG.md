@@ -12,10 +12,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- L3 proof generators and verifiers can now only be created as a matched pair from one shared SPHINCS+ keypair; removed independent random-key constructors
+- Hybrid AES-GCM decryption in `KyberAESHybrid` returns authentication and input-validation errors instead of panicking
+- ML-KEM hybrid encryption in BLEEP crypto and BLEEP Connect now derives AES-256 keys with HKDF-SHA256, per-message random salts, and protocol-specific info labels; serialized payloads carry the salt
+- Identity Merkle paths and BLEEP Connect L3 batch roots now use the shared domain-separated, position-bound, versioned commitment format; legacy Merkle roots are incompatible, and empty L3 trees return no root
+- P2P encoded frame-body limit reduced to 2 MiB and enforced before receive-side allocation/deserialization; SAL payload allowance reserves transport overhead
+- Non-genesis block protocol version bumped to 3: block signatures and emergency PoW now use `Block::compute_hash()`; genesis remains pinned to v2 to preserve the chain anchor. v2 nodes are incompatible and must be upgraded together before activation
 - Repository documentation updated to Protocol Version 5 narrative: Proven Execution · Quantum Foundation · Intent Native
-- README, SECURITY, ROADMAP, CONTRIBUTING, NOTICE, BUILDING rewritten to reflect current architecture and strategic positioning
+- README, ROADMAP, CONTRIBUTING, NOTICE, and BUILDING updated to reflect current architecture and strategic positioning
+- SECURITY.md restored as the vulnerability-disclosure policy with a private reporting address, response SLA, and explicit in-scope components
 - Protocol version references corrected from v4 to v5 across all documentation
 - ROADMAP expanded with explicit mainnet gate requirements and known limitations section
+
+### Added
+- `.well-known/security.txt` with the vulnerability-reporting contact, policy URL, and expiry
+- `.github/SECURITY.md` and `docs/SECURITY_POLICY.md` pointers to the canonical root `SECURITY.md`
+
+### Removed
+- Recorded the deletion of `SECURITY.md` in commit `40a940d` and `docs/SECURITY_AUDIT.md` in commit `4d9f61a` (2026-10-26); the disclosure policy is restored, while no standalone audit report is published
 
 ---
 
@@ -78,7 +92,9 @@ gossip, and validation.
 
 ### Highlights
 
-Sprint 9 is the **security hardening and audit-preparation release** — Protocol Version 5. All consensus, state, and cryptographic paths have been subjected to chaos testing, property-based testing, and an internal security audit. The Winterfell STARK block validity circuit is wired to `BlockValidityProver` and `BlockValidityVerifier` and benchmarked against the 3,000ms slot budget. All Critical and High audit findings are resolved.
+Sprint 9 is the **security hardening and audit-preparation release** — Protocol Version 5. All consensus, state, and cryptographic paths have been subjected to chaos testing, property-based testing, and an internal engineering audit. The Winterfell STARK block validity circuit is wired to `BlockValidityProver` and `BlockValidityVerifier` and benchmarked against the 3,000ms slot budget.
+
+An internal engineering audit of the six core crates (49,677 lines) was completed. An independent third-party security audit has not been performed. No external party has attested to the security of this software.
 
 ### Added
 
@@ -93,7 +109,7 @@ Sprint 9 is the **security hardening and audit-preparation release** — Protoco
 
 **Security & Auditing**
 - `security_audit.rs` in `bleep-consensus`: on-demand `AuditReport` generation
-- `SECURITY_AUDIT_SPRINT9.md` in `docs/`: internal audit report — 2 Critical, 3 High, 4 Medium, 3 Low, 2 Informational; all Critical and High resolved
+- `AuditReport` in `bleep-consensus`: internal audit finding metadata — 2 Critical, 3 High, 4 Medium, 3 Low, 2 Informational
 - `THREAT_MODEL.md` in `docs/`: trust boundary map, 11 threat categories, per-crate audit priorities
 - Fuzz targets in `bleep-state/src/fuzz/`: `fuzz_merkle_insert`, `fuzz_state_apply_tx`
 - Fuzz targets in `bleep-crypto/fuzz/`: `fuzz_tx_sign`, `fuzz_merkle_commitment`
@@ -109,7 +125,7 @@ Sprint 9 is the **security hardening and audit-preparation release** — Protoco
 - `CHAOS_TESTING.md` in `docs/`: runbook for chaos test execution
 
 **Documentation**
-- `THREAT_MODEL.md`, `SECURITY_AUDIT_SPRINT9.md`, `CI_CD_PIPELINE.md`, `CI_CD_QUICK_REFERENCE.md`
+- `THREAT_MODEL.md`, `CI_CD_PIPELINE.md`, `CI_CD_QUICK_REFERENCE.md`
 - `docs/phase4_shard_recovery.md`: Phase 4 advanced shard recovery orchestration
 - `docs/specs/rpc_api_spec.md`: full RPC endpoint specification (46 endpoints)
 - `docs/specs/state_transition.md`: state transition formal specification

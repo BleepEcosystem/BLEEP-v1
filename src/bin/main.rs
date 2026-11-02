@@ -117,6 +117,91 @@ impl SalValidatorRegistry for ValidatorRegistryAdapter {
     }
 }
 
+fn verify_pos_vrf_block(
+    block: &Block,
+    parent: &Block,
+    active_validators: &[ValidatorIdentity],
+) -> Result<(), String> {
+    if block.index != parent.index.saturating_add(1)
+        || block.previous_hash != parent.compute_hash()
+    {
+        return Err("Block does not extend the supplied parent".into());
+    }
+
+    let proposer_signing_key = block
+        .validator_signature
+        .get(..bleep_core::block::SPHINCS_PK_LEN)
+        .ok_or_else(|| "Block is missing its proposer signing key".to_string())?;
+    let proposer_signing_key_id = hex::encode(proposer_signing_key);
+    let proposer = active_validators
+        .iter()
+        .find(|validator| {
+            validator.can_participate()
+                && validator
+                    .signing_key_id
+                    .eq_ignore_ascii_case(&proposer_signing_key_id)
+        })
+        .ok_or_else(|| "Block signer is not an active validator".to_string())?;
+
+    let parent_vrf_public_key = if parent.protocol_version >= 5 {
+        let parent_signing_key = parent
+            .validator_signature
+            .get(..bleep_core::block::SPHINCS_PK_LEN)
+            .ok_or_else(|| "Parent block is missing its proposer signing key".to_string())?;
+        let parent_signing_key_id = hex::encode(parent_signing_key);
+        Some(
+            active_validators
+                .iter()
+                .find(|validator| {
+                    validator
+                        .signing_key_id
+                        .eq_ignore_ascii_case(&parent_signing_key_id)
+                })
+                .map(|validator| validator.vrf_public_key.as_slice())
+                .ok_or_else(|| "Parent proposer VRF key is not registered".to_string())?,
+        )
+    } else {
+        None
+    };
+    let previous_randomness =
+        bleep_consensus::pos_engine::PoSConsensusEngine::randomness_from_parent_block(
+            parent,
+            parent_vrf_public_key,
+        )?;
+
+    let stakes = active_validators
+        .iter()
+        .filter(|validator| validator.can_participate())
+        .map(|validator| {
+            Ok(bleep_consensus::pos_engine::ValidatorStake {
+                id: validator.id.clone(),
+                stake: u64::try_from(validator.effective_stake())
+                    .map_err(|_| format!("Validator {} stake exceeds u64", validator.id))?,
+                active: true,
+                slashing_count: 0,
+                vrf_public_key: validator.vrf_public_key.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let selected = bleep_consensus::pos_engine::PoSConsensusEngine::select_proposer(
+        block.index,
+        &stakes,
+        &previous_randomness,
+    )
+    .map_err(|error| error.to_string())?;
+    if selected != proposer.id {
+        return Err(format!(
+            "Block proposer {} is not the selected proposer {}",
+            proposer.id, selected
+        ));
+    }
+    bleep_consensus::pos_engine::PoSConsensusEngine::verify_block_vrf(
+        block,
+        &proposer.vrf_public_key,
+    )?;
+    Ok(())
+}
+
 struct TxPoolSigCache {
     tx_pool: Arc<TransactionPool>,
 }
@@ -193,25 +278,80 @@ async fn main() {
     }
 }
 
-fn load_blocks_per_epoch() -> Result<u64, Box<dyn Error>> {
-    let path =
-        std::env::var("BLEEP_GENESIS_CONFIG").unwrap_or_else(|_| "config/genesis.json".to_string());
-    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    Ok(parse_blocks_per_epoch(&config)?)
+struct NetworkConfig {
+    chain_id: String,
+    blocks_per_epoch: u64,
 }
 
-fn parse_blocks_per_epoch(config: &serde_json::Value) -> Result<u64, std::io::Error> {
-    config
-        .pointer("/consensus/blocks_per_epoch")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|blocks_per_epoch| *blocks_per_epoch > 0)
+fn embedded_network_config(network_mode: Option<&str>) -> Result<&'static str, std::io::Error> {
+    let default_mode = if cfg!(feature = "mainnet") {
+        "mainnet"
+    } else {
+        "pretestnet"
+    };
+    match network_mode
+        .unwrap_or(default_mode)
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mainnet" => Ok(include_str!("../../config/mainnet_config.json")),
+        "testnet" | "pretestnet" | "devnet" | "dev" | "development" | "test" => {
+            Ok(include_str!("../../config/testnet_config.json"))
+        }
+        mode => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported BLEEP_NETWORK_MODE: {mode}"),
+        )),
+    }
+}
+
+fn parse_network_config(
+    raw: &str,
+    chain_id_override: Option<&str>,
+) -> Result<NetworkConfig, Box<dyn Error>> {
+    let config: serde_json::Value = serde_json::from_str(raw)?;
+    let configured_chain_id = config
+        .get("chain_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|chain_id| !chain_id.trim().is_empty())
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "genesis config must define a positive consensus.blocks_per_epoch",
+                "network config must define a non-empty chain_id",
             )
-            .into()
-        })
+        })?;
+    let chain_id = chain_id_override.unwrap_or(configured_chain_id).trim();
+    if chain_id.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "BLEEP_CHAIN_ID must not be empty",
+        )
+        .into());
+    }
+    Ok(NetworkConfig {
+        chain_id: chain_id.to_string(),
+        blocks_per_epoch: config
+            .pointer("/consensus/blocks_per_epoch")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|blocks_per_epoch| *blocks_per_epoch > 0)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "network config must define a positive consensus.blocks_per_epoch",
+                )
+            })?,
+    })
+}
+
+fn load_network_config() -> Result<NetworkConfig, Box<dyn Error>> {
+    let raw = if let Ok(path) = std::env::var("BLEEP_GENESIS_CONFIG") {
+        std::fs::read_to_string(path)?
+    } else {
+        embedded_network_config(std::env::var("BLEEP_NETWORK_MODE").ok().as_deref())?.to_string()
+    };
+    let chain_id_override = std::env::var("BLEEP_CHAIN_ID").ok();
+    parse_network_config(&raw, chain_id_override.as_deref())
 }
 
 #[cfg(test)]
@@ -219,23 +359,37 @@ mod epoch_config_tests {
     use super::*;
 
     #[test]
-    fn reads_positive_blocks_per_epoch_from_genesis() {
-        let config = serde_json::json!({"consensus": {"blocks_per_epoch": 1000}});
-        assert_eq!(parse_blocks_per_epoch(&config).unwrap(), 1000);
+    fn network_mode_loads_the_matching_chain_configuration() {
+        let mainnet =
+            parse_network_config(embedded_network_config(Some("mainnet")).unwrap(), None).unwrap();
+        let testnet =
+            parse_network_config(embedded_network_config(Some("testnet")).unwrap(), None).unwrap();
+        assert_eq!(mainnet.chain_id, "BLEEP-Mainnet");
+        assert_eq!(mainnet.blocks_per_epoch, 1000);
+        assert_eq!(testnet.chain_id, "BLEEP-PreTestnet-001");
+        assert_eq!(testnet.blocks_per_epoch, 100);
     }
 
     #[test]
-    fn rejects_missing_or_zero_blocks_per_epoch() {
-        assert!(parse_blocks_per_epoch(&serde_json::json!({"consensus": {}})).is_err());
-        assert!(
-            parse_blocks_per_epoch(&serde_json::json!({"consensus": {"blocks_per_epoch": 0}}))
-                .is_err()
-        );
+    fn rejects_invalid_network_config_and_empty_chain_override() {
+        assert!(parse_network_config(r#"{"chain_id":"x","consensus":{}}"#, None).is_err());
+        assert!(parse_network_config(
+            r#"{"chain_id":"x","consensus":{"blocks_per_epoch":1}}"#,
+            Some(" ")
+        )
+        .is_err());
+        assert!(embedded_network_config(Some("unknown")).is_err());
     }
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    let blocks_per_epoch = load_blocks_per_epoch()?;
+    let network_config = load_network_config()?;
+    std::env::set_var("BLEEP_CHAIN_ID", &network_config.chain_id);
+    let blocks_per_epoch = network_config.blocks_per_epoch;
+    info!(
+        "🌐 Loaded network config: chain_id={}, blocks_per_epoch={}",
+        network_config.chain_id, blocks_per_epoch
+    );
     let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -304,8 +458,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ── Step 2: State + genesis ───────────────────────────────────────────────
     info!("⛓  [2/16] Initialising genesis block and persistent state…");
 
-    let chain_id = std::env::var("BLEEP_CHAIN_ID")
-        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+    let chain_id = network_config.chain_id;
     let state_dir =
         std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
 
@@ -366,7 +519,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .rebuild_trie_from_db()
         .map_err(|e| format!("Persisted state trie rebuild failed: {e}"))?;
 
-    let genesis = Block::genesis();
+    let genesis = Block::genesis_for_chain(chain_id.clone());
     let genesis_hash = genesis.compute_hash();
     let canonical_blocks = state
         .load_canonical_blocks(&chain_id, &genesis_hash, |block: &Block| {
@@ -390,7 +543,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Transaction pools
     let tx_pool = TransactionPool::new_with_chain_id(10_000, chain_id.clone());
-    let mempool = Mempool::new();
+    let mempool = Mempool::new(chain_id.clone(), Mempool::embedded_sender_public_key);
 
     let blockchain = {
         let mut core_state = CoreBlockchainState::default();
@@ -451,10 +604,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         // S-06: pass the real SPHINCS+ public key bytes so SlashingEngine can
         // cryptographically verify evidence before slashing this validator.
         let signing_key_id = hex::encode(&sphincs_pk);
-        let genesis_validator = ValidatorIdentity::new(
+        let vrf_public_key =
+            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&sphincs_sk)?;
+        let genesis_validator = ValidatorIdentity::new_with_vrf_public_key(
             validator_id.clone(),
             real_kyber_pk,
             signing_key_id,
+            vrf_public_key,
             1_000_000u128, // initial stake (matches BlockProducer config)
             0,             // genesis epoch
         );
@@ -870,6 +1026,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             .map(|(_, public_key)| public_key.clone())
                             .collect::<Vec<_>>();
                         if !inbound_pbft_finality.matches_committee(&committee_keys) {
+                            if let Err(e) =
+                                inbound_pbft_finality.sync_committee(committee_keys.clone())
+                            {
+                                warn!("[InboundBlockHandler] PBFT committee sync failed: {}", e);
+                                continue;
+                            }
+                        }
+                        if !inbound_pbft_finality.matches_committee(&committee_keys) {
                             warn!(
                                 "[InboundBlockHandler] Ignoring PBFT message for a stale committee"
                             );
@@ -897,7 +1061,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 continue;
                             };
                             let signer_key_id = hex::encode(signer_pk);
-                            let (proposer_id, validator_stakes) = {
+                            let (proposer_id, validator_stakes, active_validators) = {
                                 let registry = inbound_validators.lock();
                                 let active: Vec<_> = registry
                                     .get_active_validators()
@@ -923,9 +1087,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                             .double_sign_count
                                             .saturating_add(validator.equivocation_count)
                                             .saturating_add(validator.downtime_count),
+                                        vrf_public_key: validator.vrf_public_key.clone(),
                                     })
                                     .collect::<Vec<_>>();
-                                (proposer_id, stakes)
+                                (proposer_id, stakes, active)
                             };
                             let Some(proposer_id) = proposer_id else {
                                 warn!(
@@ -934,15 +1099,65 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 );
                                 continue;
                             };
+                            let Some(parent) =
+                                inbound_blockchain.read().unwrap().latest_block()
+                            else {
+                                continue;
+                            };
+                            let parent_vrf_public_key = parent
+                                .validator_signature
+                                .get(..bleep_core::block::SPHINCS_PK_LEN)
+                                .and_then(|public_key| {
+                                    let signing_key_id = hex::encode(public_key);
+                                    active_validators
+                                        .iter()
+                                        .find(|validator| {
+                                            validator
+                                                .signing_key_id
+                                                .eq_ignore_ascii_case(&signing_key_id)
+                                        })
+                                        .map(|validator| validator.vrf_public_key.as_slice())
+                                });
+                            let previous_randomness =
+                                match bleep_consensus::pos_engine::PoSConsensusEngine::randomness_from_parent_block(
+                                    &parent,
+                                    parent_vrf_public_key,
+                                ) {
+                                    Ok(randomness) => randomness,
+                                    Err(error) => {
+                                        warn!(
+                                            "[InboundBlockHandler] Cannot validate parent VRF for block {}: {}",
+                                            block.index, error
+                                        );
+                                        continue;
+                                    }
+                                };
                             let selected =
                                 bleep_consensus::pos_engine::PoSConsensusEngine::select_proposer(
                                     block.index,
                                     &validator_stakes,
-                                    &block.previous_hash,
+                                    &previous_randomness,
                                 );
                             if !selected.is_ok_and(|selected| selected == proposer_id) {
                                 warn!(
                                     "[InboundBlockHandler] PBFT proposal {} is not from the selected proposer",
+                                    block.index
+                                );
+                                continue;
+                            }
+                            let proposer_vrf_public_key = active_validators
+                                .iter()
+                                .find(|validator| validator.id == proposer_id)
+                                .map(|validator| validator.vrf_public_key.as_slice());
+                            if !proposer_vrf_public_key.is_some_and(|public_key| {
+                                bleep_consensus::pos_engine::PoSConsensusEngine::verify_block_vrf(
+                                    block,
+                                    public_key,
+                                )
+                                .is_ok()
+                            }) {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} has an invalid proposer VRF proof",
                                     block.index
                                 );
                                 continue;
@@ -952,7 +1167,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 let Some(tip) = chain.latest_block() else {
                                     continue;
                                 };
-                                if block.index != tip.index.saturating_add(1)
+                                if verify_pos_vrf_block(block, &tip, &active_validators).is_err()
+                                    || block.index != tip.index.saturating_add(1)
                                     || !BlockValidator::validate_full_block_with_validator_set(
                                         &tip,
                                         block,
@@ -966,6 +1182,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 }
                             };
                             if !proposal_valid
+                                || block.chain_id != inbound_chain_id
                                 || block
                                     .transactions
                                     .iter()
@@ -1007,12 +1224,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    let epoch_validator_keys = {
+                    let (epoch_validator_keys, active_validators) = {
                         let registry = inbound_validators.lock();
-                        registry
+                        let active_validators: Vec<_> = registry
                             .get_active_validators()
                             .into_iter()
                             .filter(|validator| validator.can_participate())
+                            .collect();
+                        let keys = active_validators
+                            .iter()
                             .map(|validator| {
                                 hex::decode(&validator.signing_key_id).map_err(|e| {
                                     format!(
@@ -1021,7 +1241,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     )
                                 })
                             })
-                            .collect::<Result<Vec<_>, _>>()
+                            .collect::<Result<Vec<_>, _>>();
+                        (keys, active_validators)
                     };
                     let epoch_validator_keys = match epoch_validator_keys {
                         Ok(keys) => keys,
@@ -1034,13 +1255,31 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         }
                     };
 
+                    let parent = {
+                        let chain = inbound_blockchain.read().unwrap();
+                        chain.latest_block()
+                    };
+                    let Some(parent) = parent else {
+                        continue;
+                    };
+                    if let Err(error) =
+                        verify_pos_vrf_block(&block, &parent, &active_validators)
+                    {
+                        warn!(
+                            "[InboundBlockHandler] Block {} has invalid proposer VRF: {}",
+                            block.index, error
+                        );
+                        continue;
+                    }
+
                     let valid = BlockValidator::validate_block_with_validator_set(
                         &block,
                         &epoch_validator_keys,
-                    ) && block
-                        .transactions
-                        .iter()
-                        .all(|tx| tx.chain_id == inbound_chain_id);
+                    ) && block.chain_id == inbound_chain_id
+                        && block
+                            .transactions
+                            .iter()
+                            .all(|tx| tx.chain_id == inbound_chain_id);
                     if !valid {
                         warn!(
                             "[InboundBlockHandler] Block {} failed block-level validation — discarding",
@@ -1072,6 +1311,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             continue;
                         };
                         if block.index != tip.index.saturating_add(1)
+                            || verify_pos_vrf_block(&block, &tip, &active_validators).is_err()
                             || !BlockValidator::validate_full_block_with_validator_set(
                                 &tip,
                                 &block,
@@ -1240,7 +1480,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // it is NOT an MPC trusted-setup ceremony. See bleep-rpc/src/lib.rs: ceremony_status_route.
     info!("   STARK Setup:  http://0.0.0.0:8545/rpc/ceremony/status  [transparent — no MPC]");
     info!("   Benchmark:    http://0.0.0.0:8545/rpc/benchmark/latest");
-    info!("   Audit:        http://0.0.0.0:8545/rpc/audit/report");
     info!("══ DevNet UI ════════════════════════════════════════════════════════");
     info!("   Explorer:     http://0.0.0.0:8545/explorer");
     info!("   Faucet:       POST http://0.0.0.0:8545/faucet/{{address}}");
@@ -1265,12 +1504,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Persist state
     {
         let mut s = state.lock();
-        s.create_snapshot()
-            .unwrap_or_else(|e| warn!("State snapshot: {}", e));
-        info!(
-            "  ✅ State flushed to RocksDB (height={}).",
-            s.block_height()
-        );
+        match s.create_snapshot() {
+            Ok(snapshot_path) => info!(
+                "  ✅ State snapshot saved to {} (height={}).",
+                snapshot_path.display(),
+                s.block_height()
+            ),
+            Err(error) => warn!("State snapshot: {}", error),
+        }
     }
 
     // Persist governance

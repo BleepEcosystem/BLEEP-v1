@@ -20,6 +20,8 @@ const COMMITTEE_DOMAIN: &[u8] = b"BLEEP_FINALITY_COMMITTEE_V1";
 pub struct FinalityHeader {
     pub height: u64,
     pub timestamp: u64,
+    #[serde(default)]
+    pub chain_id: String,
     pub previous_hash: String,
     pub merkle_root: String,
     pub epoch_id: u64,
@@ -37,6 +39,7 @@ impl FinalityHeader {
         Self {
             height: block.index,
             timestamp: block.timestamp,
+            chain_id: block.chain_id.clone(),
             previous_hash: block.previous_hash.clone(),
             merkle_root: block.merkle_root.clone(),
             epoch_id: block.epoch_id,
@@ -65,6 +68,7 @@ impl FinalityHeader {
         BlockHeader {
             index: self.height,
             timestamp: self.timestamp,
+            chain_id: self.chain_id.clone(),
             previous_hash: self.previous_hash.clone(),
             merkle_root: self.merkle_root.clone(),
             validator_signature: Vec::new(),
@@ -568,6 +572,15 @@ mod tests {
         let mut certificate = create_certificate(&registry);
         sign(&mut certificate, "v1", &secret_keys["v1"]);
         certificate.header.shard_id += 1;
+        assert!(certificate.verify_signatures(&registry).is_err());
+    }
+
+    #[test]
+    fn certificate_signatures_bind_chain_id() {
+        let (registry, secret_keys) = create_committee(&[("v1", 100)]);
+        let mut certificate = create_certificate(&registry);
+        sign(&mut certificate, "v1", &secret_keys["v1"]);
+        certificate.header.chain_id = "another-chain".into();
         assert!(certificate.verify_signatures(&registry).is_err());
     }
 

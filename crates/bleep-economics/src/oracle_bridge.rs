@@ -93,7 +93,7 @@ pub struct AggregatedPrice {
     pub mean_price: u128,
     /// Confidence (weighted by source credibility)
     pub confidence_bps: u16,
-    /// Number of sources used
+    /// Number of distinct operators used
     pub source_count: u32,
     /// Latest timestamp
     pub timestamp: u64,
@@ -348,11 +348,21 @@ impl OracleBridgeEngine {
             .get(asset)
             .ok_or(OracleError::NoDataForAsset)?;
 
-        // Filter fresh updates
-        let fresh_updates: Vec<_> = updates
+        // Keep only the newest fresh update from each operator. If timestamps
+        // tie, the latest submitted update wins, but still counts as one vote.
+        let mut updates_by_operator = BTreeMap::<Vec<u8>, &PriceUpdate>::new();
+        for update in updates
             .iter()
-            .filter(|u| u.is_fresh(current_timestamp, max_age_seconds))
-            .collect();
+            .filter(|update| update.is_fresh(current_timestamp, max_age_seconds))
+        {
+            let replace = updates_by_operator
+                .get(&update.operator_id)
+                .map_or(true, |current| update.timestamp >= current.timestamp);
+            if replace {
+                updates_by_operator.insert(update.operator_id.clone(), update);
+            }
+        }
+        let fresh_updates: Vec<_> = updates_by_operator.into_values().collect();
 
         if fresh_updates.len() < 3 {
             return Err(OracleError::InsufficientSources);
@@ -623,6 +633,90 @@ mod tests {
             }
         };
         assert_eq!(agg.source_count, 3);
+    }
+
+    #[test]
+    fn repeated_operator_submissions_count_as_one_price() {
+        let mut engine = OracleBridgeEngine::genesis();
+        let (pk1, sk1) = sphincsshake256fsimple::keypair();
+        let (pk2, sk2) = sphincsshake256fsimple::keypair();
+        let (pk3, sk3) = sphincsshake256fsimple::keypair();
+        let operators = [
+            (pk1.as_bytes().to_vec(), sk1),
+            (pk2.as_bytes().to_vec(), sk2),
+            (pk3.as_bytes().to_vec(), sk3),
+        ];
+        for (operator_id, _) in &operators {
+            engine.register_operator(operator_id.clone(), 1000).unwrap();
+        }
+
+        for price in 0..8 {
+            engine
+                .submit_price_update(signed_update(
+                    OracleSource::Custom(vec![1]),
+                    "BLEEP/USD",
+                    price,
+                    1000,
+                    &operators[0].0,
+                    &operators[0].1,
+                ))
+                .unwrap();
+        }
+        for (index, price) in [(1usize, 101u128), (2, 102)] {
+            engine
+                .submit_price_update(signed_update(
+                    OracleSource::Custom(vec![index as u8]),
+                    "BLEEP/USD",
+                    price,
+                    1000,
+                    &operators[index].0,
+                    &operators[index].1,
+                ))
+                .unwrap();
+        }
+        // The first operator's latest update is its only vote, regardless of
+        // its earlier submissions.
+        engine
+            .submit_price_update(signed_update(
+                OracleSource::Custom(vec![1]),
+                "BLEEP/USD",
+                100,
+                1001,
+                &operators[0].0,
+                &operators[0].1,
+            ))
+            .unwrap();
+
+        let aggregated = engine.aggregate_prices("BLEEP/USD", 1001, 100).unwrap();
+        assert_eq!(aggregated.source_count, 3);
+        assert_eq!(aggregated.median_price, 101);
+        assert_eq!(aggregated.mean_price, 101);
+    }
+
+    #[test]
+    fn repeated_submissions_cannot_satisfy_distinct_operator_threshold() {
+        let mut engine = OracleBridgeEngine::genesis();
+        let (public_key, secret_key) = sphincsshake256fsimple::keypair();
+        let operator_id = public_key.as_bytes().to_vec();
+        engine.register_operator(operator_id.clone(), 1000).unwrap();
+
+        for price in 1..=3 {
+            engine
+                .submit_price_update(signed_update(
+                    OracleSource::Custom(vec![1]),
+                    "BLEEP/USD",
+                    price,
+                    1000,
+                    &operator_id,
+                    &secret_key,
+                ))
+                .unwrap();
+        }
+
+        assert!(matches!(
+            engine.aggregate_prices("BLEEP/USD", 1000, 100),
+            Err(OracleError::InsufficientSources)
+        ));
     }
 
     #[test]

@@ -68,7 +68,7 @@ fn interior_hash(left: &NodeHash, right: &NodeHash) -> NodeHash {
 /// Stores only non-empty leaf hashes keyed by their 256-bit path.
 /// Interior nodes are computed lazily during `root()` and cached for
 /// O(k) Merkle proof generation.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SparseMerkleTrie {
     /// Non-empty leaf hashes keyed by trie path = blake3(address).
     leaves: HashMap<[u8; 32], NodeHash>,

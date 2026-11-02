@@ -101,29 +101,19 @@ pub struct ProofGenerator {
 }
 
 impl ProofGenerator {
-    pub fn new() -> BleepConnectResult<Self> {
-        let (_public_key, signing_key) = SignatureScheme::keygen().map_err(|e| {
-            BleepConnectError::InternalError(format!("Proof key generation failed: {e:?}"))
-        })?;
-        Ok(Self {
+    fn new_with_signing_key(signing_key: SecretKey) -> Self {
+        Self {
             cache: Arc::new(ProofCache::new(1_000)),
             signing_key,
-        })
-    }
-
-    pub fn new_with_signing_key(signing_key: SecretKey) -> BleepConnectResult<Self> {
-        Ok(Self {
-            cache: Arc::new(ProofCache::new(1_000)),
-            signing_key,
-        })
+        }
     }
 
     pub fn new_shared() -> BleepConnectResult<(ProofGenerator, ProofVerifier)> {
         let (public_key, signing_key) = SignatureScheme::keygen().map_err(|e| {
             BleepConnectError::InternalError(format!("Shared proof key generation failed: {e:?}"))
         })?;
-        let generator = ProofGenerator::new_with_signing_key(signing_key)?;
-        let verifier = ProofVerifier::new_with_public_key(public_key)?;
+        let generator = ProofGenerator::new_with_signing_key(signing_key);
+        let verifier = ProofVerifier::new_with_public_key(public_key);
         Ok((generator, verifier))
     }
 
@@ -191,24 +181,8 @@ pub struct ProofVerifier {
 }
 
 impl ProofVerifier {
-    pub fn new() -> BleepConnectResult<Self> {
-        let (public_key, _signing_key) = SignatureScheme::keygen().map_err(|e| {
-            BleepConnectError::InternalError(format!("Verifier key generation failed: {e:?}"))
-        })?;
-        Ok(Self { public_key })
-    }
-
-    pub fn new_with_public_key(public_key: PublicKey) -> BleepConnectResult<Self> {
-        Ok(Self { public_key })
-    }
-
-    pub fn new_shared() -> BleepConnectResult<(ProofGenerator, ProofVerifier)> {
-        let (public_key, signing_key) = SignatureScheme::keygen().map_err(|e| {
-            BleepConnectError::InternalError(format!("Shared proof key generation failed: {e:?}"))
-        })?;
-        let generator = ProofGenerator::new_with_signing_key(signing_key)?;
-        let verifier = ProofVerifier::new_with_public_key(public_key)?;
-        Ok((generator, verifier))
+    fn new_with_public_key(public_key: PublicKey) -> Self {
+        Self { public_key }
     }
 
     /// Verify a post-quantum transfer proof. Returns true if valid.
@@ -283,7 +257,7 @@ impl BatchAggregator {
 
         let proof_ids: Vec<[u8; 32]> = batch.iter().map(|p| p.proof_id).collect();
         let leaves: Vec<[u8; 32]> = proof_ids.clone();
-        let aggregated_root = merkle_root(&leaves);
+        let aggregated_root = merkle_root(&leaves)?;
 
         let mut batch_id_data = Vec::new();
         batch_id_data.extend_from_slice(b"L3-BATCH");
@@ -462,6 +436,10 @@ mod tests {
 
         let valid = verifier.verify(&proof).unwrap();
         assert!(valid, "Proof must verify");
+
+        let (unrelated_public_key, _) = SignatureScheme::keygen().unwrap();
+        let unrelated_verifier = ProofVerifier::new_with_public_key(unrelated_public_key);
+        assert!(!unrelated_verifier.verify(&proof).unwrap());
     }
 
     #[tokio::test]

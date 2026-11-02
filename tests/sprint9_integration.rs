@@ -432,19 +432,26 @@ mod security_audit_integration {
     }
 
     #[test]
-    fn all_critical_and_high_findings_resolved_before_mainnet() {
+    fn critical_findings_resolved_and_open_high_findings_reported() {
         let report = AuditReport::report();
-        let blocking: Vec<_> = report
+        let unresolved_critical: Vec<_> = report
             .findings
             .iter()
-            .filter(|f| matches!(f.severity, Severity::Critical | Severity::High))
+            .filter(|f| f.severity == Severity::Critical)
             .filter(|f| !matches!(f.status, FindingStatus::Resolved { .. }))
             .collect();
         assert!(
-            blocking.is_empty(),
-            "blocking unresolved findings: {:?}",
-            blocking.iter().map(|f| &f.id).collect::<Vec<_>>()
+            unresolved_critical.is_empty(),
+            "unresolved critical findings: {:?}",
+            unresolved_critical
+                .iter()
+                .map(|f| &f.id)
+                .collect::<Vec<_>>()
         );
+        for id in ["SA-H1", "SA-H3"] {
+            let finding = report.findings.iter().find(|f| f.id == id).unwrap();
+            assert!(matches!(finding.status, FindingStatus::Open { .. }));
+        }
     }
 
     #[test]

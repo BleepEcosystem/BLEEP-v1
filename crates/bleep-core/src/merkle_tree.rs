@@ -1,5 +1,5 @@
+use bleep_crypto::merkle_commitment::verify_merkle_path;
 use bleep_state::state_merkle::SparseMerkleTrie;
-use sha3::{Sha3_256, Digest};
 use serde::{Serialize, Deserialize};
 
 /// Hash-based Merkle path for identity verification (post-quantum secure)
@@ -21,25 +21,33 @@ impl MerklePath {
         }
     }
 
-    /// Verify the Merkle path using SHA3-256
+    /// Verify the Merkle path using the canonical, position-bound format.
     pub fn verify(&self) -> bool {
-        let mut current = self.leaf_hash;
-
-        for (i, &sibling) in self.proof_elements.iter().enumerate() {
-            let mut hasher = Sha3_256::new();
-            if self.path_indices[i] {
-                // Current is right child
-                hasher.update(&sibling);
-                hasher.update(&current);
-            } else {
-                // Current is left child
-                hasher.update(&current);
-                hasher.update(&sibling);
-            }
-            current = hasher.finalize().into();
+        let depth = self.proof_elements.len();
+        if self.path_indices.len() != depth || depth >= usize::BITS as usize {
+            return false;
         }
 
-        current == self.root_hash
+        let Some(padded_len) = 1usize.checked_shl(depth as u32) else {
+            return false;
+        };
+        let mut leaf_index = 0usize;
+        for (level, is_right) in self.path_indices.iter().enumerate() {
+            if *is_right {
+                let Some(bit) = 1usize.checked_shl(level as u32) else {
+                    return false;
+                };
+                leaf_index |= bit;
+            }
+        }
+
+        verify_merkle_path(
+            &self.root_hash,
+            &self.leaf_hash,
+            leaf_index,
+            padded_len,
+            &self.proof_elements,
+        )
     }
 }
 
@@ -91,5 +99,47 @@ impl ProofOfIdentity {
 
     pub fn verify_proof(&self, proof: &IdentityProof) -> bool {
         proof.merkle_path.verify()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bleep_crypto::merkle_commitment::{
+        merkle_hash_node, version_merkle_root,
+    };
+
+    #[test]
+    fn verifies_canonical_position_bound_path() {
+        let leaf_hash = [1u8; 32];
+        let sibling_at_level_0 = [2u8; 32];
+        let sibling_at_level_1 = [3u8; 32];
+        let left_parent = merkle_hash_node(&leaf_hash, &sibling_at_level_0, 1);
+        let tree_root = merkle_hash_node(&sibling_at_level_1, &left_parent, 0);
+        let proof = MerklePath::new(
+            leaf_hash,
+            version_merkle_root(&tree_root),
+            vec![sibling_at_level_0, sibling_at_level_1],
+            vec![false, true],
+        );
+
+        assert!(proof.verify());
+    }
+
+    #[test]
+    fn rejects_path_direction_length_mismatch() {
+        let proof = MerklePath::new([1u8; 32], [2u8; 32], vec![[3u8; 32]], vec![]);
+        assert!(!proof.verify());
+    }
+
+    #[test]
+    fn rejects_unrepresentable_path_depth() {
+        let proof = MerklePath::new(
+            [1u8; 32],
+            [2u8; 32],
+            vec![[3u8; 32]; usize::BITS as usize],
+            vec![false; usize::BITS as usize],
+        );
+        assert!(!proof.verify());
     }
 }

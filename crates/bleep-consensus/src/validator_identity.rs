@@ -27,6 +27,10 @@ pub struct ValidatorIdentity {
     /// Hex-encoded SPHINCS+ public key used to verify validator signatures.
     pub signing_key_id: String,
 
+    /// Ristretto public key used to verify proposer VRF proofs.
+    #[serde(default)]
+    pub vrf_public_key: Vec<u8>,
+
     /// Stake amount in microBLEEP
     pub stake: u128,
 
@@ -81,6 +85,7 @@ impl ValidatorIdentity {
             id,
             kyber_public_key,
             signing_key_id,
+            vrf_public_key: Vec::new(),
             stake,
             state: ValidatorState::Inactive,
             reputation: 1.0,
@@ -91,6 +96,27 @@ impl ValidatorIdentity {
             exited_epoch: None,
             total_slashed: 0,
         })
+    }
+
+    pub fn new_with_vrf_public_key(
+        id: String,
+        kyber_public_key: Vec<u8>,
+        signing_key_id: String,
+        vrf_public_key: Vec<u8>,
+        stake: u128,
+        joined_epoch: u64,
+    ) -> Result<Self, String> {
+        let mut identity = Self::new(
+            id,
+            kyber_public_key,
+            signing_key_id,
+            stake,
+            joined_epoch,
+        )?;
+        schnorrkel::PublicKey::from_bytes(&vrf_public_key)
+            .map_err(|error| format!("Invalid proposer VRF public key: {error}"))?;
+        identity.vrf_public_key = vrf_public_key;
+        Ok(identity)
     }
 
     /// Activate this validator for consensus participation.
@@ -327,6 +353,10 @@ impl ValidatorRegistry {
     /// Get a validator by ID (immutable reference).
     pub fn get(&self, id: &str) -> Option<&ValidatorIdentity> {
         self.validators.get(id)
+    }
+
+    pub fn get_all_validators(&self) -> Vec<&ValidatorIdentity> {
+        self.validators.values().collect()
     }
 
     /// Get a validator by ID (mutable reference).

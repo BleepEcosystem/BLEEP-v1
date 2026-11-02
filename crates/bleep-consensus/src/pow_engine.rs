@@ -251,7 +251,7 @@ impl ConsensusEngine for EmergencyPoWEngine {
             previous_hash,
             epoch_state.epoch_id,
             ConsensusMode::EmergencyPow,
-            1,             // protocol_version
+            bleep_core::block::CURRENT_PROTOCOL_VERSION,
             String::new(), // shard_registry_root
             0,             // shard_id
             String::new(), // shard_state_root

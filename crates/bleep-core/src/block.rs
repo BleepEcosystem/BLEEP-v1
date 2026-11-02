@@ -47,6 +47,17 @@ pub const SPHINCS_PK_LEN: usize = 64;
 pub const SPHINCS_SIG_LEN: usize = 49_856;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
+/// Current non-genesis block protocol version. Version 5 requires a verifiable
+/// VRF proof envelope in every block's proof payload.
+pub const CURRENT_PROTOCOL_VERSION: u32 = 5;
+/// Genesis uses a separately pinned version; its chain ID is now committed in
+/// the canonical header hash as part of the network-specific genesis anchor.
+pub const GENESIS_PROTOCOL_VERSION: u32 = 2;
+pub const VRF_STARK_ENVELOPE_MAGIC: &[u8] = b"BLEEP_VRF_STARK_V1";
+pub const VRF_OUTPUT_LEN: usize = 32;
+pub const VRF_PROOF_LEN: usize = 64;
+pub const VRF_STARK_ENVELOPE_HEADER_LEN: usize =
+    VRF_STARK_ENVELOPE_MAGIC.len() + VRF_OUTPUT_LEN + VRF_PROOF_LEN;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
@@ -110,6 +121,8 @@ pub enum ConsensusMode {
 pub struct BlockHeader {
     pub index: u64,
     pub timestamp: u64,
+    #[serde(default)]
+    pub chain_id: String,
     pub previous_hash: String,
     pub merkle_root: String,
     pub validator_signature: Vec<u8>,
@@ -159,6 +172,7 @@ impl BlockHeader {
         Self {
             index: block.index,
             timestamp: block.timestamp,
+            chain_id: block.chain_id.clone(),
             previous_hash: block.previous_hash.clone(),
             merkle_root: block.merkle_root.clone(),
             validator_signature: block.validator_signature.clone(),
@@ -174,16 +188,24 @@ impl BlockHeader {
     }
 
     /// Encode the semantic header fields in a versioned, fixed-width format.
-    ///
-    /// String-backed hash fields are SHA3-256 normalized to 32 bytes; integer
-    /// fields use little-endian encoding and consensus mode has an explicit
-    /// stable discriminant. Signature and proof payloads are authentication
-    /// artifacts and are intentionally excluded.
+    /// For protocol v5, the VRF output is committed while proof bytes remain
+    /// authentication artifacts excluded from the hash.
     pub fn canonical_hash_preimage(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(BLOCK_HEADER_HASH_PREIMAGE_LEN);
-        bytes.extend_from_slice(BLOCK_HEADER_HASH_DOMAIN);
+        let is_vrf_protocol = self.protocol_version >= 5;
+        let domain = if is_vrf_protocol {
+            BLOCK_HEADER_HASH_DOMAIN_V3
+        } else {
+            BLOCK_HEADER_HASH_DOMAIN_V2
+        };
+        let mut bytes = Vec::with_capacity(if is_vrf_protocol {
+            BLOCK_HEADER_HASH_PREIMAGE_LEN_V5
+        } else {
+            BLOCK_HEADER_HASH_PREIMAGE_LEN_V4
+        });
+        bytes.extend_from_slice(domain);
         bytes.extend_from_slice(&self.index.to_le_bytes());
         bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        append_fixed_hash_field(&mut bytes, &self.chain_id);
         append_fixed_hash_field(&mut bytes, &self.previous_hash);
         append_fixed_hash_field(&mut bytes, &self.merkle_root);
         bytes.extend_from_slice(&self.epoch_id.to_le_bytes());
@@ -193,7 +215,26 @@ impl BlockHeader {
         bytes.extend_from_slice(&self.shard_id.to_le_bytes());
         append_fixed_hash_field(&mut bytes, &self.shard_state_root);
         bytes.extend_from_slice(&self.sig_commitment_root);
-        debug_assert_eq!(bytes.len(), BLOCK_HEADER_HASH_PREIMAGE_LEN);
+        if is_vrf_protocol {
+            let output = self
+                .zk_proof
+                .strip_prefix(VRF_STARK_ENVELOPE_MAGIC)
+                .filter(|proof| proof.len() >= VRF_OUTPUT_LEN)
+                .map(|proof| &proof[..VRF_OUTPUT_LEN]);
+            if let Some(output) = output {
+                bytes.extend_from_slice(output);
+            } else {
+                bytes.extend_from_slice(&[0; VRF_OUTPUT_LEN]);
+            }
+        }
+        debug_assert_eq!(
+            bytes.len(),
+            if is_vrf_protocol {
+                BLOCK_HEADER_HASH_PREIMAGE_LEN_V5
+            } else {
+                BLOCK_HEADER_HASH_PREIMAGE_LEN_V4
+            }
+        );
         bytes
     }
 
@@ -203,8 +244,11 @@ impl BlockHeader {
     }
 }
 
-const BLOCK_HEADER_HASH_DOMAIN: &[u8] = b"BLEEP_BLOCK_HEADER_V1";
-const BLOCK_HEADER_HASH_PREIMAGE_LEN: usize = BLOCK_HEADER_HASH_DOMAIN.len() + 197;
+const BLOCK_HEADER_HASH_DOMAIN_V2: &[u8] = b"BLEEP_BLOCK_HEADER_V2";
+const BLOCK_HEADER_HASH_DOMAIN_V3: &[u8] = b"BLEEP_BLOCK_HEADER_V3";
+const BLOCK_HEADER_HASH_PREIMAGE_LEN_V4: usize = BLOCK_HEADER_HASH_DOMAIN_V2.len() + 229;
+const BLOCK_HEADER_HASH_PREIMAGE_LEN_V5: usize =
+    BLOCK_HEADER_HASH_DOMAIN_V3.len() + 229 + VRF_OUTPUT_LEN;
 
 fn append_fixed_hash_field(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(&Sha3_256::digest(value.as_bytes()));
@@ -237,6 +281,8 @@ impl CompactBlock {
 pub struct Block {
     pub index: u64,
     pub timestamp: u64,
+    #[serde(default)]
+    pub chain_id: String,
     pub transactions: Vec<Transaction>,
     pub previous_hash: String,
     pub merkle_root: String,
@@ -268,6 +314,13 @@ impl Block {
     pub fn genesis() -> Self {
         let mut genesis = Self::new(0, vec![], "0".to_string());
         genesis.timestamp = 0;
+        genesis.protocol_version = GENESIS_PROTOCOL_VERSION;
+        genesis
+    }
+
+    pub fn genesis_for_chain(chain_id: impl Into<String>) -> Self {
+        let mut genesis = Self::genesis();
+        genesis.chain_id = chain_id.into();
         genesis
     }
 
@@ -277,6 +330,7 @@ impl Block {
         Self {
             index,
             timestamp,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             transactions,
             previous_hash,
             merkle_root,
@@ -284,7 +338,7 @@ impl Block {
             zk_proof: vec![],
             epoch_id: 0,
             consensus_mode: ConsensusMode::PosNormal,
-            protocol_version: 2, // Sprint 6 bumps protocol version
+            protocol_version: CURRENT_PROTOCOL_VERSION,
             shard_registry_root: "0".repeat(64),
             shard_id: 0,
             shard_state_root: "0".repeat(64),
@@ -309,6 +363,7 @@ impl Block {
         Self {
             index,
             timestamp,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             transactions,
             previous_hash,
             merkle_root,
@@ -478,7 +533,32 @@ impl Block {
         if self.zk_proof.is_empty() {
             return self.index == 0 && self.validator_signature.is_empty();
         }
-        self.zk_proof.starts_with(EXTENDED_STARK_MAGIC) && self.verify_extended_stark_zkp()
+        if self.protocol_version >= 5 {
+            let Some((_, _, stark_proof)) = self.vrf_stark_proof_parts() else {
+                return false;
+            };
+            stark_proof.starts_with(EXTENDED_STARK_MAGIC)
+                && self.verify_extended_stark_zkp(stark_proof)
+        } else {
+            self.zk_proof.starts_with(EXTENDED_STARK_MAGIC)
+                && self.verify_extended_stark_zkp(&self.zk_proof)
+        }
+    }
+
+    pub fn vrf_stark_proof_parts(&self) -> Option<(&[u8], &[u8], &[u8])> {
+        if !self.zk_proof.starts_with(VRF_STARK_ENVELOPE_MAGIC)
+            || self.zk_proof.len() <= VRF_STARK_ENVELOPE_HEADER_LEN
+        {
+            return None;
+        }
+        let output_start = VRF_STARK_ENVELOPE_MAGIC.len();
+        let proof_start = output_start + VRF_OUTPUT_LEN;
+        let stark_start = proof_start + VRF_PROOF_LEN;
+        Some((
+            &self.zk_proof[output_start..proof_start],
+            &self.zk_proof[proof_start..stark_start],
+            &self.zk_proof[stark_start..],
+        ))
     }
 
     // ── Extended STARK verification ───────────────────────────────────────────
@@ -488,8 +568,7 @@ impl Block {
     /// The `zk_proof` bytes must start with `EXTENDED_STARK_MAGIC` (9 bytes),
     /// followed by 232 bytes of fixed-width public inputs, followed by the
     /// Winterfell `StarkProof` bytes.
-    fn verify_extended_stark_zkp(&self) -> bool {
-        let proof_bytes = &self.zk_proof;
+    fn verify_extended_stark_zkp(&self, proof_bytes: &[u8]) -> bool {
         let magic_len = EXTENDED_STARK_MAGIC.len();
         let total_header = magic_len + EXT_PUB_INPUTS_LEN;
 
@@ -812,13 +891,13 @@ mod tests {
             BlockHeader::from_block(&first)
                 .canonical_hash_preimage()
                 .len(),
-            BLOCK_HEADER_HASH_PREIMAGE_LEN
+            BLOCK_HEADER_HASH_PREIMAGE_LEN_V5
         );
         assert_eq!(
             BlockHeader::from_block(&second)
                 .canonical_hash_preimage()
                 .len(),
-            BLOCK_HEADER_HASH_PREIMAGE_LEN
+            BLOCK_HEADER_HASH_PREIMAGE_LEN_V5
         );
     }
 
@@ -829,5 +908,18 @@ mod tests {
         block.validator_signature = vec![1, 2, 3];
         block.zk_proof = vec![4, 5, 6];
         assert_eq!(block.compute_hash(), hash);
+    }
+
+    #[test]
+    fn legacy_headers_default_chain_id_to_empty() {
+        let header = BlockHeader::from_block(&Block::new(1, vec![], "parent".to_string()));
+        let mut serialized = serde_json::to_value(header).unwrap();
+        serialized.as_object_mut().unwrap().remove("chain_id");
+        let deserialized: BlockHeader = serde_json::from_value(serialized).unwrap();
+        assert!(deserialized.chain_id.is_empty());
+        assert_eq!(
+            deserialized.canonical_hash_preimage().len(),
+            BLOCK_HEADER_HASH_PREIMAGE_LEN_V5
+        );
     }
 }

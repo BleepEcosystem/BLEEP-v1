@@ -110,7 +110,7 @@ All secret key types are wrapped in `zeroize::Zeroizing<Vec<u8>>` and zeroed on 
 
 ### Security Hardening
 
-- Internal security audit: 16,127 lines of Rust across six crates reviewed.
+- Internal engineering audit: 49,677 lines of Rust across six core crates reviewed.
 - 72-hour continuous adversarial test suite: 10 scenarios, all passing.
 - CI-integrated fuzz targets: Merkle insertion, state transitions, transaction signing, Merkle
   commitment verification.
@@ -186,7 +186,7 @@ hop key material — not in the block production critical path.
 | Low | 3 | 3 | 0 | All resolved |
 | Informational | 2 | 1 | 1 | SA-I2: NTP drift guard; deferred as mainnet gate |
 
-*Scope: 16,127 lines of Rust across six crates. Cleared for Phase 6 public testnet preparation.*
+An internal engineering audit of the six core crates (49,677 lines) was completed. An independent third-party security audit has not been performed. No external party has attested to the security of this software.
 
 ### Adversarial Test Results
 

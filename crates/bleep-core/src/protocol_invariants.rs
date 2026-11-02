@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 
+pub const TOKEN_DECIMALS: u32 = 8;
+pub const BLEEP_UNIT: u128 = 10u128.pow(TOKEN_DECIMALS);
+pub const MAX_TOKEN_SUPPLY: u128 = 200_000_000 * BLEEP_UNIT;
+
 /// Error type for invariant violations
 /// Each violation includes cryptographic proof of what went wrong
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,12 +187,12 @@ pub struct EconomicConfig {
 impl Default for EconomicConfig {
     fn default() -> Self {
         Self {
-            supply_cap: 1_000_000_000 * 10_u128.pow(18), // 1B tokens with 18 decimals
-            max_annual_reward: 50_000_000 * 10_u128.pow(18), // 5% annually
-            min_stake_per_validator: 32 * 10_u128.pow(18), // 32 tokens minimum
-            max_validator_stake: 100_000 * 10_u128.pow(18), // 100k token limit per validator
-            consensus_slash_rate: 1000,                  // 10% for consensus violations
-            misbehavior_slash_rate: 5000,                // 50% for misbehavior
+            supply_cap: MAX_TOKEN_SUPPLY,
+            max_annual_reward: MAX_TOKEN_SUPPLY / 20, // 5% annually
+            min_stake_per_validator: 32 * BLEEP_UNIT,
+            max_validator_stake: 100_000 * BLEEP_UNIT,
+            consensus_slash_rate: 1000,   // 10% for consensus violations
+            misbehavior_slash_rate: 5000, // 50% for misbehavior
         }
     }
 }
@@ -590,6 +594,17 @@ mod tests {
     }
 
     #[test]
+    fn test_default_economic_config_uses_canonical_token_denomination() {
+        let config = EconomicConfig::default();
+        assert_eq!(TOKEN_DECIMALS, 8);
+        assert_eq!(config.supply_cap, MAX_TOKEN_SUPPLY);
+        assert_eq!(config.supply_cap, 200_000_000 * BLEEP_UNIT);
+        assert_eq!(config.max_annual_reward, 10_000_000 * BLEEP_UNIT);
+        assert_eq!(config.min_stake_per_validator, 32 * BLEEP_UNIT);
+        assert_eq!(config.max_validator_stake, 100_000 * BLEEP_UNIT);
+    }
+
+    #[test]
     fn test_double_finality_detection() {
         let mut engine = ProtocolInvariantEngine::new(1_000_000).unwrap();
 
@@ -613,11 +628,11 @@ mod tests {
 
         // Valid registration
         engine
-            .register_validator("validator_1".to_string(), 32 * 10_u128.pow(18), 0)
+            .register_validator("validator_1".to_string(), 32 * BLEEP_UNIT, 0)
             .unwrap();
 
         // Duplicate registration should fail
-        let result = engine.register_validator("validator_1".to_string(), 32 * 10_u128.pow(18), 0);
+        let result = engine.register_validator("validator_1".to_string(), 32 * BLEEP_UNIT, 0);
         assert!(result.is_err());
     }
 
@@ -625,7 +640,7 @@ mod tests {
     fn test_slashing_prevention_overstake() {
         let mut engine = ProtocolInvariantEngine::new(1_000_000).unwrap();
 
-        let stake = 32 * 10_u128.pow(18);
+        let stake = 32 * BLEEP_UNIT;
         engine
             .register_validator("validator_1".to_string(), stake, 0)
             .unwrap();

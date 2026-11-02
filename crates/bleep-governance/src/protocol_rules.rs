@@ -9,6 +9,7 @@
 // 5. No hard-coded magic values remain in consensus logic
 // 6. All rules must satisfy invariant constraints before use
 
+use bleep_core::protocol_invariants::BLEEP_UNIT;
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -334,8 +335,8 @@ impl ProtocolRuleSetFactory {
 
         rules.add_rule(ProtocolRule::new(
             "MIN_VALIDATOR_STAKE".to_string(),
-            1000u128 * 10u128.pow(18), // 1000 BLP with 18 decimals
-            RuleBounds::new(100u128 * 10u128.pow(18), 10_000u128 * 10u128.pow(18))?,
+            1000u128 * BLEEP_UNIT,
+            RuleBounds::new(100u128 * BLEEP_UNIT, 10_000u128 * BLEEP_UNIT)?,
             "Minimum stake to become a validator".to_string(),
             true,
             0,

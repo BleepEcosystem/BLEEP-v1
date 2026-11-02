@@ -18,8 +18,8 @@ fn run_state_engine() -> Result<(), Box<dyn Error>> {
     let mut state = StateManager::new();
     info!("🔄 Opened state manager.");
 
-    state.create_snapshot()?;
-    info!("💾 State snapshot saved.");
+    let snapshot_path = state.create_snapshot()?;
+    info!("💾 State snapshot saved to {}.", snapshot_path.display());
 
     Ok(())
 }
