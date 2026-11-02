@@ -71,9 +71,9 @@ pub trait GossipBroadcaster: Send + Sync {
 // Outbound helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Maximum size of a single SAL gossip payload. This is separate from the
-/// 4 MiB P2P frame limit.
-pub const MAX_SAL_MSG_BYTES: usize = 2 * 1024 * 1024 - 1024;
+/// Maximum serialized SAL payload, reserving room for transport encryption,
+/// the SPHINCS+ signature, and framing within the 2 MiB P2P frame limit.
+pub const MAX_SAL_MSG_BYTES: usize = 2 * 1024 * 1024 - 64 * 1024;
 
 /// Broadcast a typed `SigAvailabilityMessage` through `broadcaster`.
 ///

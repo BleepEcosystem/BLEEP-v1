@@ -884,7 +884,7 @@ The faucet is disabled unless `BLEEP_FAUCET_ENABLED=true` and
 | ML-KEM-1024 secret key | 3,168 bytes | `pqcrypto-mlkem` |
 | State trie depth | 256 levels | `TRIE_DEPTH` |
 | Merkle proof size | 8,192 bytes (fixed) | `SparseMerkleTrie` |
-| Gossip max message size | 2,097,152 bytes (2 MiB) | `MAX_GOSSIP_MSG_BYTES` |
+| Maximum P2P frame body | 2,097,152 bytes (2 MiB) | `MAX_FRAME_BYTES` |
 | STARK trace columns | 48 | `BlockValidityAir` |
 | STARK proof setup | **None** | `bleep-zkp` |
 | JWT entropy minimum | 3.5 bits/byte (Shannon) | `session.rs` |

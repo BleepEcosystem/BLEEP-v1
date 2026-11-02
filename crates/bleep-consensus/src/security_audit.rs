@@ -150,12 +150,12 @@ impl AuditReport {
                     severity: Severity::High,
                     crate_name: "bleep-p2p".into(),
                     location: "bleep-p2p::message_protocol".into(),
-                    title: "Missing block size cap allows memory exhaustion via oversized gossip messages".into(),
-                    description: "The P2P protocol enforces a 4 MiB MAX_FRAME_BYTES cap, but the claimed 2 MiB gossip cap and repeat-offender rate counter/temporary ban are not implemented. This finding remains open for the missing tighter gossip-specific limit and peer penalty.".into(),
+                    title: "Missing repeated-offender throttling for oversized frames".into(),
+                    description: "The 2 MiB frame-body cap bounds per-frame allocations before bincode deserialization. The peer manager does not count repeated oversized frames or temporarily ban the sender, so repeated attempts can still consume network and decode resources.".into(),
                     status: FindingStatus::Open {
-                        reason: "No MAX_GOSSIP_MSG_BYTES gate or oversized-message peer counter/ban is present; the existing frame cap is 4 MiB.".into(),
+                        reason: "The 2 MiB receive-boundary frame-body cap is implemented; repeated-offender tracking and temporary bans remain absent.".into(),
                     },
-                    cwe: Some("CWE-789: Memory Allocation with Excessive Size Value".into()),
+                    cwe: Some("CWE-770: Allocation of Resources Without Limits or Throttling".into()),
                 },
 
                 // ── MEDIUM ────────────────────────────────────────────────────

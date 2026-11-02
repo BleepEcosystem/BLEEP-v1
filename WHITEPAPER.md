@@ -768,7 +768,7 @@ All values are drawn from the production Rust source at Protocol Version 5. Para
 | ML-KEM-1024 secret key  | 3,168 bytes             | pqcrypto-mlkem              |
 | State trie depth        | 256 levels              | TRIE_DEPTH                  |
 | Merkle proof size       | 8,192 bytes (fixed)     | SparseMerkleTrie            |
-| Gossip max message size | 2,097,152 bytes (2 MiB) | MAX_GOSSIP_MSG_BYTES        |
+| Maximum P2P frame body | 2,097,152 bytes (2 MiB) | MAX_FRAME_BYTES              |
 | Gossip fanout           | 8                       | bleep-p2p                   |
 | Kademlia k-bucket size  | 20                      | bleep-p2p                   |
 | STARK trace columns     | 48                      | ExtendedBlockValidityAir    |

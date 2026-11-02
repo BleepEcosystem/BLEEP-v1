@@ -929,7 +929,7 @@ Protocol parameters
   Gossip fanout             8
   Kademlia k-bucket         20
   Onion routing max hops    6
-  Max gossip message        2 MiB
+  Max P2P frame body        2 MiB (all frame types)
   SPHINCS+ signature        7,856 bytes
   Kyber-1024 public key     1,568 bytes
   SMT depth                 256 levels

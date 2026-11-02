@@ -30,8 +30,8 @@ use crate::types::{unix_now, MessageType, NodeId, SecureMessage};
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Maximum allowed message payload size (4 MiB).
-const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum encoded P2P frame body, excluding the 4-byte prefix; checked before allocation.
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 /// Anti-replay timestamp tolerance (seconds).
 const REPLAY_WINDOW_SECS: u64 = 30;
 /// Maximum number of live nonces retained for replay protection.
@@ -253,6 +253,13 @@ impl MessageProtocol {
     }
 
     async fn decode_wire(stream: &mut TcpStream) -> P2PResult<WireFrame> {
+        let payload = Self::read_frame_payload(stream).await?;
+        bincode::serde::decode_from_slice::<WireFrame, _>(&payload, bincode::config::standard())
+            .map(|(v, _)| v)
+            .map_err(|e| P2PError::Serialization(e.to_string()))
+    }
+
+    async fn read_frame_payload(stream: &mut TcpStream) -> P2PResult<Vec<u8>> {
         let mut len_buf = [0u8; 4];
         timeout(READ_TIMEOUT, stream.read_exact(&mut len_buf))
             .await
@@ -273,9 +280,7 @@ impl MessageProtocol {
                 addr: "unknown".into(),
             })?
             .map_err(P2PError::Io)?;
-        bincode::serde::decode_from_slice::<WireFrame, _>(&payload, bincode::config::standard())
-            .map(|(v, _)| v)
-            .map_err(|e| P2PError::Serialization(e.to_string()))
+        Ok(payload)
     }
 
     async fn write_wire(stream: &mut TcpStream, frame: &WireFrame) -> P2PResult<()> {
@@ -427,31 +432,7 @@ impl MessageProtocol {
 
     /// Decode a length-prefixed frame from a TCP stream.
     pub async fn decode_frame(stream: &mut TcpStream) -> P2PResult<SecureMessage> {
-        // Read 4-byte length header
-        let mut len_buf = [0u8; 4];
-        timeout(READ_TIMEOUT, stream.read_exact(&mut len_buf))
-            .await
-            .map_err(|_| P2PError::ConnectionTimeout {
-                addr: "unknown".into(),
-            })?
-            .map_err(P2PError::Io)?;
-
-        let frame_len = u32::from_be_bytes(len_buf) as usize;
-        if frame_len > MAX_FRAME_BYTES {
-            return Err(P2PError::Serialization(format!(
-                "Frame too large: {} bytes",
-                frame_len
-            )));
-        }
-
-        let mut payload = vec![0u8; frame_len];
-        timeout(READ_TIMEOUT, stream.read_exact(&mut payload))
-            .await
-            .map_err(|_| P2PError::ConnectionTimeout {
-                addr: "unknown".into(),
-            })?
-            .map_err(P2PError::Io)?;
-
+        let payload = Self::read_frame_payload(stream).await?;
         bincode::serde::decode_from_slice::<SecureMessage, _>(&payload, bincode::config::standard())
             .map(|(v, _)| v)
             .map_err(|e| P2PError::Serialization(e.to_string()))
@@ -735,6 +716,28 @@ mod tests {
             timestamp: unix_now(),
         };
         assert!(MessageProtocol::encode_frame(&msg).is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_reading_or_deserializing_body() {
+        assert_eq!(MAX_FRAME_BYTES, 2 * 1024 * 1024);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sender = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            let frame_len = (MAX_FRAME_BYTES + 1) as u32;
+            stream.write_all(&frame_len.to_be_bytes()).await.unwrap();
+        });
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        let result = timeout(
+            Duration::from_secs(1),
+            MessageProtocol::read_frame_payload(&mut stream),
+        )
+        .await
+        .expect("oversized frame should be rejected without waiting for its body");
+        assert!(matches!(result, Err(P2PError::Serialization(_))));
+        sender.await.unwrap();
     }
 
     #[tokio::test]
