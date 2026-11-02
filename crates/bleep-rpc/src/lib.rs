@@ -444,6 +444,8 @@ pub struct StakeRequest {
     proof: Option<String>,
     #[serde(default)]
     kyber_public_key: Option<String>,
+    #[serde(default)]
+    vrf_public_key: Option<String>,
 }
 
 impl StakeRequest {
@@ -460,6 +462,7 @@ fn validator_stake_payload(
     timestamp: u64,
     nonce: u64,
     kyber_public_key: &[u8],
+    vrf_public_key: &[u8],
 ) -> [u8; 32] {
     bleep_crypto::tx_signer::validator_stake_payload(
         chain_id,
@@ -469,6 +472,7 @@ fn validator_stake_payload(
         timestamp,
         nonce,
         kyber_public_key,
+        vrf_public_key,
     )
 }
 
@@ -477,6 +481,7 @@ fn register_validator_stake(
     signing_public_key: Vec<u8>,
     proof: Vec<u8>,
     kyber_public_key: Vec<u8>,
+    vrf_public_key: Vec<u8>,
     state: &RpcState,
 ) -> Result<StakeResp, (warp::http::StatusCode, String)> {
     let requested = u128::from(req.amount);
@@ -499,7 +504,6 @@ fn register_validator_stake(
             )
         })?;
     let kyber_public_key = kyber_public_key.to_vec();
-
     let account = bleep_crypto::tx_signer::derive_account_address(&signing_public_key);
     let validator_id = format!("val-{}-{}", req.label, req.timestamp);
     let bond_account = format!("bleep:validator-bond:{validator_id}");
@@ -535,11 +539,13 @@ fn register_validator_stake(
         req.timestamp,
         nonce,
         &kyber_public_key,
+        &vrf_public_key,
+        &vrf_public_key,
     );
     if !verify_tx_signature(&request_hash, &proof, &signing_public_key) {
         return Err((
             warp::http::StatusCode::UNAUTHORIZED,
-            "validator key did not sign the stake and Kyber-key binding".into(),
+            "validator key did not sign the stake and validator-key bindings".into(),
         ));
     }
 
@@ -548,10 +554,11 @@ fn register_validator_stake(
         .load(std::sync::atomic::Ordering::Relaxed)
         / blocks_per_epoch;
     let signing_key_id = hex::encode(&signing_public_key);
-    let identity = ValidatorIdentity::new(
+    let identity = ValidatorIdentity::new_with_vrf_public_key(
         validator_id.clone(),
         kyber_public_key,
         signing_key_id,
+        vrf_public_key,
         requested,
         current_epoch,
     )
@@ -1022,6 +1029,22 @@ pub fn rpc_routes_with_state(
                         return Ok::<_, warp::Rejection>(resp);
                     }
                 };
+                let vrf_public_key = match req
+                    .vrf_public_key
+                    .as_deref()
+                    .and_then(|value| hex::decode(value).ok())
+                {
+                    Some(key) => key,
+                    None => {
+                        let resp = warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "vrf_public_key is required".into(),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        );
+                        return Ok::<_, warp::Rejection>(resp);
+                    }
+                };
 
                 let Some(auth_service) = st.auth_service.as_ref() else {
                     let resp = warp::reply::with_status(
@@ -1054,6 +1077,7 @@ pub fn rpc_routes_with_state(
                     signing_public_key,
                     proof,
                     kyber_public_key,
+                    vrf_public_key,
                     &st,
                 ) {
                     Ok(resp) => Ok::<_, warp::Rejection>(warp::reply::with_status(
@@ -4277,6 +4301,9 @@ mod tests {
         let kyber_public_key = kyber_key.to_vec();
         let (substituted_key, _) = KyberKem::keygen().unwrap();
         let substituted_key = substituted_key.to_vec();
+        let vrf_secret = [0x29; 128];
+        let vrf_public_key =
+            PoSConsensusEngine::derive_vrf_public_key(&vrf_secret).unwrap();
         let amount = 3_000;
         let timestamp = now_secs();
         let payload = validator_stake_payload(
@@ -4287,6 +4314,7 @@ mod tests {
             timestamp,
             0,
             &kyber_public_key,
+            &vrf_public_key,
         );
         let proof = sign_tx_payload(&payload, &secret_key).unwrap();
         let req = StakeRequest {
@@ -4297,6 +4325,7 @@ mod tests {
             signing_public_key: Some(hex::encode(&signing_public_key)),
             proof: Some(hex::encode(&proof)),
             kyber_public_key: Some(hex::encode(&kyber_public_key)),
+            vrf_public_key: Some(hex::encode(&vrf_public_key)),
         };
 
         let state_manager = Arc::new(Mutex::new(StateManager::new()));
@@ -4315,6 +4344,7 @@ mod tests {
             signing_public_key.clone(),
             proof.clone(),
             substituted_key,
+            vrf_public_key.clone(),
             &state,
         ) {
             Ok(_) => panic!("a mismatched Kyber key must not register"),
@@ -4325,9 +4355,15 @@ mod tests {
         assert_eq!(state_manager.lock().get_nonce(&account), 0);
         assert_eq!(registry.lock().active_validator_count(), 0);
 
-        let response =
-            register_validator_stake(req, signing_public_key, proof, kyber_public_key, &state)
-                .unwrap();
+        let response = register_validator_stake(
+            req,
+            signing_public_key,
+            proof,
+            kyber_public_key,
+            vrf_public_key.clone(),
+            &state,
+        )
+        .unwrap();
         let bond_account = format!("bleep:validator-bond:{}", response.validator_id);
         assert_eq!(response.status, "candidate");
         assert_eq!(response.stake, u128::from(amount));
@@ -4338,6 +4374,7 @@ mod tests {
         let registry = registry.lock();
         let validator = registry.get(&response.validator_id).unwrap();
         assert_eq!(validator.state, bleep_consensus::ValidatorState::Inactive);
+        assert_eq!(validator.vrf_public_key, vrf_public_key);
         assert_eq!(validator.joined_epoch, 2);
         assert_eq!(registry.active_validator_count(), 0);
     }

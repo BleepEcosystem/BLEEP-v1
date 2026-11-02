@@ -117,6 +117,91 @@ impl SalValidatorRegistry for ValidatorRegistryAdapter {
     }
 }
 
+fn verify_pos_vrf_block(
+    block: &Block,
+    parent: &Block,
+    active_validators: &[ValidatorIdentity],
+) -> Result<(), String> {
+    if block.index != parent.index.saturating_add(1)
+        || block.previous_hash != parent.compute_hash()
+    {
+        return Err("Block does not extend the supplied parent".into());
+    }
+
+    let proposer_signing_key = block
+        .validator_signature
+        .get(..bleep_core::block::SPHINCS_PK_LEN)
+        .ok_or_else(|| "Block is missing its proposer signing key".to_string())?;
+    let proposer_signing_key_id = hex::encode(proposer_signing_key);
+    let proposer = active_validators
+        .iter()
+        .find(|validator| {
+            validator.can_participate()
+                && validator
+                    .signing_key_id
+                    .eq_ignore_ascii_case(&proposer_signing_key_id)
+        })
+        .ok_or_else(|| "Block signer is not an active validator".to_string())?;
+
+    let parent_vrf_public_key = if parent.protocol_version >= 5 {
+        let parent_signing_key = parent
+            .validator_signature
+            .get(..bleep_core::block::SPHINCS_PK_LEN)
+            .ok_or_else(|| "Parent block is missing its proposer signing key".to_string())?;
+        let parent_signing_key_id = hex::encode(parent_signing_key);
+        Some(
+            active_validators
+                .iter()
+                .find(|validator| {
+                    validator
+                        .signing_key_id
+                        .eq_ignore_ascii_case(&parent_signing_key_id)
+                })
+                .map(|validator| validator.vrf_public_key.as_slice())
+                .ok_or_else(|| "Parent proposer VRF key is not registered".to_string())?,
+        )
+    } else {
+        None
+    };
+    let previous_randomness =
+        bleep_consensus::pos_engine::PoSConsensusEngine::randomness_from_parent_block(
+            parent,
+            parent_vrf_public_key,
+        )?;
+
+    let stakes = active_validators
+        .iter()
+        .filter(|validator| validator.can_participate())
+        .map(|validator| {
+            Ok(bleep_consensus::pos_engine::ValidatorStake {
+                id: validator.id.clone(),
+                stake: u64::try_from(validator.effective_stake())
+                    .map_err(|_| format!("Validator {} stake exceeds u64", validator.id))?,
+                active: true,
+                slashing_count: 0,
+                vrf_public_key: validator.vrf_public_key.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let selected = bleep_consensus::pos_engine::PoSConsensusEngine::select_proposer(
+        block.index,
+        &stakes,
+        &previous_randomness,
+    )
+    .map_err(|error| error.to_string())?;
+    if selected != proposer.id {
+        return Err(format!(
+            "Block proposer {} is not the selected proposer {}",
+            proposer.id, selected
+        ));
+    }
+    bleep_consensus::pos_engine::PoSConsensusEngine::verify_block_vrf(
+        block,
+        &proposer.vrf_public_key,
+    )?;
+    Ok(())
+}
+
 struct TxPoolSigCache {
     tx_pool: Arc<TransactionPool>,
 }
@@ -519,10 +604,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         // S-06: pass the real SPHINCS+ public key bytes so SlashingEngine can
         // cryptographically verify evidence before slashing this validator.
         let signing_key_id = hex::encode(&sphincs_pk);
-        let genesis_validator = ValidatorIdentity::new(
+        let vrf_public_key =
+            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&sphincs_sk)?;
+        let genesis_validator = ValidatorIdentity::new_with_vrf_public_key(
             validator_id.clone(),
             real_kyber_pk,
             signing_key_id,
+            vrf_public_key,
             1_000_000u128, // initial stake (matches BlockProducer config)
             0,             // genesis epoch
         );
@@ -973,7 +1061,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 continue;
                             };
                             let signer_key_id = hex::encode(signer_pk);
-                            let (proposer_id, validator_stakes) = {
+                            let (proposer_id, validator_stakes, active_validators) = {
                                 let registry = inbound_validators.lock();
                                 let active: Vec<_> = registry
                                     .get_active_validators()
@@ -999,9 +1087,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                             .double_sign_count
                                             .saturating_add(validator.equivocation_count)
                                             .saturating_add(validator.downtime_count),
+                                        vrf_public_key: validator.vrf_public_key.clone(),
                                     })
                                     .collect::<Vec<_>>();
-                                (proposer_id, stakes)
+                                (proposer_id, stakes, active)
                             };
                             let Some(proposer_id) = proposer_id else {
                                 warn!(
@@ -1010,15 +1099,65 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 );
                                 continue;
                             };
+                            let Some(parent) =
+                                inbound_blockchain.read().unwrap().latest_block()
+                            else {
+                                continue;
+                            };
+                            let parent_vrf_public_key = parent
+                                .validator_signature
+                                .get(..bleep_core::block::SPHINCS_PK_LEN)
+                                .and_then(|public_key| {
+                                    let signing_key_id = hex::encode(public_key);
+                                    active_validators
+                                        .iter()
+                                        .find(|validator| {
+                                            validator
+                                                .signing_key_id
+                                                .eq_ignore_ascii_case(&signing_key_id)
+                                        })
+                                        .map(|validator| validator.vrf_public_key.as_slice())
+                                });
+                            let previous_randomness =
+                                match bleep_consensus::pos_engine::PoSConsensusEngine::randomness_from_parent_block(
+                                    &parent,
+                                    parent_vrf_public_key,
+                                ) {
+                                    Ok(randomness) => randomness,
+                                    Err(error) => {
+                                        warn!(
+                                            "[InboundBlockHandler] Cannot validate parent VRF for block {}: {}",
+                                            block.index, error
+                                        );
+                                        continue;
+                                    }
+                                };
                             let selected =
                                 bleep_consensus::pos_engine::PoSConsensusEngine::select_proposer(
                                     block.index,
                                     &validator_stakes,
-                                    &block.previous_hash,
+                                    &previous_randomness,
                                 );
                             if !selected.is_ok_and(|selected| selected == proposer_id) {
                                 warn!(
                                     "[InboundBlockHandler] PBFT proposal {} is not from the selected proposer",
+                                    block.index
+                                );
+                                continue;
+                            }
+                            let proposer_vrf_public_key = active_validators
+                                .iter()
+                                .find(|validator| validator.id == proposer_id)
+                                .map(|validator| validator.vrf_public_key.as_slice());
+                            if !proposer_vrf_public_key.is_some_and(|public_key| {
+                                bleep_consensus::pos_engine::PoSConsensusEngine::verify_block_vrf(
+                                    block,
+                                    public_key,
+                                )
+                                .is_ok()
+                            }) {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT proposal {} has an invalid proposer VRF proof",
                                     block.index
                                 );
                                 continue;
@@ -1028,7 +1167,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 let Some(tip) = chain.latest_block() else {
                                     continue;
                                 };
-                                if block.index != tip.index.saturating_add(1)
+                                if verify_pos_vrf_block(block, &tip, &active_validators).is_err()
+                                    || block.index != tip.index.saturating_add(1)
                                     || !BlockValidator::validate_full_block_with_validator_set(
                                         &tip,
                                         block,
@@ -1084,12 +1224,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    let epoch_validator_keys = {
+                    let (epoch_validator_keys, active_validators) = {
                         let registry = inbound_validators.lock();
-                        registry
+                        let active_validators: Vec<_> = registry
                             .get_active_validators()
                             .into_iter()
                             .filter(|validator| validator.can_participate())
+                            .collect();
+                        let keys = active_validators
+                            .iter()
                             .map(|validator| {
                                 hex::decode(&validator.signing_key_id).map_err(|e| {
                                     format!(
@@ -1098,7 +1241,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     )
                                 })
                             })
-                            .collect::<Result<Vec<_>, _>>()
+                            .collect::<Result<Vec<_>, _>>();
+                        (keys, active_validators)
                     };
                     let epoch_validator_keys = match epoch_validator_keys {
                         Ok(keys) => keys,
@@ -1110,6 +1254,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             continue;
                         }
                     };
+
+                    let parent = {
+                        let chain = inbound_blockchain.read().unwrap();
+                        chain.latest_block()
+                    };
+                    let Some(parent) = parent else {
+                        continue;
+                    };
+                    if let Err(error) =
+                        verify_pos_vrf_block(&block, &parent, &active_validators)
+                    {
+                        warn!(
+                            "[InboundBlockHandler] Block {} has invalid proposer VRF: {}",
+                            block.index, error
+                        );
+                        continue;
+                    }
 
                     let valid = BlockValidator::validate_block_with_validator_set(
                         &block,
@@ -1150,6 +1311,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             continue;
                         };
                         if block.index != tip.index.saturating_add(1)
+                            || verify_pos_vrf_block(&block, &tip, &active_validators).is_err()
                             || !BlockValidator::validate_full_block_with_validator_set(
                                 &tip,
                                 &block,

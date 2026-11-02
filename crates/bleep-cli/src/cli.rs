@@ -1392,6 +1392,7 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
         signing_public_key: String,
         proof: String,
         kyber_public_key: String,
+        vrf_public_key: String,
     }
     let url = format!("{}/rpc/validator/stake", rpc);
     let client = reqwest::Client::new();
@@ -1420,6 +1421,16 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
         .map_err(|error| anyhow!("Invalid validator Kyber public key: {error}"))?;
     bleep_crypto::pq_crypto::KyberKem::encapsulate(&kyber_key)
         .map_err(|error| anyhow!("Invalid validator Kyber public key: {error}"))?;
+    let vrf_public_key = std::env::var("BLEEP_VALIDATOR_VRF_PUBLIC_KEY").map_err(|_| {
+        anyhow!("Set BLEEP_VALIDATOR_VRF_PUBLIC_KEY to the node's proposer VRF public key")
+    })?;
+    let vrf_public_key = hex::decode(vrf_public_key.trim())
+        .map_err(|error| anyhow!("Invalid validator VRF public key: {error}"))?;
+    if vrf_public_key.len() != 32 {
+        return Err(anyhow!(
+            "Validator VRF public key must be 32 bytes (hex encoded)"
+        ));
+    }
 
     let nonce = client
         .get(format!("{}/rpc/tx/nonce/{}", rpc, wallet.address))
@@ -1444,6 +1455,7 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
         timestamp,
         nonce,
         &kyber_public_key,
+        &vrf_public_key,
     );
     let signing_key =
         unlock_wallet_key(&wallet).map_err(|error| anyhow!("Wallet unlock failed: {error}"))?;
@@ -1457,6 +1469,7 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
         signing_public_key: hex::encode(&wallet.falcon_keys),
         proof: hex::encode(proof),
         kyber_public_key: hex::encode(kyber_public_key),
+        vrf_public_key: hex::encode(vrf_public_key),
     };
     let jwt_token = get_jwt_token().await?;
     let resp = client

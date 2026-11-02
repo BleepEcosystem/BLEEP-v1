@@ -9,9 +9,22 @@
 
 use crate::engine::{ConsensusEngine, ConsensusError};
 use crate::epoch::EpochState;
-use bleep_core::block::{Block, ConsensusMode, Transaction};
+use bleep_core::block::{
+    Block, ConsensusMode, Transaction, VRF_OUTPUT_LEN, VRF_PROOF_LEN,
+    VRF_STARK_ENVELOPE_HEADER_LEN, VRF_STARK_ENVELOPE_MAGIC,
+};
 use bleep_core::blockchain::BlockchainState;
 use log::info;
+use schnorrkel::{
+    vrf::{VRFPreOut, VRFProof},
+    ExpansionMode, Keypair, MiniSecretKey, PublicKey,
+};
+use sha2::{Digest, Sha256};
+
+const VRF_KEY_DERIVATION_DOMAIN: &[u8] = b"BLEEP_POS_VRF_KEY_V1";
+const VRF_INPUT_DOMAIN: &[u8] = b"BLEEP_POS_VRF_INPUT_V1";
+const VRF_OUTPUT_DOMAIN: &[u8] = b"BLEEP_POS_VRF_OUTPUT_V1";
+const GENESIS_RANDOMNESS_DOMAIN: &[u8] = b"BLEEP_POS_GENESIS_RANDOMNESS_V1";
 
 /// Validator stake information.
 #[derive(Debug, Clone)]
@@ -27,6 +40,9 @@ pub struct ValidatorStake {
 
     /// Number of slashing events
     pub slashing_count: u32,
+
+    /// Ristretto public key used to verify this validator's block VRF proofs.
+    pub vrf_public_key: Vec<u8>,
 }
 
 impl ValidatorStake {
@@ -53,6 +69,167 @@ pub struct PoSConsensusEngine {
 }
 
 impl PoSConsensusEngine {
+    /// Derive the validator's VRF keypair from its independently-domain-separated
+    /// SPHINCS+ secret key material.
+    pub fn derive_vrf_keypair(sphincs_secret_key: &[u8]) -> Result<Keypair, String> {
+        if sphincs_secret_key.is_empty() {
+            return Err("SPHINCS+ secret key cannot be empty".into());
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(VRF_KEY_DERIVATION_DOMAIN);
+        hasher.update(sphincs_secret_key);
+        let seed: [u8; 32] = hasher.finalize().into();
+        let mini_secret =
+            MiniSecretKey::from_bytes(&seed).map_err(|error| format!("VRF seed: {error}"))?;
+        Ok(mini_secret.expand_to_keypair(ExpansionMode::Uniform))
+    }
+
+    pub fn derive_vrf_public_key(sphincs_secret_key: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(Self::derive_vrf_keypair(sphincs_secret_key)?
+            .public
+            .to_bytes()
+            .to_vec())
+    }
+
+    /// Produce the unique VRF output and proof for a block's (height, parent hash).
+    pub fn create_vrf_proof(
+        sphincs_secret_key: &[u8],
+        height: u64,
+        prev_block_hash: &str,
+    ) -> Result<([u8; VRF_OUTPUT_LEN], [u8; VRF_PROOF_LEN]), String> {
+        let keypair = Self::derive_vrf_keypair(sphincs_secret_key)?;
+        let input = Self::vrf_input(height, prev_block_hash);
+        let transcript = schnorrkel::signing_context(b"BLEEP_POS_VRF_V1").bytes(&input);
+        let (inout, proof, _) = keypair.vrf_sign(transcript);
+        Ok((inout.to_preout().to_bytes(), proof.to_bytes()))
+    }
+
+    /// Verify a block's VRF proof and return the next slot's public randomness.
+    pub fn verify_vrf_proof(
+        vrf_public_key: &[u8],
+        height: u64,
+        prev_block_hash: &str,
+        output: &[u8],
+        proof: &[u8],
+    ) -> Result<[u8; 32], String> {
+        let public_key = PublicKey::from_bytes(vrf_public_key)
+            .map_err(|error| format!("Invalid VRF public key: {error}"))?;
+        let output = VRFPreOut::from_bytes(output)
+            .map_err(|error| format!("Invalid VRF output: {error}"))?;
+        let proof = VRFProof::from_bytes(proof)
+            .map_err(|error| format!("Invalid VRF proof: {error}"))?;
+        let input = Self::vrf_input(height, prev_block_hash);
+        let transcript = schnorrkel::signing_context(b"BLEEP_POS_VRF_V1").bytes(&input);
+        let (inout, _) = public_key
+            .vrf_verify(transcript, &output, &proof)
+            .map_err(|error| format!("VRF proof verification failed: {error}"))?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(VRF_OUTPUT_DOMAIN);
+        hasher.update(inout.make_bytes::<[u8; 32]>(b"BLEEP_POS_VRF_RANDOMNESS_V1"));
+        Ok(hasher.finalize().into())
+    }
+
+    pub fn genesis_randomness(genesis_hash: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(GENESIS_RANDOMNESS_DOMAIN);
+        hasher.update(genesis_hash.as_bytes());
+        hasher.finalize().into()
+    }
+
+    fn vrf_input(height: u64, prev_block_hash: &str) -> Vec<u8> {
+        let mut input = Vec::with_capacity(VRF_INPUT_DOMAIN.len() + 8 + prev_block_hash.len());
+        input.extend_from_slice(VRF_INPUT_DOMAIN);
+        input.extend_from_slice(&height.to_le_bytes());
+        input.extend_from_slice(prev_block_hash.as_bytes());
+        input
+    }
+
+    pub fn randomness_from_proof(
+        vrf_public_key: &[u8],
+        height: u64,
+        prev_block_hash: &str,
+        output: &[u8],
+        proof: &[u8],
+    ) -> Result<[u8; 32], String> {
+        Self::verify_vrf_proof(vrf_public_key, height, prev_block_hash, output, proof)
+    }
+
+    pub fn encode_vrf_stark_envelope(
+        output: &[u8; VRF_OUTPUT_LEN],
+        proof: &[u8; VRF_PROOF_LEN],
+        stark_proof: &[u8],
+    ) -> Vec<u8> {
+        let mut envelope = Vec::with_capacity(
+            VRF_STARK_ENVELOPE_HEADER_LEN.saturating_add(stark_proof.len()),
+        );
+        envelope.extend_from_slice(VRF_STARK_ENVELOPE_MAGIC);
+        envelope.extend_from_slice(output);
+        envelope.extend_from_slice(proof);
+        envelope.extend_from_slice(stark_proof);
+        envelope
+    }
+
+    pub fn decode_vrf_stark_envelope(
+        envelope: &[u8],
+    ) -> Result<(&[u8], &[u8], &[u8]), String> {
+        if !envelope.starts_with(VRF_STARK_ENVELOPE_MAGIC)
+            || envelope.len() <= VRF_STARK_ENVELOPE_HEADER_LEN
+        {
+            return Err("Missing or truncated VRF/STARK proof envelope".into());
+        }
+        let output_start = VRF_STARK_ENVELOPE_MAGIC.len();
+        let proof_start = output_start + VRF_OUTPUT_LEN;
+        let stark_start = proof_start + VRF_PROOF_LEN;
+        Ok((
+            &envelope[output_start..proof_start],
+            &envelope[proof_start..stark_start],
+            &envelope[stark_start..],
+        ))
+    }
+
+    pub fn verify_block_vrf(block: &Block, vrf_public_key: &[u8]) -> Result<[u8; 32], String> {
+        let (output, proof, _) = block
+            .vrf_stark_proof_parts()
+            .ok_or_else(|| format!("Block {} is missing its VRF proof envelope", block.index))?;
+        Self::verify_vrf_proof(
+            vrf_public_key,
+            block.index,
+            &block.previous_hash,
+            output,
+            proof,
+        )
+    }
+
+    pub fn randomness_from_parent_block(
+        parent: &Block,
+        parent_vrf_public_key: Option<&[u8]>,
+    ) -> Result<[u8; 32], String> {
+        if parent.index == 0 {
+            return Ok(Self::genesis_randomness(&parent.compute_hash()));
+        }
+        if parent.protocol_version < 5 {
+            return Ok(Self::genesis_randomness(&parent.compute_hash()));
+        }
+        let public_key = parent_vrf_public_key.ok_or_else(|| {
+            format!("VRF public key for parent block {} is unavailable", parent.index)
+        })?;
+        Self::verify_block_vrf(parent, public_key)
+    }
+
+    /// Derive a deterministic bootstrap seed from the fixed genesis block.
+    pub fn compute_seed(height: u64, previous_randomness: &[u8; 32]) -> u64 {
+        let mut hasher = Sha256::new();
+        hasher.update(b"BLEEP_POS_PROPOSER_SELECTION_V1");
+        hasher.update(height.to_le_bytes());
+        hasher.update(previous_randomness);
+        let digest = hasher.finalize();
+        u64::from_le_bytes([
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
+            digest[7],
+        ])
+    }
+
     /// Create a new PoS engine.
     pub fn new(validator_id: String, my_stake: u64) -> Self {
         PoSConsensusEngine {
@@ -79,19 +256,13 @@ impl PoSConsensusEngine {
         }
     }
 
-    /// Select the block proposer for a given height.
-    ///
-    /// SAFETY: This function is deterministic.
-    /// Same block height + validator set always produces same proposer.
-    ///
-    /// Uses weighted random selection: each validator has probability
-    /// proportional to their stake.
+    /// Select the block proposer using the previous block's verified VRF randomness.
     ///
     /// PUBLIC: Called by orchestrator during block proposal selection.
     pub fn select_proposer(
         height: u64,
         validators: &[ValidatorStake],
-        prev_block_hash: &str,
+        previous_randomness: &[u8; 32],
     ) -> Result<String, ConsensusError> {
         // Filter to active validators
         let active: Vec<_> = validators.iter().filter(|v| v.can_participate()).collect();
@@ -115,10 +286,18 @@ impl PoSConsensusEngine {
                 reason: "Total validator stake is zero".to_string(),
             });
         }
+        for validator in &active {
+            PublicKey::from_bytes(&validator.vrf_public_key).map_err(|error| {
+                ConsensusError::ProposalRejected {
+                    reason: format!(
+                        "Validator {} has an invalid VRF public key: {error}",
+                        validator.id
+                    ),
+                }
+            })?;
+        }
 
-        // Use previous block hash as seed for deterministic selection
-        // SAFETY: All nodes with identical validator set will compute the same proposer
-        let seed = Self::compute_seed(height, prev_block_hash);
+        let seed = Self::compute_seed(height, previous_randomness);
         let selection = seed % total_stake;
 
         let mut accumulated = 0;
@@ -133,33 +312,6 @@ impl PoSConsensusEngine {
         } else {
             Ok(active[0].id.clone())
         }
-    }
-
-    /// Compute a deterministic proposer-selection seed.
-    ///
-    /// ## S-02 Fix: SHA-256 replaces DefaultHasher
-    ///
-    /// `DefaultHasher` (SipHash-1-3) uses a **per-process random seed** since
-    /// Rust 1.7.  Two independent nodes computing `DefaultHasher(height, prev_hash)`
-    /// produce *different* values, making them select *different* proposers —
-    /// a consensus-safety violation.  It is also not collision-resistant,
-    /// enabling stake-grinding attacks.
-    ///
-    /// **Fix:** `SHA-256(height_le8 || prev_hash_utf8)`, first 8 bytes → `u64`.
-    ///
-    /// Properties:
-    /// - **Platform-deterministic** — every honest node computes the same seed.
-    /// - **Pre-image resistant** — prevents seed prediction / grinding.
-    /// - **No extra dependency** — `sha2` is already in the workspace.
-    ///
-    /// PUBLIC: Called by select_proposer to generate deterministic selection.
-    pub fn compute_seed(height: u64, prev_hash: &str) -> u64 {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(height.to_le_bytes());
-        h.update(prev_hash.as_bytes());
-        let d = h.finalize();
-        u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
     }
 
     /// Check if a validator is allowed to participate.
@@ -284,6 +436,10 @@ impl ConsensusEngine for PoSConsensusEngine {
 mod tests {
     use super::*;
 
+    fn test_vrf_public_key(seed: &[u8]) -> Vec<u8> {
+        PoSConsensusEngine::derive_vrf_public_key(seed).unwrap()
+    }
+
     #[test]
     fn test_pos_engine_creation() {
         let engine = PoSConsensusEngine::new("validator1".to_string(), 1000);
@@ -299,18 +455,20 @@ mod tests {
                 stake: 100,
                 active: true,
                 slashing_count: 0,
+                vrf_public_key: test_vrf_public_key(b"v1"),
             },
             ValidatorStake {
                 id: "v2".to_string(),
                 stake: 200,
                 active: true,
                 slashing_count: 0,
+                vrf_public_key: test_vrf_public_key(b"v2"),
             },
         ];
 
-        let p1 = PoSConsensusEngine::select_proposer(100, &validators, "hash1").unwrap();
-        let p2 = PoSConsensusEngine::select_proposer(100, &validators, "hash1").unwrap();
-        // Same height and hash should select same proposer
+        let randomness = PoSConsensusEngine::genesis_randomness("genesis");
+        let p1 = PoSConsensusEngine::select_proposer(100, &validators, &randomness).unwrap();
+        let p2 = PoSConsensusEngine::select_proposer(100, &validators, &randomness).unwrap();
         assert_eq!(p1, p2);
     }
 
@@ -322,19 +480,20 @@ mod tests {
                 stake: 100,
                 active: true,
                 slashing_count: 0,
+                vrf_public_key: test_vrf_public_key(b"v1"),
             },
             ValidatorStake {
                 id: "v2".to_string(),
                 stake: 200,
                 active: true,
                 slashing_count: 0,
+                vrf_public_key: test_vrf_public_key(b"v2"),
             },
         ];
 
-        let p1 = PoSConsensusEngine::select_proposer(100, &validators, "hash1").ok();
-        let p2 = PoSConsensusEngine::select_proposer(101, &validators, "hash1").ok();
-        // Different heights may select different proposers (probabilistically)
-        // We just verify that both succeed
+        let randomness = PoSConsensusEngine::genesis_randomness("genesis");
+        let p1 = PoSConsensusEngine::select_proposer(100, &validators, &randomness).ok();
+        let p2 = PoSConsensusEngine::select_proposer(101, &validators, &randomness).ok();
         assert!(p1.is_some());
         assert!(p2.is_some());
     }
@@ -346,9 +505,11 @@ mod tests {
             stake: 100,
             active: false,
             slashing_count: 0,
+            vrf_public_key: test_vrf_public_key(b"v1"),
         }];
 
-        let result = PoSConsensusEngine::select_proposer(100, &validators, "hash1");
+        let randomness = PoSConsensusEngine::genesis_randomness("genesis");
+        let result = PoSConsensusEngine::select_proposer(100, &validators, &randomness);
         assert!(result.is_err());
     }
 
@@ -359,6 +520,7 @@ mod tests {
             stake: 100,
             active: true,
             slashing_count: 0,
+            vrf_public_key: test_vrf_public_key(b"v1"),
         };
         assert!(PoSConsensusEngine::check_validator_health(&validator).is_ok());
     }
@@ -370,6 +532,7 @@ mod tests {
             stake: 100,
             active: false,
             slashing_count: 0,
+            vrf_public_key: test_vrf_public_key(b"v1"),
         };
         assert!(PoSConsensusEngine::check_validator_health(&validator).is_err());
     }
@@ -381,22 +544,24 @@ mod tests {
             stake: 100,
             active: true,
             slashing_count: 1,
+            vrf_public_key: test_vrf_public_key(b"v1"),
         };
         assert!(PoSConsensusEngine::check_validator_health(&validator).is_err());
     }
 
     #[test]
     fn test_compute_seed_deterministic() {
-        // SHA-256 has no per-process salt — must be identical across calls.
-        let seed1 = PoSConsensusEngine::compute_seed(100, "hash1");
-        let seed2 = PoSConsensusEngine::compute_seed(100, "hash1");
+        let randomness = PoSConsensusEngine::genesis_randomness("genesis");
+        let seed1 = PoSConsensusEngine::compute_seed(100, &randomness);
+        let seed2 = PoSConsensusEngine::compute_seed(100, &randomness);
         assert_eq!(seed1, seed2, "S-02: seed must be identical for same inputs");
     }
 
     #[test]
     fn test_compute_seed_different_inputs() {
-        let seed1 = PoSConsensusEngine::compute_seed(100, "hash1");
-        let seed2 = PoSConsensusEngine::compute_seed(101, "hash1");
+        let randomness = PoSConsensusEngine::genesis_randomness("genesis");
+        let seed1 = PoSConsensusEngine::compute_seed(100, &randomness);
+        let seed2 = PoSConsensusEngine::compute_seed(101, &randomness);
         assert_ne!(
             seed1, seed2,
             "S-02: different heights must yield different seeds"
@@ -405,16 +570,61 @@ mod tests {
 
     #[test]
     fn test_compute_seed_matches_sha256() {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(55u64.to_le_bytes());
-        h.update(b"prev_abc");
-        let d = h.finalize();
-        let expected = u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]);
-        assert_eq!(
-            PoSConsensusEngine::compute_seed(55, "prev_abc"),
-            expected,
-            "S-02: must match SHA-256(height_le8 || prev_hash)"
-        );
+        let randomness = [0x42; 32];
+        let mut hasher = Sha256::new();
+        hasher.update(b"BLEEP_POS_PROPOSER_SELECTION_V1");
+        hasher.update(55u64.to_le_bytes());
+        hasher.update(randomness);
+        let digest = hasher.finalize();
+        let expected = u64::from_le_bytes(digest[..8].try_into().unwrap());
+        assert_eq!(PoSConsensusEngine::compute_seed(55, &randomness), expected);
+    }
+
+    #[test]
+    fn vrf_proofs_are_verifiable_and_bound_to_the_block_slot() {
+        let secret = [0x37; 128];
+        let public_key = PoSConsensusEngine::derive_vrf_public_key(&secret).unwrap();
+        let (output, proof) =
+            PoSConsensusEngine::create_vrf_proof(&secret, 7, "parent-hash").unwrap();
+        let randomness = PoSConsensusEngine::verify_vrf_proof(
+            &public_key,
+            7,
+            "parent-hash",
+            &output,
+            &proof,
+        )
+        .unwrap();
+        let (same_output, same_proof) =
+            PoSConsensusEngine::create_vrf_proof(&secret, 7, "parent-hash").unwrap();
+        assert_eq!(output, same_output);
+        assert_eq!(proof, same_proof);
+        assert!(PoSConsensusEngine::verify_vrf_proof(
+            &public_key,
+            8,
+            "parent-hash",
+            &output,
+            &proof,
+        )
+        .is_err());
+        assert!(PoSConsensusEngine::verify_vrf_proof(
+            &public_key,
+            7,
+            "different-parent",
+            &output,
+            &proof,
+        )
+        .is_err());
+
+        let mut tampered_proof = proof;
+        tampered_proof[0] ^= 1;
+        assert!(PoSConsensusEngine::verify_vrf_proof(
+            &public_key,
+            7,
+            "parent-hash",
+            &output,
+            &tampered_proof,
+        )
+        .is_err());
+        assert_ne!(randomness, PoSConsensusEngine::genesis_randomness("parent-hash"));
     }
 }

@@ -357,13 +357,13 @@ impl BlockProducer {
         let tx_count = pending.len();
 
         // ── 2: Read chain tip ─────────────────────────────────────────────────
-        let (next_height, prev_hash) = {
+        let (next_height, prev_hash, parent_block) = {
             let chain = self
                 .blockchain
                 .read()
                 .map_err(|e| format!("blockchain read lock: {}", e))?;
             match chain.latest_block() {
-                Some(tip) => (tip.index + 1, tip.compute_hash()),
+                Some(tip) => (tip.index + 1, tip.compute_hash(), tip),
                 None => return Err("Blockchain empty — genesis missing".into()),
             }
         };
@@ -385,8 +385,47 @@ impl BlockProducer {
                         .double_sign_count
                         .saturating_add(validator.equivocation_count)
                         .saturating_add(validator.downtime_count),
+                    vrf_public_key: validator.vrf_public_key.clone(),
                 })
                 .collect();
+            let parent_vrf_public_key = parent_block
+                .validator_signature
+                .get(..bleep_core::block::SPHINCS_PK_LEN)
+                .and_then(|public_key| {
+                    let signing_key_id = hex::encode(public_key);
+                    active_identities
+                        .iter()
+                        .find(|validator| {
+                            validator
+                                .signing_key_id
+                                .eq_ignore_ascii_case(&signing_key_id)
+                        })
+                        .map(|validator| validator.vrf_public_key.as_slice())
+                });
+            let previous_randomness =
+                PoSConsensusEngine::randomness_from_parent_block(&parent_block, parent_vrf_public_key)
+                    .map_err(|error| {
+                        format!(
+                            "Cannot derive proposer randomness at height {next_height}: {error}"
+                        )
+                    })?;
+            let local_vrf_public_key =
+                PoSConsensusEngine::derive_vrf_public_key(&self.config.validator_sk)?;
+            let local_identity = active_identities
+                .iter()
+                .find(|validator| validator.id == self.config.validator_id)
+                .ok_or_else(|| {
+                    format!(
+                        "Configured proposer {} is not in the active validator registry",
+                        self.config.validator_id
+                    )
+                })?;
+            if local_identity.vrf_public_key != local_vrf_public_key {
+                return Err(format!(
+                    "Configured proposer {} VRF key does not match the validator registry",
+                    self.config.validator_id
+                ));
+            }
             ensure_live_finality_mode_supported(active_validators.len())?;
             let committee_keys: Vec<(String, Vec<u8>)> = active_identities
                 .iter()
@@ -418,11 +457,12 @@ impl BlockProducer {
                     "Live PBFT committee does not match the active validator registry".into(),
                 );
             }
-            let selected =
-                PoSConsensusEngine::select_proposer(next_height, &active_validators, &prev_hash)
-                    .map_err(|e| {
-                        format!("Proposer selection failed at height {next_height}: {e}")
-                    })?;
+            let selected = PoSConsensusEngine::select_proposer(
+                next_height,
+                &active_validators,
+                &previous_randomness,
+            )
+            .map_err(|e| format!("Proposer selection failed at height {next_height}: {e}"))?;
             if selected != self.config.validator_id {
                 debug!(
                     height = next_height,
@@ -638,6 +678,18 @@ impl BlockProducer {
         };
         block.sig_commitment_root = sal_commitment_root;
 
+        let (vrf_output, vrf_proof) = PoSConsensusEngine::create_vrf_proof(
+            &self.config.validator_sk,
+            next_height,
+            &block.previous_hash,
+        )
+        .map_err(|error| format!("Block {next_height} VRF generation failed: {error}"))?;
+        block.zk_proof = PoSConsensusEngine::encode_vrf_stark_envelope(
+            &vrf_output,
+            &vrf_proof,
+            &[],
+        );
+
         // Every non-genesis block must carry a real SPHINCS+ signature.
         block
             .sign_block_with_pk(&self.config.validator_sk, &self.config.validator_pk)
@@ -653,11 +705,19 @@ impl BlockProducer {
             &sal_sig_hashes,
         )
         .map_err(|e| format!("Block {} STARK generation failed: {}", next_height, e))?;
-        block.zk_proof = sal_proof_bytes;
+        block.zk_proof = PoSConsensusEngine::encode_vrf_stark_envelope(
+            &vrf_output,
+            &vrf_proof,
+            &sal_proof_bytes,
+        );
 
         if !block.verify_zkp() {
             return Err(format!("Block {} STARK verification failed", next_height));
         }
+        let local_vrf_public_key =
+            PoSConsensusEngine::derive_vrf_public_key(&self.config.validator_sk)?;
+        PoSConsensusEngine::verify_block_vrf(&block, &local_vrf_public_key)
+            .map_err(|error| format!("Block {next_height} VRF verification failed: {error}"))?;
 
         // Prepare the authenticated gossip payload before committing state so
         // serialization failure cannot leave an unbroadcast committed block.
