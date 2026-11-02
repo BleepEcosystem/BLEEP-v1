@@ -25,6 +25,11 @@ environment. Wallet keys are protected with Argon2id and AES-256-GCM.
 Plaintext storage is only available for disposable dev/test wallets when both
 `BLEEP_WALLET_PLAINTEXT_DEV=1` and `BLEEP_NETWORK_MODE=dev` (or `test`) are set.
 
+The faucet is disabled by default. To enable it on a private dev/test node,
+start the process with both `BLEEP_FAUCET_ENABLED=true` and
+`BLEEP_NETWORK_MODE=dev` (or `development` or `test`). The faucet deliberately
+refuses `testnet` and `pretestnet` modes.
+
 ## 1. Create a BLEEP address
 
 The BLEEP node does not expose an RPC endpoint to create signing keys. Use the local CLI to generate a wallet and derive a BLEEP address:
@@ -44,7 +49,8 @@ Example output:
 
 ## 2. Fund the address with the faucet
 
-Request test BLEEP using the faucet endpoint.
+When the node operator explicitly enables the faucet as described above,
+request test BLEEP using the faucet endpoint.
 
 ```bash
 curl -X POST http://127.0.0.1:8545/faucet/BLEEP1a3f7b2c9d4e8f1a0b5c6d7e9f2a3b4c5d6e7f8 | jq .

@@ -1568,8 +1568,18 @@ fn public_native_mint_enabled() -> bool {
 fn is_dev_or_test_network(network_mode: &str) -> bool {
     matches!(
         network_mode.trim().to_ascii_lowercase().as_str(),
-        "dev" | "development" | "test" | "testnet" | "pretestnet"
+        "dev" | "development" | "test"
     )
+}
+
+fn faucet_enabled_for(enabled: &str, network_mode: &str) -> bool {
+    enabled.trim().eq_ignore_ascii_case("true") && is_dev_or_test_network(network_mode)
+}
+
+fn faucet_enabled() -> bool {
+    let enabled = std::env::var("BLEEP_FAUCET_ENABLED").unwrap_or_default();
+    let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
+    faucet_enabled_for(&enabled, &network_mode)
 }
 
 // ── GET /rpc/economics/supply ─────────────────────────────────────────────────
@@ -3210,12 +3220,10 @@ fn faucet_drip(
         .and(with_arc_state(state))
         .map(
             |address: String, peer: Option<std::net::SocketAddr>, st: Arc<RpcState>| {
-                let network_mode = std::env::var("BLEEP_NETWORK_MODE").unwrap_or_default();
-                if !is_dev_or_test_network(&network_mode) {
+                if !faucet_enabled() {
                     return Box::new(warp::reply::with_status(
                         warp::reply::json(&ErrResp {
-                            error: "The faucet is available only on explicit dev/test networks."
-                                .into(),
+                            error: "The faucet is disabled. Set BLEEP_FAUCET_ENABLED=true on an explicit dev/test network to enable it.".into(),
                         }),
                         warp::http::StatusCode::FORBIDDEN,
                     )) as Box<dyn warp::Reply + Send>;
@@ -4606,7 +4614,9 @@ mod tests {
 
         let routes = rpc_routes_with_state(rpc_state);
         let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
+        let previous_faucet_enabled = std::env::var_os("BLEEP_FAUCET_ENABLED");
         std::env::set_var("BLEEP_NETWORK_MODE", "test");
+        std::env::set_var("BLEEP_FAUCET_ENABLED", "true");
         let resp = request()
             .method("POST")
             .path(&format!("/faucet/{}", address))
@@ -4616,6 +4626,11 @@ mod tests {
             std::env::set_var("BLEEP_NETWORK_MODE", network_mode);
         } else {
             std::env::remove_var("BLEEP_NETWORK_MODE");
+        }
+        if let Some(enabled) = previous_faucet_enabled {
+            std::env::set_var("BLEEP_FAUCET_ENABLED", enabled);
+        } else {
+            std::env::remove_var("BLEEP_FAUCET_ENABLED");
         }
 
         assert_eq!(resp.status(), 200);
@@ -4641,7 +4656,9 @@ mod tests {
     async fn faucet_ip_spoofing_blocked() {
         let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
         let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
+        let previous_faucet_enabled = std::env::var_os("BLEEP_FAUCET_ENABLED");
         std::env::set_var("BLEEP_NETWORK_MODE", "test");
+        std::env::set_var("BLEEP_FAUCET_ENABLED", "true");
         let state_mgr = Arc::new(Mutex::new(StateManager::new()));
         let rpc_state = RpcState::new().with_state_manager(Arc::clone(&state_mgr));
         let peer = std::net::SocketAddr::from(([192, 0, 2, 10], 44321));
@@ -4678,6 +4695,11 @@ mod tests {
         } else {
             std::env::remove_var("BLEEP_NETWORK_MODE");
         }
+        if let Some(enabled) = previous_faucet_enabled {
+            std::env::set_var("BLEEP_FAUCET_ENABLED", enabled);
+        } else {
+            std::env::remove_var("BLEEP_FAUCET_ENABLED");
+        }
 
         assert_eq!(second.status(), warp::http::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
@@ -4690,6 +4712,35 @@ mod tests {
             .lock()
             .contains_key("expired-address"));
         assert!(!rpc_state.faucet_ip_drips.lock().contains_key("192.0.2.99"));
+    }
+
+    #[tokio::test]
+    async fn faucet_is_disabled_on_public_testnet_modes() {
+        let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
+        let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
+        let previous_faucet_enabled = std::env::var_os("BLEEP_FAUCET_ENABLED");
+        std::env::set_var("BLEEP_NETWORK_MODE", "testnet");
+        std::env::set_var("BLEEP_FAUCET_ENABLED", "true");
+        let routes = rpc_routes_with_state(RpcState::new());
+
+        let response = request()
+            .method("POST")
+            .path("/faucet/BLEEP1public-testnet")
+            .reply(&routes)
+            .await;
+
+        if let Some(network_mode) = previous_network_mode {
+            std::env::set_var("BLEEP_NETWORK_MODE", network_mode);
+        } else {
+            std::env::remove_var("BLEEP_NETWORK_MODE");
+        }
+        if let Some(enabled) = previous_faucet_enabled {
+            std::env::set_var("BLEEP_FAUCET_ENABLED", enabled);
+        } else {
+            std::env::remove_var("BLEEP_FAUCET_ENABLED");
+        }
+
+        assert_eq!(response.status(), warp::http::StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -4830,8 +4881,19 @@ mod tests_sprint8 {
         assert!(!is_dev_or_test_network("mainnet"));
         assert!(!is_dev_or_test_network("production"));
         assert!(!is_dev_or_test_network(""));
-        assert!(is_dev_or_test_network("testnet"));
+        assert!(!is_dev_or_test_network("testnet"));
+        assert!(!is_dev_or_test_network("pretestnet"));
         assert!(is_dev_or_test_network("DEV"));
+    }
+
+    #[test]
+    fn faucet_requires_explicit_opt_in_and_private_network_mode() {
+        assert!(!faucet_enabled_for("", "dev"));
+        assert!(!faucet_enabled_for("true", "testnet"));
+        assert!(!faucet_enabled_for("true", "pretestnet"));
+        assert!(!faucet_enabled_for("1", "test"));
+        assert!(faucet_enabled_for("true", "test"));
+        assert!(faucet_enabled_for(" TRUE ", "development"));
     }
 
     #[test]

@@ -646,7 +646,7 @@ EIP-1559-style base fee with compile-time verified split: **25% burned / 50% val
 | Maximum base fee | 10,000,000,000 microBLEEP |
 | Max base fee change per block | 1,250 bps (12.5%) |
 | Initial circulating supply | 25,000,000 BLEEP (12.5%) |
-| Testnet faucet | 10 BLEEP / address / 24 hours |
+| Private dev/test faucet | Disabled by default; 10 BLEEP / address / 24 hours when explicitly enabled |
 
 ---
 
@@ -844,9 +844,13 @@ Protocol Hardening
 
 DevNet UI
   GET  /explorer
-  POST /faucet/{address}              10 BLEEP / address / 24 hours
+  POST /faucet/{address}              opt-in only: BLEEP_FAUCET_ENABLED=true on dev/test
   GET  /metrics                       Prometheus-compatible
 ```
+
+The faucet is disabled unless `BLEEP_FAUCET_ENABLED=true` and
+`BLEEP_NETWORK_MODE` is `dev`, `development`, or `test`. It is not available in
+`testnet` or `pretestnet` modes.
 
 ---
 

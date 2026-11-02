@@ -129,7 +129,7 @@ impl AuditReport {
                     title: "Faucet IP rate limit bypassable via X-Forwarded-For header spoofing".into(),
                     description: "The faucet reads the client IP from X-Forwarded-For (first hop) without validating that the request passed through a trusted reverse proxy. An attacker can set arbitrary X-Forwarded-For values to bypass the per-IP cooldown.".into(),
                     status: FindingStatus::Resolved {
-                        fix_description: "Faucet IP cooldowns now use warp's transport peer address and ignore caller-supplied forwarding headers. Expired address and peer entries are pruned on each request. The faucet_ip_spoofing_blocked route test verifies different X-Forwarded-For values from one peer share a cooldown bucket.".into(),
+                        fix_description: "Faucet IP cooldowns use warp's transport peer address and ignore caller-supplied forwarding headers. Expired entries are pruned; activation also requires BLEEP_FAUCET_ENABLED=true on a dev/development/test mode, rejecting public testnet and pretestnet modes. faucet_ip_spoofing_blocked verifies spoofed forwarding headers cannot bypass peer cooldowns.".into(),
                     },
                     cwe: Some("CWE-290: Authentication Bypass by Spoofing".into()),
                 },
