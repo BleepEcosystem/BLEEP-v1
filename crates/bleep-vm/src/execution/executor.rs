@@ -25,7 +25,10 @@
 
 use crate::crosschain::native_bridge::ConnectBridge;
 use crate::engines::evm_engine::EvmEngine;
-use crate::engines::wasm_engine_adapter::WasmEngineAdapter;
+use crate::engines::wasm_engine_adapter::{
+    new_storage_backend, storage_backend_key, SharedStorageBackend, StorageBackend,
+    WasmEngineAdapter,
+};
 use crate::engines::zk_engine_adapter::ZkEngineAdapter;
 use crate::error::VmResult;
 use crate::execution::state_transition::{StateDiff, StateTransition};
@@ -95,6 +98,7 @@ impl ExecutionOutcome {
 pub struct Executor {
     router: VmRouter,
     bridge: Arc<ConnectBridge>,
+    storage_backend: SharedStorageBackend,
     #[allow(dead_code)]
     gas: GasModel,
     config: ExecutorConfig,
@@ -103,16 +107,34 @@ pub struct Executor {
 impl Executor {
     /// Build a production executor with all engines registered.
     pub fn production(config: ExecutorConfig) -> Self {
+        Self::production_with_shared_storage(config, new_storage_backend())
+    }
+
+    /// Build a production executor with an application-provided persistent storage backend.
+    pub fn production_with_storage_backend(
+        config: ExecutorConfig,
+        backend: Box<dyn StorageBackend>,
+    ) -> Self {
+        Self::production_with_shared_storage(config, Arc::new(parking_lot::RwLock::new(backend)))
+    }
+
+    fn production_with_shared_storage(
+        config: ExecutorConfig,
+        storage_backend: SharedStorageBackend,
+    ) -> Self {
         let mut router = VmRouter::new(config.router.clone());
 
         // Register Layer 3 engines
-        router.register_engine(Arc::new(WasmEngineAdapter::new()));
+        router.register_engine(Arc::new(WasmEngineAdapter::with_storage_backend(
+            Arc::clone(&storage_backend),
+        )));
         router.register_engine(Arc::new(EvmEngine::new()));
         router.register_engine(Arc::new(ZkEngineAdapter::new()));
 
         Executor {
             router,
             bridge: Arc::new(ConnectBridge::new()),
+            storage_backend,
             gas: GasModel::default(),
             config,
         }
@@ -121,6 +143,14 @@ impl Executor {
     /// Execute one intent end-to-end through all 7 layers.
     #[instrument(skip(self, intent), fields(intent_id = %intent.id))]
     pub async fn execute(&self, intent: &Intent) -> VmResult<ExecutionOutcome> {
+        self.execute_internal(intent, true).await
+    }
+
+    async fn execute_internal(
+        &self,
+        intent: &Intent,
+        persist_storage: bool,
+    ) -> VmResult<ExecutionOutcome> {
         let start = Instant::now();
 
         // Handle cross-chain intents specially (Layer 7)
@@ -168,6 +198,9 @@ impl Executor {
 
         // All other intents go through the router (Layers 2-6)
         let routed = self.router.route(intent).await?;
+        if persist_storage && routed.result.success && routed.engine_name == "wasm-wasmer" {
+            commit_wasm_storage(&self.storage_backend, &routed.result.state_diff);
+        }
         let bleep_gas = routed.bleep_gas;
 
         let transition = if self.config.emit_transitions {
@@ -198,7 +231,7 @@ impl Executor {
 
     /// Simulate execution without committing state (dry-run).
     pub async fn simulate(&self, intent: &Intent) -> VmResult<ExecutionOutcome> {
-        let mut outcome = self.execute(intent).await?;
+        let mut outcome = self.execute_internal(intent, false).await?;
         // Mark transition as simulation only
         if let Some(ref mut t) = outcome.transition {
             t.apply = false;
@@ -211,9 +244,26 @@ impl Executor {
         &self.bridge
     }
 
+    /// Access the persistent storage backend shared with the WASM engine.
+    pub fn storage_backend(&self) -> &SharedStorageBackend {
+        &self.storage_backend
+    }
+
     /// Return routing metrics.
     pub async fn metrics(&self) -> crate::router::vm_router::RouterMetrics {
         self.router.metrics().await
+    }
+}
+
+fn commit_wasm_storage(backend: &SharedStorageBackend, diff: &StateDiff) {
+    let mut backend = backend.write();
+    for update in diff.storage.values() {
+        if let Some(value) = update.new_value {
+            backend.write(
+                storage_backend_key(update.contract, update.key),
+                value.to_vec(),
+            );
+        }
     }
 }
 
@@ -232,6 +282,22 @@ mod tests {
         cfg.router.verify_signatures = false;
         cfg.router.sandbox_validation = false;
         Executor::production(cfg)
+    }
+
+    #[test]
+    fn successful_wasm_diff_commits_to_executor_storage() {
+        let backend = new_storage_backend();
+        let contract = [1u8; 32];
+        let key = [2u8; 32];
+        let mut diff = StateDiff::empty();
+        diff.write_storage(contract, key, None, Some([3u8; 32]));
+
+        commit_wasm_storage(&backend, &diff);
+
+        assert_eq!(
+            backend.read().read(&storage_backend_key(contract, key)),
+            Some([3u8; 32].to_vec())
+        );
     }
 
     #[tokio::test]

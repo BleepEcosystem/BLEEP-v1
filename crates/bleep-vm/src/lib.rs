@@ -61,11 +61,14 @@ pub mod engines {
     pub mod evm_engine;
     pub mod wasm_engine;
     pub mod wasm_engine_adapter;
+    mod wasm_safety;
     pub mod zk_engine;
     pub mod zk_engine_adapter;
 
     pub use evm_engine::EvmEngine;
-    pub use wasm_engine_adapter::WasmEngineAdapter;
+    pub use wasm_engine_adapter::{
+        InMemoryStorageBackend, SharedStorageBackend, StorageBackend, WasmEngineAdapter,
+    };
     pub use zk_engine_adapter::ZkEngineAdapter;
 }
 
