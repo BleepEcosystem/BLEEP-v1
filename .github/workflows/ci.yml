@@ -199,6 +199,9 @@ jobs:
           cargo test --locked --workspace --all-features --jobs 1 -- --nocapture \
             2>&1 | tee test-results.txt
 
+      - name: Smoke test genesis administrator authentication and transaction submission
+        run: cargo test --locked -p bleep-rpc tests_sprint8::bootstrap_admin_auth_smoke -- --exact
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3

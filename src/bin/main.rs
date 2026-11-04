@@ -344,7 +344,11 @@ async fn main() {
 struct NetworkConfig {
     chain_id: String,
     blocks_per_epoch: u64,
+    genesis_admin_pubkey: Option<Vec<u8>>,
 }
+
+const GENESIS_ADMIN_PUBKEY_CONFIG_KEY: &str = "BLEEP_GENESIS_ADMIN_PUBKEY";
+const GENESIS_ADMIN_STATE_KEY: &str = "bleep:auth:genesis-admin-pubkey:v1";
 
 fn embedded_network_config(network_mode: Option<&str>) -> Result<&'static str, std::io::Error> {
     let default_mode = if cfg!(feature = "mainnet") {
@@ -392,6 +396,36 @@ fn parse_network_config(
         )
         .into());
     }
+    let genesis_admin_pubkey = match config.get(GENESIS_ADMIN_PUBKEY_CONFIG_KEY) {
+        None => None,
+        Some(value) => {
+            let encoded = value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} must be a non-empty hex string"),
+                    )
+                })?;
+            let public_key = hex::decode(encoded).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} is not valid hex: {error}"),
+                )
+            })?;
+            if public_key.len() != 64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} must decode to a 64-byte SPHINCS+ public key"
+                    ),
+                )
+                .into());
+            }
+            Some(public_key)
+        }
+    };
     Ok(NetworkConfig {
         chain_id: chain_id.to_string(),
         blocks_per_epoch: config
@@ -404,6 +438,7 @@ fn parse_network_config(
                     "network config must define a positive consensus.blocks_per_epoch",
                 )
             })?,
+        genesis_admin_pubkey,
     })
 }
 
@@ -415,6 +450,38 @@ fn load_network_config() -> Result<NetworkConfig, Box<dyn Error>> {
     };
     let chain_id_override = std::env::var("BLEEP_CHAIN_ID").ok();
     parse_network_config(&raw, chain_id_override.as_deref())
+}
+
+fn pin_genesis_admin_config(
+    state: &mut StateManager,
+    configured_public_key: Option<&[u8]>,
+) -> Result<(), Box<dyn Error>> {
+    let configured = configured_public_key.unwrap_or_default();
+    let pinned = state
+        .get_application_data(GENESIS_ADMIN_STATE_KEY)
+        .map_err(|error| {
+            std::io::Error::other(format!(
+                "Failed to read pinned genesis administrator: {error}"
+            ))
+        })?;
+    match pinned {
+        Some(pinned) if pinned == configured => Ok(()),
+        Some(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Genesis administrator config differs from the persisted network bootstrap; changing it requires governance.",
+        )
+        .into()),
+        None => {
+            state
+                .put_application_data(GENESIS_ADMIN_STATE_KEY, configured)
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "Failed to pin genesis administrator: {error}"
+                    ))
+                })?;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -441,7 +508,42 @@ mod epoch_config_tests {
             Some(" ")
         )
         .is_err());
+        assert!(parse_network_config(
+            r#"{"chain_id":"x","consensus":{"blocks_per_epoch":1},"BLEEP_GENESIS_ADMIN_PUBKEY":"abcd"}"#,
+            None
+        )
+        .is_err());
         assert!(embedded_network_config(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn reads_genesis_admin_public_key_only_from_config() {
+        let public_key_hex = "ab".repeat(64);
+        let config = format!(
+            r#"{{"chain_id":"x","consensus":{{"blocks_per_epoch":1}},"BLEEP_GENESIS_ADMIN_PUBKEY":"{public_key_hex}"}}"#
+        );
+        let parsed = parse_network_config(&config, None).unwrap();
+        assert_eq!(parsed.genesis_admin_pubkey, Some(vec![0xab; 64]));
+        let no_admin = parse_network_config(
+            r#"{"chain_id":"x","consensus":{"blocks_per_epoch":1}}"#,
+            None,
+        )
+        .unwrap();
+        assert!(no_admin.genesis_admin_pubkey.is_none());
+    }
+
+    #[test]
+    fn genesis_admin_config_is_pinned_across_restarts() {
+        let public_key = vec![0x42; 64];
+        let mut state = StateManager::new();
+        pin_genesis_admin_config(&mut state, Some(&public_key)).unwrap();
+        pin_genesis_admin_config(&mut state, Some(&public_key)).unwrap();
+        assert!(pin_genesis_admin_config(&mut state, Some(&[0x24; 64])).is_err());
+        assert!(pin_genesis_admin_config(&mut state, None).is_err());
+
+        let mut unconfigured_state = StateManager::new();
+        pin_genesis_admin_config(&mut unconfigured_state, None).unwrap();
+        assert!(pin_genesis_admin_config(&mut unconfigured_state, Some(&public_key)).is_err());
     }
 }
 
@@ -538,6 +640,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .into());
         }
     };
+    pin_genesis_admin_config(&mut state, network_config.genesis_admin_pubkey.as_deref())?;
 
     // Mint the canonical launch unlocks only into a fresh genesis state.
     // Existing height-0 state with a different supply must be migrated or reset,
@@ -910,10 +1013,26 @@ async fn run() -> Result<(), Box<dyn Error>> {
         error!("BLEEP_JWT_SECRET must decode to at least 32 bytes; refusing to start.");
         std::process::exit(1);
     }
-    let auth_service = Arc::new(AuthService::new(jwt_secret).unwrap_or_else(|e| {
-        error!("Failed to initialize AuthService: {}", e);
-        std::process::exit(1);
-    }));
+    let mut auth_service = AuthService::new(jwt_secret).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Failed to initialize AuthService: {e}"),
+        )
+    })?;
+    if let Some(public_key) = &network_config.genesis_admin_pubkey {
+        auth_service.bootstrap_admin(public_key).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to bootstrap genesis administrator: {e}"),
+            )
+        })?;
+        info!("  ✅ Genesis administrator configured (public-key authentication required).");
+    } else {
+        warn!(
+            "No {GENESIS_ADMIN_PUBKEY_CONFIG_KEY} in genesis config; system-admin operations remain unavailable."
+        );
+    }
+    let auth_service = Arc::new(auth_service);
 
     let scheduler = Arc::new(Scheduler::new());
     scheduler.register_built_in_tasks();

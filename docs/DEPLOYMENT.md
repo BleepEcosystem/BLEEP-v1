@@ -158,6 +158,31 @@ environment:
   - NODE_ID=validator-1   # Node identifier
 ```
 
+### Genesis Administrator
+
+To enable system administration, add the genesis administrator's 64-byte
+SPHINCS+-SHAKE-256f-simple public key as a 128-character hex string in the
+genesis config file:
+
+```json
+{
+  "BLEEP_GENESIS_ADMIN_PUBKEY": "<128-character-public-key-hex>"
+}
+```
+
+The node reads this value only from the file selected by `BLEEP_GENESIS_CONFIG`
+(or the embedded network config); it never accepts an administrator key from an
+RPC request or directly from an environment variable. Keep the corresponding
+private key offline. To authenticate, request a one-time challenge from
+`POST /rpc/auth/admin/challenge`, sign the returned `signing_payload_hex` bytes
+with the genesis private key, then submit the public key, challenge, and
+signature to the existing `POST /rpc/auth/login` endpoint. The login endpoint
+issues the normal session token after verifying the signature. A node started
+without this config value has no system administrator and protected
+administrative operations remain unavailable. Set this value before the first
+node startup: the selected key (or the absence of one) is pinned in persistent
+state, and changing it on restart is rejected as a governance-level change.
+
 ---
 
 ## Kubernetes Deployment
