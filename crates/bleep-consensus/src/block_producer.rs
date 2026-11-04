@@ -79,6 +79,7 @@ pub struct FinalizedBlock {
 
 pub const MAX_TXS_PER_BLOCK: usize = 4_096;
 pub const BLOCK_INTERVAL_MS: u64 = 3_000;
+const INITIAL_BLOCK_DELAY_MS: u64 = 10_000;
 const BLOCKS_PER_EPOCH: u64 = 1_000;
 const PROTOCOL_VERSION: u32 = bleep_core::block::CURRENT_PROTOCOL_VERSION;
 /// BLEEP native chain ID for intent routing
@@ -94,6 +95,18 @@ pub fn ensure_live_finality_mode_supported(active_validator_count: usize) -> Res
 
 fn should_skip_block(pending_tx_count: usize, accepted_tx_count: usize) -> bool {
     pending_tx_count > 0 && accepted_tx_count == 0
+}
+
+fn vm_account_bytes(address: &str) -> [u8; 32] {
+    let mut account = [0; 32];
+    let address = address.as_bytes();
+    let copied_len = address.len().min(account.len());
+    account[..copied_len].copy_from_slice(&address[..copied_len]);
+    account
+}
+
+fn is_transfer_account(account: &[u8; 32], address: &str) -> bool {
+    *account == vm_account_bytes(address)
 }
 
 // ── ProducerConfig ────────────────────────────────────────────────────────────
@@ -285,7 +298,11 @@ impl BlockProducer {
             "[BlockProducer] Starting — {}ms slots, validator={}",
             BLOCK_INTERVAL_MS, self.config.validator_id
         );
-        let mut ticker = tokio::time::interval(Duration::from_millis(BLOCK_INTERVAL_MS));
+        let slot_interval = Duration::from_millis(BLOCK_INTERVAL_MS);
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(INITIAL_BLOCK_DELAY_MS),
+            slot_interval,
+        );
 
         loop {
             ticker.tick().await;
@@ -316,7 +333,11 @@ impl BlockProducer {
             "[BlockProducer] Starting — {}ms slots, validator={}",
             BLOCK_INTERVAL_MS, self_arc.config.validator_id
         );
-        let mut ticker = tokio::time::interval(Duration::from_millis(BLOCK_INTERVAL_MS));
+        let slot_interval = Duration::from_millis(BLOCK_INTERVAL_MS);
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(INITIAL_BLOCK_DELAY_MS),
+            slot_interval,
+        );
 
         loop {
             ticker.tick().await;
@@ -508,12 +529,8 @@ impl BlockProducer {
         // (pending_index, gas, vm_accepted, state_diff)
 
         for (idx, zt) in pending.iter().enumerate() {
-            let mut from_bytes = [0u8; 32];
-            let mut to_bytes = [0u8; 32];
-            let from_b = zt.sender.as_bytes();
-            let to_b = zt.receiver.as_bytes();
-            from_bytes[..from_b.len().min(32)].copy_from_slice(&from_b[..from_b.len().min(32)]);
-            to_bytes[..to_b.len().min(32)].copy_from_slice(&to_b[..to_b.len().min(32)]);
+            let from_bytes = vm_account_bytes(&zt.sender);
+            let to_bytes = vm_account_bytes(&zt.receiver);
 
             let intent = Intent::new_unsigned(
                 IntentKind::Transfer(TransferIntent {
@@ -597,7 +614,9 @@ impl BlockProducer {
                     let addr = hex::encode(acct_bytes);
                     // Only apply VM diff for accounts that are not the direct
                     // transfer pair (those are handled by apply_transfer above).
-                    if addr == zt.sender || addr == zt.receiver {
+                    if is_transfer_account(acct_bytes, &zt.sender)
+                        || is_transfer_account(acct_bytes, &zt.receiver)
+                    {
                         continue;
                     }
                     state
@@ -615,7 +634,7 @@ impl BlockProducer {
                 // until we reach the target. Skip sender (already bumped by apply_transfer).
                 for (acct_bytes, nonce_update) in &diff.nonces {
                     let addr = hex::encode(acct_bytes);
-                    if addr == zt.sender {
+                    if is_transfer_account(acct_bytes, &zt.sender) {
                         continue; // already bumped by apply_transfer above
                     }
                     // Bring nonce up to the VM-reported new_nonce
@@ -1081,6 +1100,19 @@ mod real_transaction_benchmark {
     use super::*;
     use bleep_core::blockchain::{Blockchain, BlockchainState};
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+
+    #[test]
+    fn vm_transfer_accounts_match_native_addresses() {
+        let address = "BLEEP1sender";
+        let account = vm_account_bytes(address);
+
+        assert!(is_transfer_account(&account, address));
+        assert!(!is_transfer_account(&account, "BLEEP1receiver"));
+        assert!(is_transfer_account(
+            &vm_account_bytes(&"BLEEP1".repeat(8)),
+            &"BLEEP1".repeat(8)
+        ));
+    }
 
     #[test]
     fn legacy_signing_failure_does_not_append_block() {
