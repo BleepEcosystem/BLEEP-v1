@@ -191,9 +191,8 @@ mod tests {
         let local   = NodeId::random();
         let (pm, _) = PeerManager::new(local.clone(), PeerManagerConfig::default());
         let identity = SphincsKeypair::generate();
-        let sphincs = SphincsKeypair::generate();
         let kyber   = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(identity, sphincs, kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, kyber, pm.clone());
         let scoring = Arc::new(PeerScoring::new());
         DarkRouting::new(pm, mp, scoring)
     }

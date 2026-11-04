@@ -18,7 +18,11 @@ impl MerklePath {
         }
     }
 
-    pub fn verify(&self) -> bool {
+    pub fn verify(&self, trusted_root: &[u8; 32]) -> bool {
+        if self.root != *trusted_root {
+            return false;
+        }
+
         let mut current = self.leaf;
 
         for (sibling, is_right) in &self.auth_path {
@@ -54,8 +58,7 @@ impl IdentityVerifier {
     }
 
     pub fn verify_proof(&self, proof: &IdentityProof) -> bool {
-        // Verify that the merkle path leads to our trusted root
-        proof.path.root == self.root && proof.path.verify()
+        proof.path.verify(&self.root)
     }
 }
 
@@ -70,8 +73,22 @@ impl IdentityProof {
         }
     }
 
-    pub fn verify(&self) -> bool {
-        // Verify merkle path
-        self.path.verify()
+    pub fn verify(&self, trusted_root: &[u8; 32]) -> bool {
+        self.path.verify(trusted_root)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_proof_must_match_verifiers_trusted_root() {
+        let claimed_root = [7u8; 32];
+        let proof = IdentityProof::new(MerklePath::new(claimed_root, claimed_root, vec![]));
+        let verifier = IdentityVerifier::new([8u8; 32]);
+
+        assert!(!verifier.verify_proof(&proof));
+        assert!(!proof.verify(&[8u8; 32]));
     }
 }

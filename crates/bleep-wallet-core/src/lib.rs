@@ -1,4 +1,5 @@
 pub mod wallet;
+pub mod wallet_core;
 
 /// Initializes the BLEEP wallet core services.
 /// Sets up quantum-secure key management, transaction handling, and state synchronization.

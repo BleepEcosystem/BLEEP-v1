@@ -8,6 +8,7 @@ pub mod state;
 // === Transactions and Mempool ===
 pub mod mempool;
 pub mod mempool_bridge;
+pub mod merkle_tree;
 pub mod transaction;
 pub mod transaction_manager;
 pub mod transaction_pool;

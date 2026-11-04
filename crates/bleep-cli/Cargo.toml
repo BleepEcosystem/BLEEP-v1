@@ -37,6 +37,9 @@ bleep-governance  = { path = "../bleep-governance" }
 bleep-consensus   = { path = "../bleep-consensus" }
 bleep-p2p         = { path = "../bleep-p2p" }
 
+[dev-dependencies]
+tempfile = "3"
+
 [[bin]]
 name = "bleep-cli"
 path = "src/cli.rs"

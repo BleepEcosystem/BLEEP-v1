@@ -42,9 +42,9 @@ Manage BLEEP wallets (quantum-secure key pairs).
 
 | Subcommand | Description |
 |------------|-------------|
-| `wallet create` | Generate a new SPHINCS+-SHAKE-256 keypair and address |
+| `wallet create` | Generate a version-2 SLH-DSA keypair and BIP-39 recovery phrase |
 | `wallet list` | List all wallets stored in `~/.bleep/wallets.json` |
-| `wallet import <mnemonic>` | Restore a wallet from a BIP-39 mnemonic |
+| `wallet import <mnemonic>` | Restore a version-2 wallet from its BIP-39 recovery phrase |
 | `wallet export <address>` | Export the encrypted key file for a wallet |
 | `wallet balance <address>` | Query the live BLP balance |
 
@@ -52,10 +52,11 @@ Manage BLEEP wallets (quantum-secure key pairs).
 bleep-cli wallet create
 # Output:
 # ✅ Wallet created
-#    Address: BLEEP1a3f7b2c9d4e8f1a0b5c6d7e9f2a3b4c5d6e7f8
-#    Type:    Quantum-secure (SPHINCS+-SHAKE-256)
+#    Address: BLEEP2...
+#    Type:    SLH-DSA SHAKE-256f (FIPS 205, version 2)
 #    Signing: ✅ ready (Argon2id + AES-256-GCM)
-#    ⚠️  Back up your key material in a safe location.
+#    Recovery phrase (write this down; shown only once):
+#    [24 words — store offline; anyone with this phrase controls the wallet]
 ```
 
 Wallet creation and import prompt for a password twice. For non-interactive
@@ -65,6 +66,13 @@ plaintext storage for a disposable dev/test wallet only, set both
 Plaintext wallets cannot be unlocked unless that explicit dev/test setting is
 also present.
 
+Version-2 wallets derive their SLH-DSA SHAKE-256f keypair from the BIP-39
+phrase and use `BLEEP2` addresses. Legacy `BLEEP1` wallets retain their
+SPHINCS+-SHAKE-256f-simple signing scheme. The two derivation versions cannot
+be mixed in one `~/.bleep/wallets.json`; use separate wallet directories if
+both are needed. Version-2 wallets can send regular transactions; validator
+staking and oracle updates still require a legacy `BLEEP1` wallet.
+
 ---
 
 ### `tx`
@@ -73,15 +81,15 @@ Submit and inspect transactions.
 
 | Subcommand | Description |
 |------------|-------------|
-| `tx send --to <addr> --amount <n>` | Sign and submit a BLP transfer |
+| `tx send <addr> <amount>` | Sign and submit a BLP transfer |
 | `tx status <tx-hash>` | Query the status of a submitted transaction |
 
 ```bash
 # Transfer 100 BLP
-bleep-cli tx send --to BLEEP1f4d2c8e... --amount 100
+bleep-cli tx send BLEEP1f4d2c8e... 100
 
 # Set wallet password via env if wallet is encrypted
-BLEEP_WALLET_PASSWORD="passphrase" bleep-cli tx send --to BLEEP1... --amount 50
+BLEEP_WALLET_PASSWORD="passphrase" bleep-cli tx send BLEEP1... 50
 ```
 
 Write commands require `BLEEP_JWT_TOKEN` to contain a session token issued by

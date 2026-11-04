@@ -2,13 +2,13 @@
 //!
 //! Responsibilities:
 //!   1. Compile WASM bytecode with Wasmer Cranelift (JIT).
-//!   2. Inject a metered host function: every call, deduct gas from a
-//!      shared `GasMeter`. On exhaustion, the host function signals OOG.
+//!   2. Expose cooperative host gas accounting. Modules that do not call the
+//!      host meter are bounded by the independent hard execution deadline.
 //!   3. Provide the full set of BLEEP host imports (storage, crypto, logging).
 //!   4. Write call data into WASM linear memory before execution.
 //!   5. Read back the return value from WASM after execution.
 //!   6. Cache compiled modules (keyed by bytecode hash) using a bounded LRU.
-//!   7. Enforce execution timeout via `tokio::time::timeout`.
+//!   7. Enforce an engine-level interrupt deadline independently of gas.
 //!   8. Translate Wasmer traps into typed `VmError`.
 
 use std::num::NonZeroUsize;
@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use wasmer::{imports, Function, FunctionEnv, FunctionEnvMut, Instance, Module, Store, Value};
 
 // Correct import paths — these live in the runtime sub-modules
+use super::wasm_safety::{validate_memory_limit, WasmExecutionDeadline, WASM_MAX_EXECUTION_TIME};
 use crate::error::{VmError, VmResult};
 use crate::runtime::gas_model_base::GasMeter;
 use crate::runtime::memory::MemoryLimit;
@@ -280,8 +281,10 @@ impl WasmRuntime {
         let start = Instant::now();
 
         let mut store = Store::default();
+        validate_memory_limit(bytecode, mem_limit.max_pages)?;
 
         let module = module_cache.get_or_compile(bytecode, &store)?;
+        let deadline = WasmExecutionDeadline::new(&store, WASM_MAX_EXECUTION_TIME)?;
 
         let gas_meter = Arc::new(Mutex::new(GasMeter::new(gas_limit, schedule)?));
 
@@ -315,8 +318,15 @@ impl WasmRuntime {
             },
         };
 
-        let instance = Instance::new(&mut store, &module, &import_object)
-            .map_err(|e| VmError::WasmInstantiation(e.to_string()))?;
+        let instance = Instance::new(&mut store, &module, &import_object).map_err(|error| {
+            if deadline.expired() {
+                VmError::Timeout {
+                    millis: WASM_MAX_EXECUTION_TIME.as_millis() as u64,
+                }
+            } else {
+                VmError::WasmInstantiation(error.to_string())
+            }
+        })?;
 
         // Write call_data into linear memory at offset 0 if the export exists
         let memory_peak = if let Ok(mem) = instance.exports.get_memory("memory") {
@@ -356,6 +366,12 @@ impl WasmRuntime {
                 (true, vec![], None)
             }
         };
+
+        if deadline.expired() {
+            return Err(VmError::Timeout {
+                millis: WASM_MAX_EXECUTION_TIME.as_millis() as u64,
+            });
+        }
 
         let gas_exhausted = *env.as_ref(&store).gas_exhausted.lock();
         if gas_exhausted {
@@ -411,6 +427,10 @@ impl Default for WasmRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function as WasmFunction, FunctionSection,
+        Instruction, Module as WasmModule, TypeSection,
+    };
 
     fn default_schedule() -> Arc<GasSchedule> {
         Arc::new(GasSchedule::default())
@@ -428,6 +448,29 @@ mod tests {
             b'c', b'o', b'n', b't', b'r', b'a', b'c', b't', 0x00, 0x00, 0x0A, 0x06, 0x01, 0x04,
             0x00, 0x41, 0x2A, 0x0B,
         ]
+    }
+
+    fn infinite_loop_wasm() -> Vec<u8> {
+        let mut types = TypeSection::new();
+        types.function([], []);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        let mut exports = ExportSection::new();
+        exports.export("call_contract", ExportKind::Func, 0);
+        let mut function = WasmFunction::new([]);
+        function.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+        function.instruction(&Instruction::Br(0));
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+        let mut code = CodeSection::new();
+        code.function(&function);
+        let mut module = WasmModule::new();
+        module
+            .section(&types)
+            .section(&functions)
+            .section(&exports)
+            .section(&code);
+        module.finish()
     }
 
     #[tokio::test]
@@ -516,6 +559,21 @@ mod tests {
             .execute(&minimal_passive_wasm(), 100, default_schedule(), &[], None)
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_interrupts_non_cooperative_module() {
+        let runtime = WasmRuntime::new();
+        let result = runtime
+            .execute(
+                &infinite_loop_wasm(),
+                100_000,
+                default_schedule(),
+                &[],
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(VmError::Timeout { .. })));
     }
 
     #[test]

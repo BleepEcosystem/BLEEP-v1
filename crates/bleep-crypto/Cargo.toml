@@ -60,6 +60,8 @@ pqcrypto-traits = "0.3.5"
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 hmac   = "0.12"
 hkdf = "0.12"
+bip39 = "2.0.1"
+slh-dsa = { version = "0.2.0-rc.5", features = ["zeroize"] }
 
 
 [dev-dependencies]

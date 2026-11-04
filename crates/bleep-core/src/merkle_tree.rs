@@ -1,6 +1,6 @@
 use bleep_crypto::merkle_commitment::verify_merkle_path;
 use bleep_state::state_merkle::SparseMerkleTrie;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Hash-based Merkle path for identity verification (post-quantum secure)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,7 +12,12 @@ pub struct MerklePath {
 }
 
 impl MerklePath {
-    pub fn new(leaf_hash: [u8; 32], root_hash: [u8; 32], proof_elements: Vec<[u8; 32]>, path_indices: Vec<bool>) -> Self {
+    pub fn new(
+        leaf_hash: [u8; 32],
+        root_hash: [u8; 32],
+        proof_elements: Vec<[u8; 32]>,
+        path_indices: Vec<bool>,
+    ) -> Self {
         Self {
             leaf_hash,
             root_hash,
@@ -21,8 +26,12 @@ impl MerklePath {
         }
     }
 
-    /// Verify the Merkle path using the canonical, position-bound format.
-    pub fn verify(&self) -> bool {
+    /// Verify the Merkle path against a root obtained from a trusted source.
+    pub fn verify(&self, trusted_root: &[u8; 32]) -> bool {
+        if self.root_hash != *trusted_root {
+            return false;
+        }
+
         let depth = self.proof_elements.len();
         if self.path_indices.len() != depth || depth >= usize::BITS as usize {
             return false;
@@ -71,7 +80,12 @@ impl ProofOfIdentity {
     }
 
     /// Generate a proof for a user
-    pub fn generate_proof(&self, user_address: &str, balance: u128, nonce: u64) -> Result<IdentityProof, String> {
+    pub fn generate_proof(
+        &self,
+        user_address: &str,
+        balance: u128,
+        nonce: u64,
+    ) -> Result<IdentityProof, String> {
         // Insert the user into the tree
         let mut temp_tree = self.merkle_tree.clone();
         temp_tree.insert(user_address, balance, nonce);
@@ -97,17 +111,15 @@ impl ProofOfIdentity {
         })
     }
 
-    pub fn verify_proof(&self, proof: &IdentityProof) -> bool {
-        proof.merkle_path.verify()
+    pub fn verify_proof(&self, proof: &IdentityProof, trusted_root: &[u8; 32]) -> bool {
+        proof.merkle_path.verify(trusted_root)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_crypto::merkle_commitment::{
-        merkle_hash_node, version_merkle_root,
-    };
+    use bleep_crypto::merkle_commitment::{merkle_hash_node, version_merkle_root};
 
     #[test]
     fn verifies_canonical_position_bound_path() {
@@ -123,13 +135,13 @@ mod tests {
             vec![false, true],
         );
 
-        assert!(proof.verify());
+        assert!(proof.verify(&version_merkle_root(&tree_root)));
     }
 
     #[test]
     fn rejects_path_direction_length_mismatch() {
         let proof = MerklePath::new([1u8; 32], [2u8; 32], vec![[3u8; 32]], vec![]);
-        assert!(!proof.verify());
+        assert!(!proof.verify(&[2u8; 32]));
     }
 
     #[test]
@@ -140,6 +152,6 @@ mod tests {
             vec![[3u8; 32]; usize::BITS as usize],
             vec![false; usize::BITS as usize],
         );
-        assert!(!proof.verify());
+        assert!(!proof.verify(&[2u8; 32]));
     }
 }

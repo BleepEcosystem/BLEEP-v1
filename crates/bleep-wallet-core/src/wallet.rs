@@ -4,7 +4,7 @@
 //!
 //! ## Key storage model
 //! ```text
-//! EncryptedWallet.signing_key  ← AES-256-GCM ciphertext of SPHINCS+ SK
+//! EncryptedWallet.signing_key  ← AES-256-GCM ciphertext of signing key
 //!                                Layout: ["BWK2" || salt(16) || nonce(12) ||
 //!                                         ciphertext || tag(16)]
 //! ```
@@ -31,6 +31,8 @@ use zeroize::{Zeroize, Zeroizing};
 const ENCRYPTED_KEY_MAGIC: &[u8; 4] = b"BWK2";
 const ARGON2_SALT_LEN: usize = 16;
 const AES_GCM_NONCE_LEN: usize = 12;
+const LEGACY_DERIVATION_VERSION: u8 = 1;
+const MNEMONIC_DERIVATION_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,17 +47,17 @@ enum KeyProtection {
 
 /// One wallet record persisted to disk.
 ///
-/// `falcon_keys`  — SPHINCS+ public key (address derivation).
+/// `falcon_keys`  — transaction public key (address derivation).
 /// `kyber_keys`   — Kyber KEM public key.
-/// `signing_key`  — AES-256-GCM encrypted SPHINCS+ secret key, or empty if
+/// `signing_key`  — AES-256-GCM encrypted signing key, or empty if
 ///                  no signing key has been imported.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedWallet {
-    /// SPHINCS+ public key bytes.
+    /// Transaction public key bytes.
     pub falcon_keys: Vec<u8>,
     /// Kyber KEM public key bytes.
     pub kyber_keys: Vec<u8>,
-    /// AES-256-GCM ciphertext of the SPHINCS+ secret key.
+    /// AES-256-GCM ciphertext of the transaction signing key.
     /// Argon2id format: magic(4) || salt(16) || nonce(12) || ciphertext || tag(16).
     /// Empty if no signing key is stored.
     #[serde(default)]
@@ -63,10 +65,13 @@ pub struct EncryptedWallet {
     /// How `signing_key` is protected. Missing values identify legacy wallet files.
     #[serde(default)]
     key_protection: KeyProtection,
+    /// Key derivation and signature scheme version (1 = legacy, 2 = mnemonic SLH-DSA).
+    #[serde(default = "legacy_derivation_version")]
+    pub derivation_version: u8,
     /// Persisted wallet balance as a decimal string.
     #[serde(default = "default_balance")]
     pub balance: String,
-    /// BLEEP1<hex40> address derived from `falcon_keys`.
+    /// Versioned BLEEP account address derived from `falcon_keys`.
     pub address: String,
     /// Human-readable label (optional).
     pub label: Option<String>,
@@ -89,6 +94,7 @@ impl EncryptedWallet {
             kyber_keys,
             signing_key: vec![],
             key_protection: KeyProtection::Legacy,
+            derivation_version: LEGACY_DERIVATION_VERSION,
             balance: default_balance(),
             address,
             label: None,
@@ -111,6 +117,7 @@ impl EncryptedWallet {
             kyber_keys,
             signing_key,
             key_protection: KeyProtection::Argon2id,
+            derivation_version: LEGACY_DERIVATION_VERSION,
             balance: default_balance(),
             address,
             label: None,
@@ -135,6 +142,53 @@ impl EncryptedWallet {
             kyber_keys,
             signing_key: falcon_sk.to_vec(),
             key_protection: KeyProtection::PlaintextDev,
+            derivation_version: LEGACY_DERIVATION_VERSION,
+            balance: default_balance(),
+            address,
+            label: None,
+        })
+    }
+
+    /// Create an encrypted version-2 wallet from a deterministic SLH-DSA keypair.
+    pub fn with_mnemonic_key_encrypted(
+        public_key: Vec<u8>,
+        secret_key: &[u8],
+        kyber_keys: Vec<u8>,
+        password: &str,
+    ) -> Result<Self, Box<dyn Error>> {
+        let address = bleep_crypto::derive_account_address_v2(&public_key);
+        let signing_key = encrypt_key(secret_key, password, &address)?;
+        Ok(Self {
+            falcon_keys: public_key,
+            kyber_keys,
+            signing_key,
+            key_protection: KeyProtection::Argon2id,
+            derivation_version: MNEMONIC_DERIVATION_VERSION,
+            balance: default_balance(),
+            address,
+            label: None,
+        })
+    }
+
+    /// Store a deterministic version-2 SLH-DSA key in plaintext on explicit dev/test networks.
+    pub fn with_mnemonic_key_plaintext_dev(
+        public_key: Vec<u8>,
+        secret_key: &[u8],
+        kyber_keys: Vec<u8>,
+    ) -> Result<Self, Box<dyn Error>> {
+        if !plaintext_dev_mode_enabled() {
+            return Err(
+                "Plaintext wallet mode requires BLEEP_WALLET_PLAINTEXT_DEV=1 and a dev/test network"
+                    .into(),
+            );
+        }
+        let address = bleep_crypto::derive_account_address_v2(&public_key);
+        Ok(Self {
+            falcon_keys: public_key,
+            kyber_keys,
+            signing_key: secret_key.to_vec(),
+            key_protection: KeyProtection::PlaintextDev,
+            derivation_version: MNEMONIC_DERIVATION_VERSION,
             balance: default_balance(),
             address,
             label: None,
@@ -176,7 +230,7 @@ impl EncryptedWallet {
 
     // ── Address derivation ────────────────────────────────────────────────────
 
-    /// Derive the canonical BLEEP account address from its SPHINCS+ key.
+    /// Derive the legacy BLEEP1 account address from its public key.
     pub fn derive_address(public_key: &[u8]) -> String {
         bleep_crypto::derive_account_address(public_key)
     }
@@ -337,6 +391,10 @@ fn default_balance() -> String {
     "0".to_string()
 }
 
+fn legacy_derivation_version() -> u8 {
+    LEGACY_DERIVATION_VERSION
+}
+
 // ─── WalletManager ────────────────────────────────────────────────────────────
 
 /// Manages a collection of wallets persisted as JSON.
@@ -368,6 +426,7 @@ impl WalletManager {
         } else {
             Vec::new()
         };
+        Self::validate_derivation_versions(&wallets)?;
         log::info!(
             "WalletManager: loaded {} wallets from {:?}",
             wallets.len(),
@@ -384,8 +443,39 @@ impl WalletManager {
             log::warn!("Wallet {} already exists, skipping", wallet.address);
             return Ok(());
         }
+        if let Some(existing) = self.wallets.first() {
+            if existing.derivation_version != wallet.derivation_version {
+                return Err(format!(
+                    "Cannot mix wallet derivation versions {} and {} in one wallet file",
+                    existing.derivation_version, wallet.derivation_version
+                )
+                .into());
+            }
+        }
         self.wallets.push(wallet);
         self.persist()
+    }
+
+    fn validate_derivation_versions(wallets: &[EncryptedWallet]) -> Result<(), Box<dyn Error>> {
+        if let Some(first) = wallets.first() {
+            if !matches!(
+                first.derivation_version,
+                LEGACY_DERIVATION_VERSION | MNEMONIC_DERIVATION_VERSION
+            ) {
+                return Err(format!(
+                    "Unsupported wallet derivation version {}",
+                    first.derivation_version
+                )
+                .into());
+            }
+            if wallets
+                .iter()
+                .any(|wallet| wallet.derivation_version != first.derivation_version)
+            {
+                return Err("Wallet file contains mixed derivation versions".into());
+            }
+        }
+        Ok(())
     }
 
     pub fn list_wallets(&self) -> &[EncryptedWallet] {
@@ -631,6 +721,28 @@ mod tests {
             EncryptedWallet::with_signing_key_encrypted(pk, &sk, vec![], "my-password").unwrap();
         assert!(w.can_sign());
         assert_eq!(w.unlock("my-password").unwrap().as_slice(), sk);
+    }
+
+    #[test]
+    fn wallet_manager_refuses_to_mix_derivation_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wallets.json");
+        let mut manager = WalletManager::load_or_create_at(&path).unwrap();
+        let legacy =
+            EncryptedWallet::with_signing_key_encrypted(vec![1; 64], &[2; 128], vec![], "password")
+                .unwrap();
+        let mnemonic = EncryptedWallet::with_mnemonic_key_encrypted(
+            vec![3; 64],
+            &[4; 128],
+            vec![],
+            "password",
+        )
+        .unwrap();
+
+        manager.save_wallet(legacy).unwrap();
+        assert!(manager.save_wallet(mnemonic).is_err());
+        assert_eq!(manager.list_wallets().len(), 1);
+        assert_eq!(manager.list_wallets()[0].derivation_version, 1);
     }
 
     #[cfg(unix)]

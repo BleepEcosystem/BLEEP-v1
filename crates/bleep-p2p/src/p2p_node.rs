@@ -32,7 +32,7 @@ use crate::error::P2PResult;
 use crate::gossip_protocol::GossipProtocol;
 use crate::message_protocol::MessageProtocol;
 use crate::onion_routing::OnionRouter;
-use crate::peer_manager::{PeerEvent, PeerManager, PeerManagerConfig};
+use crate::peer_manager::{IdentityChallenge, PeerEvent, PeerManager, PeerManagerConfig};
 use crate::quantum_crypto::NodeIdentity;
 use crate::types::{MessageType, NodeId, PeerInfo, SecureMessage};
 
@@ -125,7 +125,6 @@ impl P2PNode {
 
         let (message_protocol, inbound_rx) = MessageProtocol::new(
             identity.identity_keypair.clone(),
-            identity.sphincs_keypair.clone(),
             identity.kyber_keypair.clone(),
             peer_manager.clone(),
         );
@@ -272,30 +271,34 @@ impl P2PNode {
         self.inbound_rx.lock().await.recv().await
     }
 
-    /// Admit a peer after verifying their SPHINCS+ identity proof.
+    /// Begin verifier-owned authentication of a peer connection.
+    pub fn begin_peer_authentication(&self, expected_peer: NodeId) -> P2PResult<IdentityChallenge> {
+        self.peer_manager.issue_identity_challenge(expected_peer)
+    }
+
+    /// Admit a peer after consuming this node's single-use connection challenge.
     pub async fn connect_peer(
         &self,
         addr: SocketAddr,
         identity_public_key: Vec<u8>,
         sphincs_pubkey: Vec<u8>,
-        challenge: &[u8],
+        connection_id: [u8; 16],
         sphincs_signature: &[u8],
     ) -> P2PResult<NodeId> {
         let peer_id = NodeId::from_bytes(&identity_public_key);
+        let verified_identity = self.peer_manager.verify_identity_proof(
+            connection_id,
+            identity_public_key,
+            sphincs_pubkey,
+            sphincs_signature,
+        )?;
         self.peer_manager
-            .add_peer(
-                peer_id.clone(),
-                addr,
-                identity_public_key,
-                sphincs_pubkey,
-                challenge,
-                sphincs_signature,
-            )
+            .add_peer(peer_id.clone(), addr, verified_identity)
             .await?;
         Ok(peer_id)
     }
 
-    /// Generate a SPHINCS+ proof-of-identity for use in the handshake.
+    /// Sign a verifier-generated challenge for peer authentication.
     pub fn make_identity_proof(&self, challenge: &[u8]) -> P2PResult<Vec<u8>> {
         self.identity.sign_sphincs(challenge)
     }
@@ -382,7 +385,7 @@ mod tests {
         assert!(!proof.is_empty());
 
         // Verify it
-        let sphincs_pk = &node.identity.sphincs_keypair.public_key.0;
+        let sphincs_pk = &node.identity.identity_keypair.public_key.0;
         crate::quantum_crypto::sphincs_verify(challenge, &proof, sphincs_pk).unwrap();
         handle.shutdown().await;
     }
@@ -393,17 +396,19 @@ mod tests {
         let (node_b, handle_b) = start_test_node(17703).await;
 
         let b_identity_pk = node_b.identity.identity_keypair.public_key_bytes();
-        let b_sphincs_pk = node_b.identity.sphincs_keypair.public_key.0.clone();
-        let challenge = b"handshake-test-challenge";
-        let sig = node_b.make_identity_proof(challenge).unwrap();
+        let b_sphincs_pk = node_b.identity.identity_keypair.public_key.0.clone();
         let expected_peer_id = NodeId::from_bytes(&b_identity_pk);
+        let challenge = node_a
+            .begin_peer_authentication(expected_peer_id.clone())
+            .unwrap();
+        let sig = node_b.make_identity_proof(&challenge.nonce).unwrap();
 
         let peer_id = node_a
             .connect_peer(
                 "127.0.0.1:17703".parse().unwrap(),
                 b_identity_pk,
                 b_sphincs_pk,
-                challenge,
+                challenge.connection_id,
                 &sig,
             )
             .await

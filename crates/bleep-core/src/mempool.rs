@@ -54,7 +54,8 @@ impl Mempool {
     /// this repository has no separate general-account public-key registry.
     pub fn embedded_sender_public_key(sender: &str, signature: &[u8]) -> Option<Vec<u8>> {
         let public_key = signature.get(..SPHINCS_PK_LEN)?;
-        (bleep_crypto::derive_account_address(public_key) == sender).then(|| public_key.to_vec())
+        bleep_crypto::account_address_matches_public_key(sender, public_key)
+            .then(|| public_key.to_vec())
     }
 
     /// Adds a transaction after checking its chain, account binding, and
@@ -94,7 +95,7 @@ impl Mempool {
             return false;
         };
         if sender_pk.len() != SPHINCS_PK_LEN
-            || bleep_crypto::derive_account_address(&sender_pk) != transaction.sender
+            || !bleep_crypto::account_address_matches_public_key(&transaction.sender, &sender_pk)
         {
             log::error!("Transaction validation failed: sender key does not match address");
             return false;
@@ -108,10 +109,11 @@ impl Mempool {
             transaction.timestamp,
             transaction.nonce,
         );
-        if !bleep_crypto::tx_signer::verify_tx_signature(
+        if !bleep_crypto::tx_signer::verify_tx_signature_for_address(
             &payload,
             &transaction.signature[SPHINCS_PK_LEN..],
             &sender_pk,
+            &transaction.sender,
         ) {
             log::error!("Transaction validation failed: invalid signature");
             return false;

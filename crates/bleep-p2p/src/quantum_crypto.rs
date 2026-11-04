@@ -296,9 +296,10 @@ pub struct NodeIdentity {
 
 impl NodeIdentity {
     pub fn generate() -> Self {
+        let identity_keypair = SphincsKeypair::generate();
         NodeIdentity {
-            identity_keypair: SphincsKeypair::generate(),
-            sphincs_keypair: SphincsKeypair::generate(),
+            sphincs_keypair: identity_keypair.clone(),
+            identity_keypair,
             kyber_keypair: KyberKeypair::generate(),
         }
     }
@@ -315,7 +316,7 @@ impl NodeIdentity {
 
     /// Sign message with SPHINCS+ (quantum-safe — used for identity proofs).
     pub fn sign_sphincs(&self, message: &[u8]) -> P2PResult<Vec<u8>> {
-        sphincs_sign(message, self.sphincs_keypair.secret_key.expose())
+        sphincs_sign(message, self.identity_keypair.secret_key.expose())
     }
 }
 
@@ -397,5 +398,12 @@ mod tests {
         let n1 = id.node_id();
         let n2 = crate::types::NodeId::from_bytes(&id.identity_keypair.public_key_bytes());
         assert_eq!(n1.0, n2.0);
+        assert_eq!(
+            id.identity_keypair.public_key_bytes(),
+            id.sphincs_keypair.public_key_bytes()
+        );
+        let message = b"single-key identity proof";
+        let signature = id.sign_sphincs(message).unwrap();
+        sphincs_verify(message, &signature, &id.identity_keypair.public_key_bytes()).unwrap();
     }
 }

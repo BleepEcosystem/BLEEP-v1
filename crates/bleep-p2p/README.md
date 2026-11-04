@@ -48,9 +48,15 @@ Every message on the BLEEP P2P network is post-quantum authenticated:
 | Session key establishment | ML-KEM-1024 | FIPS 203 algorithm; implementation conformance not claimed |
 | Session encryption | AES-256-GCM | NIST SP 800-38D |
 | Onion routing per-hop | ML-KEM-1024 + AES-256-GCM | — |
-| Peer ID derivation | Deterministic hash of SPHINCS+ public key | SHA3-256 |
+| Peer ID derivation | Deterministic hash of SPHINCS+ public key | SHA-256 |
 
 Length-prefixed P2P frame bodies larger than 2 MiB are rejected before allocation and bincode deserialization. The limit applies to all frame types; message authentication is verified after bounded frame decoding.
+
+Handshake version 2 binds the NodeId to the identity key and requires the
+identity and signing public keys to be identical. The accepting peer creates a
+random challenge per connection; the proof is single-use and expires after ten
+seconds. Peer admission rejects duplicate NodeIds rather than replacing their
+existing records.
 
 ---
 
@@ -114,10 +120,10 @@ BLEEP_P2P_SEEDS=198.51.100.10:7700,198.51.100.11:7700 \
 cargo run --bin bleep
 ```
 
-Each successful seed connection performs the SPHINCS+ identity admission and
-Kyber session exchange before adding the peer to the local Kademlia routing
-table. Seed addresses must be reachable from the node; public keys are learned
-and verified during the authenticated handshake.
+Each successful seed connection performs the challenge-response identity
+admission and Kyber session exchange before adding the peer to the local
+Kademlia routing table. Seed addresses must be reachable from the node; public
+keys are learned and their NodeId/key binding is verified during the handshake.
 
 ---
 

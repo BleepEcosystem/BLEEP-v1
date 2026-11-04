@@ -1,20 +1,18 @@
 //! # Transaction Signer
 //!
-//! Provides SPHINCS+-SHAKE-256 signing for BLEEP transactions.
+//! Provides versioned SPHINCS+-SHAKE-256 and SLH-DSA transaction signing.
 //!
 //! The `TxSigner` wraps the pqcrypto SPHINCS+ implementation and exposes
 //! a simple sign/verify interface tied to ZKTransaction payloads.
 //!
 //! ## Key layout
 //! ```text
-//!   Public key  (SK in wallet): raw SPHINCS+ public key bytes (64 bytes)
-//!   Secret key (SK, not stored on disk): raw SPHINCS+ secret key bytes
+//!   BLEEP1: SPHINCS+-SHAKE-256f-simple key material
+//!   BLEEP2: SLH-DSA SHAKE-256f key material
 //! ```
 //!
 //! ## Usage in bleep-cli
-//! 1. On `wallet create`: store (pk_bytes, sk_bytes) together in EncryptedWallet
-//! 2. On `tx send`: load sk_bytes, call `TxSigner::sign_tx_payload()`
-//! 3. On receipt validation: call `TxSigner::verify_tx_signature()`
+//! Signing and verification dispatch by the address prefix.
 
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
@@ -23,6 +21,7 @@ use sha3::{Digest, Sha3_256};
 
 const TX_DOMAIN: &[u8] = b"BLEEP:TRANSACTION:V1\0";
 const ACCOUNT_DOMAIN: &[u8] = b"BLEEP:ACCOUNT:ADDRESS:V1\0";
+const ACCOUNT_DOMAIN_V2: &[u8] = b"BLEEP:ACCOUNT:ADDRESS:V2\0";
 pub const DEFAULT_CHAIN_ID: &str = "BLEEP-PreTestnet-001";
 
 /// Sign a transaction payload using SPHINCS+-SHAKE-256.
@@ -57,18 +56,92 @@ pub fn verify_tx_signature(payload: &[u8], sig_bytes: &[u8], pk_bytes: &[u8]) ->
     sphincsshake256fsimple::verify_detached_signature(&sig, payload, &pk).is_ok()
 }
 
+/// Sign with the version-2 FIPS 205 SLH-DSA SHAKE-256f key scheme.
+pub fn sign_tx_payload_v2(payload: &[u8], sk_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use slh_dsa::signature::Signer;
+
+    let sk = slh_dsa::SigningKey::<slh_dsa::Shake256f>::try_from(sk_bytes)
+        .map_err(|error| format!("Invalid version-2 SLH-DSA secret key: {error}"))?;
+    let signature = sk
+        .try_sign(payload)
+        .map_err(|error| format!("SLH-DSA signing failed: {error}"))?;
+    Ok(signature.to_vec())
+}
+
+/// Verify a version-2 FIPS 205 SLH-DSA SHAKE-256f signature.
+pub fn verify_tx_signature_v2(payload: &[u8], sig_bytes: &[u8], pk_bytes: &[u8]) -> bool {
+    use slh_dsa::signature::Verifier;
+
+    let Ok(pk) = slh_dsa::VerifyingKey::<slh_dsa::Shake256f>::try_from(pk_bytes) else {
+        return false;
+    };
+    let Ok(signature) = slh_dsa::Signature::<slh_dsa::Shake256f>::try_from(sig_bytes) else {
+        return false;
+    };
+    pk.verify(payload, &signature).is_ok()
+}
+
+/// Sign according to the derivation version encoded by the account address.
+pub fn sign_tx_payload_for_address(
+    payload: &[u8],
+    sk_bytes: &[u8],
+    address: &str,
+) -> Result<Vec<u8>, String> {
+    match address {
+        address if address.starts_with("BLEEP1") => sign_tx_payload(payload, sk_bytes),
+        address if address.starts_with("BLEEP2") => sign_tx_payload_v2(payload, sk_bytes),
+        _ => Err("Unsupported BLEEP account address version".into()),
+    }
+}
+
+/// Verify a signature according to the derivation version encoded by the address.
+pub fn verify_tx_signature_for_address(
+    payload: &[u8],
+    sig_bytes: &[u8],
+    pk_bytes: &[u8],
+    address: &str,
+) -> bool {
+    match address {
+        address if address.starts_with("BLEEP1") => {
+            verify_tx_signature(payload, sig_bytes, pk_bytes)
+        }
+        address if address.starts_with("BLEEP2") => {
+            verify_tx_signature_v2(payload, sig_bytes, pk_bytes)
+        }
+        _ => false,
+    }
+}
+
 /// Derive the canonical BLEEP account address from a SPHINCS+ public key.
 ///
 /// The address is `BLEEP1` followed by the first 20 bytes of SHA256² over a
 /// domain-separated, length-delimited public key.
 pub fn derive_account_address(pk_bytes: &[u8]) -> String {
+    derive_account_address_with_domain(pk_bytes, ACCOUNT_DOMAIN, "BLEEP1")
+}
+
+/// Derive a version-2 account address for FIPS 205 SLH-DSA keys.
+pub fn derive_account_address_v2(pk_bytes: &[u8]) -> String {
+    derive_account_address_with_domain(pk_bytes, ACCOUNT_DOMAIN_V2, "BLEEP2")
+}
+
+/// Return whether a public key derives to the supplied versioned account address.
+pub fn account_address_matches_public_key(address: &str, pk_bytes: &[u8]) -> bool {
+    match address {
+        address if address.starts_with("BLEEP1") => derive_account_address(pk_bytes) == address,
+        address if address.starts_with("BLEEP2") => derive_account_address_v2(pk_bytes) == address,
+        _ => false,
+    }
+}
+
+fn derive_account_address_with_domain(pk_bytes: &[u8], domain: &[u8], prefix: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(ACCOUNT_DOMAIN);
+    hasher.update(domain);
     hasher.update((pk_bytes.len() as u64).to_le_bytes());
     hasher.update(pk_bytes);
     let first = hasher.finalize();
     let second = Sha256::digest(first);
-    format!("BLEEP1{}", hex::encode(&second[..20]))
+    format!("{prefix}{}", hex::encode(&second[..20]))
 }
 
 /// Build the canonical, domain-separated byte payload for a transaction.

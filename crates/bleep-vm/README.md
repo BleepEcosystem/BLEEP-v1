@@ -14,7 +14,7 @@
 - **Engine isolation.** A bug in the EVM cannot affect WASM. A bug in WASM cannot affect the STARK engine.
 - **State safety.** The VM never writes to state directly — it produces a `StateDiff` that `bleep-state` commits atomically.
 - **Determinism.** Identical intent + identical state = identical output on every honest node. No filesystem, no network, no randomness in the sandbox.
-- **DoS resistance.** A unified gas model normalises costs across all VMs — preventing attackers from exploiting cheaper engines for denial-of-service.
+- **DoS resistance.** WASM execution has an engine-level hard deadline and bounded memory; contract-reported gas remains advisory.
 
 ---
 
@@ -41,7 +41,7 @@
 │  Tier 3 — Execution Engines (completely isolated)                   │
 │                                                                     │
 │  EvmEngine    — revm (Berlin/London/Shanghai EVM)                  │
-│  WasmEngine   — Wasmer 4.2 + Cranelift JIT                         │
+│  WasmEngine   — Wasmer 7.4.2 + Cranelift JIT                       │
 │  ZkEngine     — Groth16 on BN254 (ark-groth16)                     │
 │                                                                     │
 │  Bug in EVM cannot affect WASM. Bug in WASM cannot affect ZK.      │
@@ -99,7 +99,7 @@ crates/bleep-vm/
 │   │   └── vm_router.rs               # Tier 2: VmRouter and Engine trait
 │   ├── engines/
 │   │   ├── evm_engine.rs              # Tier 3: revm EVM (Berlin/London/Shanghai)
-│   │   ├── wasm_engine.rs             # Tier 3: Wasmer 4.2 + Cranelift JIT
+│   │   ├── wasm_engine.rs             # Tier 3: Wasmer 7.4.2 + Cranelift JIT
 │   │   └── zk_engine.rs               # Tier 3: Groth16 ZK verifier
 │   ├── runtime/
 │   │   ├── gas_model.rs               # Tier 6: Unified gas normalisation
@@ -259,8 +259,16 @@ executor.router.register_engine(Arc::new(CairoEngine));
 | State safety | VM outputs `StateDiff` only — `bleep-state` performs atomic commit |
 | Memory safety | WASM: max 256 pages (16 MB); call stack: 1,024 frames |
 | Cross-chain security | BLEEP Connect: ML-KEM-1024 + SPHINCS+ signatures (PQ-secure) |
-| DoS prevention | Unified gas normalisation prevents cheap-VM exploitation |
+| DoS prevention | WASM hard interrupt deadline and bounded linear memory |
 | Bytecode validation | Sandbox validator runs before any deployment |
+
+Wasmer 7.4.2 WASM calls are interrupted after two seconds, independently of
+contract host calls. Core module memories must declare a maximum no greater
+than 256 pages (16 MiB); imported memories are rejected. `bleep_gas` and
+`gas_charge` are cooperative accounting only, not a fee guarantee or a
+substitute for the hard deadline. WASM storage writes are journaled into the
+execution `StateDiff` and applied to the executor-owned `StorageBackend` only
+after a successful call.
 
 ---
 
@@ -269,7 +277,7 @@ executor.router.register_engine(Arc::new(CairoEngine));
 | Engine | Status | Implementation |
 |---|---|---|
 | Solidity / Vyper (EVM) | ✅ Live | revm — Berlin/London/Shanghai compatible |
-| WASM | ✅ Live | Wasmer 4.2 + Cranelift JIT |
+| WASM | ✅ Live | Wasmer 7.4.2 + Cranelift JIT |
 | ZK (Groth16) | ✅ Live | ark-groth16 on BN254 |
 | STARK (Winterfell) | ✅ Live | Bounded block-metadata proofs via `bleep-zkp`; not execution-validity proofs |
 | Cross-chain (BLEEP Connect) | ✅ Live | Tiers 3 and 4 on Ethereum Sepolia |

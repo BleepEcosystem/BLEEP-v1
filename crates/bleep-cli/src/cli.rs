@@ -40,9 +40,10 @@ use bleep_ai::{
     wallet::BLEEPWallet,
 };
 use bleep_core::transaction::ZKTransaction;
-use bleep_crypto::bip39::{mnemonic_to_bleep_seed, validate_mnemonic};
+use bleep_crypto::bip39::{generate_mnemonic, mnemonic_to_bleep_seed, validate_mnemonic};
+use bleep_crypto::derivation::derive_tx_keypair;
 use bleep_crypto::tx_signer::{
-    generate_tx_keypair, sign_tx_payload, tx_payload, validator_stake_payload, ValidatorKeyBindings,
+    sign_tx_payload_for_address, tx_payload, validator_stake_payload, ValidatorKeyBindings,
 };
 use bleep_economics::oracle_bridge::{oracle_signing_message, OracleSource, PriceUpdate};
 use bleep_governance::governance_core::{GovernanceEngine, Proposal, ProposalType, Vote};
@@ -150,16 +151,25 @@ async fn run(cmd: Commands) -> Result<()> {
 
             match action {
                 WalletCommand::Create => {
-                    let (pk, sk) = generate_tx_keypair();
+                    let phrase = Zeroizing::new(
+                        generate_mnemonic()
+                            .map_err(|error| anyhow!("Mnemonic generation failed: {error}"))?,
+                    );
+                    let seed = Zeroizing::new(
+                        mnemonic_to_bleep_seed(&phrase, "")
+                            .map_err(|error| anyhow!("BIP-39 derivation failed: {error}"))?,
+                    );
+                    let (pk, sk) = derive_tx_keypair(seed.as_ref())
+                        .map_err(|error| anyhow!("SLH-DSA key derivation failed: {error}"))?;
                     let sk = Zeroizing::new(sk);
                     let kyber_pk = pk.clone();
                     let wallet = if bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_plaintext_dev(
+                        bleep_wallet_core::wallet::EncryptedWallet::with_mnemonic_key_plaintext_dev(
                             pk, &sk, kyber_pk,
                         )
                     } else {
                         let password = wallet_password(true)?;
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
+                        bleep_wallet_core::wallet::EncryptedWallet::with_mnemonic_key_encrypted(
                             pk, &sk, kyber_pk, &password,
                         )
                     }
@@ -169,7 +179,7 @@ async fn run(cmd: Commands) -> Result<()> {
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
                     println!("✅ Wallet created");
                     println!("   Address: {}", wallet.address());
-                    println!("   Type:    Quantum-secure (SPHINCS+-SHAKE-256)");
+                    println!("   Type:    SLH-DSA SHAKE-256f (FIPS 205, version 2)");
                     println!(
                         "   Signing: ✅ ready ({})",
                         if wallet.is_plaintext_dev() {
@@ -179,6 +189,8 @@ async fn run(cmd: Commands) -> Result<()> {
                         }
                     );
                     println!("   ⚠️  Back up your key material in a safe location.");
+                    println!("   Recovery phrase (write this down; shown only once):");
+                    println!("   {}", phrase.as_str());
 
                     // Automatically request faucet funds for the new wallet
                     let addr = wallet.address();
@@ -244,22 +256,18 @@ async fn run(cmd: Commands) -> Result<()> {
                         mnemonic_to_bleep_seed(&phrase, "")
                             .map_err(|e| anyhow!("BIP-39 derivation failed: {}", e))?,
                     );
-                    use sha3::{Digest, Sha3_256};
-                    let pk: Vec<u8> = Sha3_256::digest(seed_32.as_ref()).to_vec();
+                    let (pk, sk) = derive_tx_keypair(seed_32.as_ref())
+                        .map_err(|error| anyhow!("SLH-DSA key derivation failed: {error}"))?;
+                    let sk = Zeroizing::new(sk);
                     let kyber_pk = pk.clone();
                     let wallet = if bleep_wallet_core::wallet::plaintext_dev_mode_enabled() {
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_plaintext_dev(
-                            pk,
-                            seed_32.as_ref(),
-                            kyber_pk,
+                        bleep_wallet_core::wallet::EncryptedWallet::with_mnemonic_key_plaintext_dev(
+                            pk, &sk, kyber_pk,
                         )
                     } else {
                         let password = wallet_password(true)?;
-                        bleep_wallet_core::wallet::EncryptedWallet::with_signing_key_encrypted(
-                            pk,
-                            seed_32.as_ref(),
-                            kyber_pk,
-                            &password,
+                        bleep_wallet_core::wallet::EncryptedWallet::with_mnemonic_key_encrypted(
+                            pk, &sk, kyber_pk, &password,
                         )
                     }
                     .map_err(|e| anyhow!("Wallet key protection failed: {}", e))?;
@@ -267,7 +275,7 @@ async fn run(cmd: Commands) -> Result<()> {
                         .save_wallet(wallet.clone())
                         .map_err(|e| anyhow!("Save failed: {}", e))?;
                     println!(
-                        "✅ Wallet imported (BIP-39 PBKDF2-HMAC-SHA512): {}",
+                        "✅ Wallet restored (BIP-39 → SLH-DSA SHAKE-256f, version 2): {}",
                         wallet.address()
                     );
                     println!("   Mnemonic words: {}", phrase.split_whitespace().count());
@@ -328,7 +336,7 @@ async fn run(cmd: Commands) -> Result<()> {
                     .as_u64()
                     .ok_or_else(|| anyhow!("RPC transaction nonce response is missing nonce"))?;
 
-                // Sprint 5: unlock AES-GCM encrypted SK, sign with SPHINCS+
+                // Unlock the encrypted key and dispatch signing by address version.
                 let sig = {
                     let manager_for_sign = WalletManager::load_or_create()
                         .map_err(|e| anyhow!("Wallet load failed: {}", e))?;
@@ -339,14 +347,14 @@ async fn run(cmd: Commands) -> Result<()> {
                             let payload = tx_payload(&chain_id, &sender, &to, amount, ts, nonce);
                             let sk_plain = unlock_wallet_key(&w)
                                 .map_err(|e| anyhow!("Wallet unlock failed — set BLEEP_WALLET_PASSWORD if encrypted: {}", e))?;
-                            let detached_sig = sign_tx_payload(&payload, &sk_plain)
-                                .map_err(|e| anyhow!("SPHINCS+ signing failed: {}", e))?;
+                            let detached_sig =
+                                sign_tx_payload_for_address(&payload, &sk_plain, w.address())
+                                    .map_err(|e| anyhow!("Transaction signing failed: {}", e))?;
 
-                            // Wire format: pk_bytes(64) || sphincs_detached_sig(49_856)
-                            // SPHINCS+ public keys for sphincsshake256fsimple are 64 bytes
+                            // Wire format: pk_bytes(64) || detached_signature(49_856).
                             if w.falcon_keys.len() != 64 {
                                 return Err(anyhow!(
-                                    "Expected a 64-byte SPHINCS+ public key, got {} bytes",
+                                    "Expected a 64-byte transaction public key, got {} bytes",
                                     w.falcon_keys.len()
                                 ));
                             }
@@ -373,7 +381,7 @@ async fn run(cmd: Commands) -> Result<()> {
                     amount,
                     timestamp: ts,
                     nonce,
-                    signature: sig.clone(), // Wire format: pk(64) || SPHINCS+ detached sig
+                    signature: sig.clone(), // Wire format: pk(64) || detached signature
                 };
 
                 // POST to RPC
@@ -918,6 +926,11 @@ async fn run(cmd: Commands) -> Result<()> {
                             operator_id
                         )
                     })?;
+                if wallet.derivation_version != 1 {
+                    return Err(anyhow!(
+                        "Oracle updates currently require a legacy BLEEP1 SPHINCS+ wallet"
+                    ));
+                }
                 if !wallet.can_sign() {
                     return Err(anyhow!("The operator wallet has no signing key"));
                 }
@@ -932,9 +945,12 @@ async fn run(cmd: Commands) -> Result<()> {
                     operator_id: operator_bytes,
                     signature: Vec::new(),
                 };
-                update.signature =
-                    sign_tx_payload(&oracle_signing_message(&update), &secret_key)
-                        .map_err(|error| anyhow!("Oracle update signing failed: {error}"))?;
+                update.signature = sign_tx_payload_for_address(
+                    &oracle_signing_message(&update),
+                    &secret_key,
+                    wallet.address(),
+                )
+                .map_err(|error| anyhow!("Oracle update signing failed: {error}"))?;
                 let body = serde_json::json!({
                     "asset": asset,
                     "price": price,
@@ -1403,6 +1419,11 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
         .first()
         .cloned()
         .ok_or_else(|| anyhow!("No wallet found; create or import a wallet first"))?;
+    if wallet.derivation_version != 1 {
+        return Err(anyhow!(
+            "Validator staking currently requires a legacy BLEEP1 SPHINCS+ wallet"
+        ));
+    }
     if !wallet.can_sign() {
         return Err(anyhow!("Wallet cannot sign validator stake requests"));
     }
@@ -1461,7 +1482,7 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
     );
     let signing_key =
         unlock_wallet_key(&wallet).map_err(|error| anyhow!("Wallet unlock failed: {error}"))?;
-    let proof = sign_tx_payload(&payload, &signing_key)
+    let proof = sign_tx_payload_for_address(&payload, &signing_key, &wallet.address)
         .map_err(|error| anyhow!("Validator stake signing failed: {error}"))?;
     let body = StakeRequest {
         tx_type: "Stake".to_string(),

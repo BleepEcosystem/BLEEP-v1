@@ -262,7 +262,7 @@ mod tests {
         let (pm, _) = PeerManager::new(local.clone(), PeerManagerConfig::default());
         let identity = SphincsKeypair::generate();
         let kyber = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(identity, SphincsKeypair::generate(), kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, kyber, pm.clone());
         let scoring = Arc::new(PeerScoring::new());
         (OnionRouter::new(pm.clone(), mp, scoring), pm)
     }
