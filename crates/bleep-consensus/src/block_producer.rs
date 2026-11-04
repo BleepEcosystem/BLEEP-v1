@@ -402,13 +402,13 @@ impl BlockProducer {
                         })
                         .map(|validator| validator.vrf_public_key.as_slice())
                 });
-            let previous_randomness =
-                PoSConsensusEngine::randomness_from_parent_block(&parent_block, parent_vrf_public_key)
-                    .map_err(|error| {
-                        format!(
-                            "Cannot derive proposer randomness at height {next_height}: {error}"
-                        )
-                    })?;
+            let previous_randomness = PoSConsensusEngine::randomness_from_parent_block(
+                &parent_block,
+                parent_vrf_public_key,
+            )
+            .map_err(|error| {
+                format!("Cannot derive proposer randomness at height {next_height}: {error}")
+            })?;
             let local_vrf_public_key =
                 PoSConsensusEngine::derive_vrf_public_key(&self.config.validator_sk)?;
             let local_identity = active_identities
@@ -684,11 +684,8 @@ impl BlockProducer {
             &block.previous_hash,
         )
         .map_err(|error| format!("Block {next_height} VRF generation failed: {error}"))?;
-        block.zk_proof = PoSConsensusEngine::encode_vrf_stark_envelope(
-            &vrf_output,
-            &vrf_proof,
-            &[],
-        );
+        block.zk_proof =
+            PoSConsensusEngine::encode_vrf_stark_envelope(&vrf_output, &vrf_proof, &[]);
 
         // Every non-genesis block must carry a real SPHINCS+ signature.
         block
@@ -735,10 +732,19 @@ impl BlockProducer {
 
         // ── 10: Commit to chain only after the PBFT commit quorum ───────────────
         let accepted = {
-            let mut chain = self
-                .blockchain
-                .write()
-                .map_err(|e| format!("blockchain write lock: {}", e))?;
+            let mut chain = match self.blockchain.write() {
+                Ok(chain) => chain,
+                Err(error) => {
+                    let rejection = format!("blockchain write lock: {error}");
+                    let cleanup = finality.abandon_proposal(next_height);
+                    return Err(match cleanup {
+                        Ok(()) => rejection,
+                        Err(cleanup_error) => {
+                            format!("{rejection}; PBFT cleanup failed: {cleanup_error}")
+                        }
+                    });
+                }
+            };
             let accepted = chain.add_block_with_validator_set(block.clone(), &epoch_validator_keys);
             if accepted {
                 if let Err(e) = self.state.lock().persist_canonical_block(
@@ -750,9 +756,14 @@ impl BlockProducer {
                     &Block::genesis_for_chain(self.config.chain_id.clone()).compute_hash(),
                 ) {
                     chain.rollback();
+                    let cleanup = finality.abandon_proposal(next_height);
                     return Err(format!(
-                        "Block {} durable commit failed: {}",
-                        next_height, e
+                        "Block {} durable commit failed: {}; PBFT cleanup: {}",
+                        next_height,
+                        e,
+                        cleanup
+                            .err()
+                            .unwrap_or_else(|| "proposal abandoned".to_string())
                     ));
                 }
             }
@@ -760,11 +771,18 @@ impl BlockProducer {
         };
 
         if !accepted {
+            let cleanup = finality.abandon_proposal(next_height);
             error!(
                 "[BlockProducer] Block {} rejected — validation failed, not adding to chain",
                 next_height
             );
-            return Err(format!("Block {} validation failed", next_height));
+            return Err(format!(
+                "Block {} validation failed; PBFT cleanup: {}",
+                next_height,
+                cleanup
+                    .err()
+                    .unwrap_or_else(|| "proposal abandoned".to_string())
+            ));
         }
 
         // Inbound validators require each transaction's full signature. Until

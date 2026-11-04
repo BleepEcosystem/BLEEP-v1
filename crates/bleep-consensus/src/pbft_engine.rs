@@ -21,10 +21,12 @@ use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 const PBFT_VOTE_DOMAIN: &[u8] = b"BLEEP:PBFT:VOTE:V1\0";
 pub const PBFT_MESSAGE_TYPE: &str = "BLEEP_PBFT_V1";
+pub const PBFT_VIEW_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Encode the signed payload for one prepare or commit vote.
 pub fn pbft_vote_message(
@@ -87,9 +89,9 @@ pub struct LivePbftFinality {
     local_secret_key: Vec<u8>,
     local_public_key: Vec<u8>,
     p2p: Option<Arc<P2PNode>>,
-    engine: Mutex<PbftConsensusEngine>,
-    local_prepare_sent: Mutex<HashSet<u64>>,
-    local_commit_sent: Mutex<HashSet<u64>>,
+    engine: Arc<Mutex<PbftConsensusEngine>>,
+    local_prepare_sent: Arc<Mutex<HashSet<u64>>>,
+    local_commit_sent: Arc<Mutex<HashSet<u64>>>,
     finalized: Notify,
 }
 
@@ -132,9 +134,9 @@ impl LivePbftFinality {
             local_secret_key,
             local_public_key,
             p2p,
-            engine: Mutex::new(engine),
-            local_prepare_sent: Mutex::new(HashSet::new()),
-            local_commit_sent: Mutex::new(HashSet::new()),
+            engine: Arc::new(Mutex::new(engine)),
+            local_prepare_sent: Arc::new(Mutex::new(HashSet::new())),
+            local_commit_sent: Arc::new(Mutex::new(HashSet::new())),
             finalized: Notify::new(),
         })
     }
@@ -193,10 +195,14 @@ impl LivePbftFinality {
             ));
         }
         self.start_proposal(block)?;
-        self.broadcast(&PbftMessage::Proposal {
-            block: block.clone(),
-        })?;
-        self.send_local_vote(PbftPhase::Prepare, block.index)?;
+        let result = self
+            .broadcast(&PbftMessage::Proposal {
+                block: block.clone(),
+            })
+            .and_then(|()| self.send_local_vote(PbftPhase::Prepare, block.index));
+        if let Err(error) = result {
+            return self.abandon_after_error(block.index, error);
+        }
         Ok(())
     }
 
@@ -204,9 +210,18 @@ impl LivePbftFinality {
     pub fn receive_proposal(&self, block: &Block) -> Result<(), String> {
         let is_new = self.start_proposal(block)?;
         if is_new {
-            self.send_local_vote(PbftPhase::Prepare, block.index)?;
+            if let Err(error) = self.send_local_vote(PbftPhase::Prepare, block.index) {
+                return self.abandon_after_error(block.index, error);
+            }
         }
         Ok(())
+    }
+
+    fn abandon_after_error(&self, height: u64, error: String) -> Result<(), String> {
+        match self.abandon_proposal(height) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!("{error}; proposal cleanup failed: {cleanup_error}")),
+        }
     }
 
     pub fn receive_vote(
@@ -217,6 +232,7 @@ impl LivePbftFinality {
         validator_id: &str,
         signature: &[u8],
     ) -> Result<(), String> {
+        self.expire_stalled_proposal(block_height)?;
         {
             let mut engine = self.engine.lock();
             if engine.block_hashes.get(&block_height).map(String::as_str) != Some(block_hash) {
@@ -237,6 +253,8 @@ impl LivePbftFinality {
             }
             if engine.is_finalized(block_height) {
                 self.finalized.notify_one();
+                self.local_prepare_sent.lock().remove(&block_height);
+                self.local_commit_sent.lock().remove(&block_height);
             }
         }
 
@@ -266,19 +284,96 @@ impl LivePbftFinality {
     }
 
     /// Wait until a verified commit quorum finalizes this exact candidate.
-    /// Without PBFT view-change support, waiting rather than proposing a
-    /// conflicting block at this height preserves the safety invariant.
+    /// An uncommitted candidate is abandoned after the PBFT view timeout.
     pub async fn wait_for_finality(&self, height: u64, block_hash: &str) -> Result<(), String> {
-        loop {
-            let notified = self.finalized.notified();
-            if self.is_finalized(height, block_hash) {
-                return Ok(());
+        if self.is_finalized(height, block_hash) {
+            return Ok(());
+        }
+        let started_at = self
+            .engine
+            .lock()
+            .proposal_started_at
+            .get(&height)
+            .copied()
+            .ok_or_else(|| format!("No PBFT proposal recorded at height {height}"))?;
+        let remaining = PBFT_VIEW_TIMEOUT.saturating_sub(started_at.elapsed());
+        let wait_for_commit = async {
+            loop {
+                let notified = self.finalized.notified();
+                if self.is_finalized(height, block_hash) {
+                    return Ok(());
+                }
+                notified.await;
             }
-            notified.await;
+        };
+        match tokio::time::timeout(remaining, wait_for_commit).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.abandon_proposal(height)?;
+                Err(format!(
+                    "PBFT proposal at height {height} timed out after {:?}",
+                    PBFT_VIEW_TIMEOUT
+                ))
+            }
         }
     }
 
+    /// Roll back an uncommitted candidate and all proposal-scoped local state.
+    ///
+    /// A committed proposal cannot be abandoned: PBFT finality is irreversible.
+    pub fn abandon_proposal(&self, height: u64) -> Result<(), String> {
+        let mut engine = self.engine.lock();
+        if engine.block_state(height) == Some(PbftBlockState::Committed) {
+            return Err(format!(
+                "Cannot abandon committed PBFT proposal at height {height}"
+            ));
+        }
+        clear_proposal_state(&mut engine, height);
+        self.local_prepare_sent.lock().remove(&height);
+        self.local_commit_sent.lock().remove(&height);
+        Ok(())
+    }
+
+    fn schedule_view_timeout(&self, height: u64, block_hash: String, started_at: Instant) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let engine = Arc::clone(&self.engine);
+        let local_prepare_sent = Arc::clone(&self.local_prepare_sent);
+        let local_commit_sent = Arc::clone(&self.local_commit_sent);
+        runtime.spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(
+                started_at + PBFT_VIEW_TIMEOUT,
+            ))
+            .await;
+            let mut engine = engine.lock();
+            let is_same_uncommitted_proposal = engine.block_hashes.get(&height)
+                == Some(&block_hash)
+                && engine.proposal_started_at.get(&height) == Some(&started_at)
+                && engine.block_state(height) != Some(PbftBlockState::Committed);
+            if is_same_uncommitted_proposal {
+                clear_proposal_state(&mut engine, height);
+                local_prepare_sent.lock().remove(&height);
+                local_commit_sent.lock().remove(&height);
+            }
+        });
+    }
+
+    fn expire_stalled_proposal(&self, height: u64) -> Result<(), String> {
+        let expired = self
+            .engine
+            .lock()
+            .proposal_started_at
+            .get(&height)
+            .is_some_and(|started_at| started_at.elapsed() >= PBFT_VIEW_TIMEOUT);
+        if expired {
+            self.abandon_proposal(height)?;
+        }
+        Ok(())
+    }
+
     fn start_proposal(&self, block: &Block) -> Result<bool, String> {
+        self.expire_stalled_proposal(block.index)?;
         let mut engine = self.engine.lock();
         let block_hash = block.compute_hash();
         if let Some(existing_hash) = engine.block_hashes.get(&block.index) {
@@ -293,6 +388,9 @@ impl LivePbftFinality {
         engine
             .pre_prepare(block.index, block)
             .map_err(|e| e.to_string())?;
+        let started_at = engine.proposal_started_at[&block.index];
+        drop(engine);
+        self.schedule_view_timeout(block.index, block_hash, started_at);
         Ok(true)
     }
 
@@ -340,6 +438,8 @@ impl LivePbftFinality {
         if phase == PbftPhase::Prepare {
             self.start_local_commit_if_prepared(height)?;
         } else if self.engine.lock().is_finalized(height) {
+            self.local_prepare_sent.lock().remove(&height);
+            self.local_commit_sent.lock().remove(&height);
             self.finalized.notify_one();
         }
         Ok(())
@@ -363,6 +463,14 @@ impl LivePbftFinality {
         }
         Ok(())
     }
+}
+
+fn clear_proposal_state(engine: &mut PbftConsensusEngine, height: u64) {
+    engine.finalized_blocks.remove(&height);
+    engine.block_hashes.remove(&height);
+    engine.prepare_votes.remove(&height);
+    engine.commit_votes.remove(&height);
+    engine.proposal_started_at.remove(&height);
 }
 
 /// State of a block in the PBFT pipeline.
@@ -420,6 +528,7 @@ pub struct PbftConsensusEngine {
     known_validators: HashSet<String>,
     validator_pubkeys: HashMap<String, Vec<u8>>,
     block_hashes: HashMap<u64, String>,
+    proposal_started_at: HashMap<u64, Instant>,
 }
 
 impl PbftConsensusEngine {
@@ -498,6 +607,7 @@ impl PbftConsensusEngine {
             known_validators,
             validator_pubkeys,
             block_hashes: HashMap::new(),
+            proposal_started_at: HashMap::new(),
         }
     }
 
@@ -664,6 +774,8 @@ impl PbftConsensusEngine {
         self.finalized_blocks
             .insert(block_height, PbftBlockState::Proposed);
         self.block_hashes.insert(block_height, block.compute_hash());
+        self.proposal_started_at
+            .insert(block_height, Instant::now());
         self.prepare_votes.entry(block_height).or_default();
         self.commit_votes.entry(block_height).or_default();
 
@@ -788,6 +900,7 @@ impl PbftConsensusEngine {
             // Free vote accumulator memory once committed
             self.prepare_votes.remove(&block_height);
             self.commit_votes.remove(&block_height);
+            self.proposal_started_at.remove(&block_height);
             info!(
                 "PBFT: Block {} COMMITTED and finalized ({} votes, quorum={})",
                 block_height, count, self.quorum_size
@@ -1113,6 +1226,121 @@ mod tests {
         }
 
         assert!(finality.is_finalized(600, &block_hash));
+    }
+
+    #[tokio::test]
+    async fn rejected_proposal_can_be_replaced_and_finalized_at_same_height() {
+        let (engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let validator_keys: Vec<_> = engine
+            .validator_pubkeys
+            .iter()
+            .map(|(id, key)| (id.clone(), key.clone()))
+            .collect();
+        let finality = LivePbftFinality::new(
+            "v1".into(),
+            validator_keys,
+            secret_keys["v1"].clone(),
+            engine.validator_pubkeys["v1"].clone(),
+            None,
+        )
+        .unwrap();
+
+        let mut rejected = signed_block(&engine, &secret_keys, 1, "genesis");
+        rejected.timestamp = 1;
+        rejected
+            .sign_block_with_pk(&secret_keys["v1"], &engine.validator_pubkeys["v1"])
+            .unwrap();
+        finality.receive_proposal(&rejected).unwrap();
+        assert_eq!(
+            finality.engine.lock().block_state(1),
+            Some(PbftBlockState::Proposed)
+        );
+        finality.abandon_proposal(1).unwrap();
+        assert!(finality.engine.lock().block_state(1).is_none());
+        assert!(!finality.local_prepare_sent.lock().contains(&1));
+
+        let mut replacement = signed_block(&engine, &secret_keys, 1, "genesis");
+        replacement.timestamp = 2;
+        replacement
+            .sign_block_with_pk(&secret_keys["v1"], &engine.validator_pubkeys["v1"])
+            .unwrap();
+        let replacement_hash = replacement.compute_hash();
+        finality.propose(&replacement).unwrap();
+
+        for validator_id in ["v2", "v3"] {
+            let message = pbft_vote_message(PbftPhase::Prepare, 1, &replacement_hash, validator_id);
+            let secret_key =
+                sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
+            let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
+                .as_bytes()
+                .to_vec();
+            finality
+                .receive_vote(
+                    PbftPhase::Prepare,
+                    1,
+                    &replacement_hash,
+                    validator_id,
+                    &signature,
+                )
+                .unwrap();
+        }
+        for validator_id in ["v2", "v3"] {
+            let message = pbft_vote_message(PbftPhase::Commit, 1, &replacement_hash, validator_id);
+            let secret_key =
+                sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
+            let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
+                .as_bytes()
+                .to_vec();
+            finality
+                .receive_vote(
+                    PbftPhase::Commit,
+                    1,
+                    &replacement_hash,
+                    validator_id,
+                    &signature,
+                )
+                .unwrap();
+        }
+        finality
+            .wait_for_finality(1, &replacement_hash)
+            .await
+            .unwrap();
+        assert!(finality.is_finalized(1, &replacement_hash));
+    }
+
+    #[tokio::test]
+    async fn stalled_proposal_is_abandoned_after_view_timeout() {
+        let (engine, secret_keys) = engine_with_keys(&["v1", "v2", "v3"]);
+        let validator_keys: Vec<_> = engine
+            .validator_pubkeys
+            .iter()
+            .map(|(id, key)| (id.clone(), key.clone()))
+            .collect();
+        let finality = LivePbftFinality::new(
+            "v1".into(),
+            validator_keys,
+            secret_keys["v1"].clone(),
+            engine.validator_pubkeys["v1"].clone(),
+            None,
+        )
+        .unwrap();
+
+        let stalled = signed_block(&engine, &secret_keys, 1, "genesis");
+        finality.receive_proposal(&stalled).unwrap();
+        tokio::time::sleep(PBFT_VIEW_TIMEOUT + Duration::from_millis(100)).await;
+        assert!(finality.engine.lock().block_state(1).is_none());
+        assert!(!finality.local_prepare_sent.lock().contains(&1));
+
+        let mut replacement = signed_block(&engine, &secret_keys, 1, "genesis");
+        replacement.timestamp = replacement.timestamp.saturating_add(1);
+        replacement
+            .sign_block_with_pk(&secret_keys["v1"], &engine.validator_pubkeys["v1"])
+            .unwrap();
+        finality.receive_proposal(&replacement).unwrap();
+        assert_eq!(
+            finality.engine.lock().block_hashes.get(&1),
+            Some(&replacement.compute_hash())
+        );
     }
 
     #[test]
