@@ -1642,11 +1642,10 @@ fn public_native_mint_enabled() -> bool {
         && matches!(explicitly_enabled.as_str(), "1" | "true" | "yes" | "on")
 }
 
+const FAUCET_NETWORKS: &[&str] = &["dev", "development", "test", "pretestnet", "testnet"];
+
 fn is_dev_or_test_network(network_mode: &str) -> bool {
-    matches!(
-        network_mode.trim().to_ascii_lowercase().as_str(),
-        "dev" | "development" | "test"
-    )
+    FAUCET_NETWORKS.contains(&network_mode.trim().to_ascii_lowercase().as_str())
 }
 
 fn faucet_enabled_for(enabled: &str, network_mode: &str) -> bool {
@@ -4875,17 +4874,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn faucet_is_disabled_on_public_testnet_modes() {
+    async fn faucet_is_available_on_testnet_with_explicit_opt_in() {
         let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
         let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
         let previous_faucet_enabled = std::env::var_os("BLEEP_FAUCET_ENABLED");
         std::env::set_var("BLEEP_NETWORK_MODE", "testnet");
         std::env::set_var("BLEEP_FAUCET_ENABLED", "true");
-        let routes = rpc_routes_with_state(RpcState::new());
+        let address = "BLEEP1public-testnet";
+        let state_manager = Arc::new(Mutex::new(StateManager::new()));
+        let routes =
+            rpc_routes_with_state(RpcState::new().with_state_manager(Arc::clone(&state_manager)));
 
         let response = request()
             .method("POST")
-            .path("/faucet/BLEEP1public-testnet")
+            .path(&format!("/faucet/{address}"))
             .reply(&routes)
             .await;
 
@@ -4900,7 +4902,11 @@ mod tests {
             std::env::remove_var("BLEEP_FAUCET_ENABLED");
         }
 
-        assert_eq!(response.status(), warp::http::StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), warp::http::StatusCode::OK);
+        assert_eq!(
+            state_manager.lock().get_balance(address),
+            RpcState::FAUCET_DRIP_AMOUNT as u128
+        );
     }
 
     #[tokio::test]
@@ -5244,20 +5250,21 @@ mod tests_sprint8 {
     }
 
     #[test]
-    fn production_and_unknown_networks_never_enable_dev_gates() {
+    fn faucet_network_policy_allows_test_networks_but_not_production_or_unknown() {
         assert!(!is_dev_or_test_network("mainnet"));
         assert!(!is_dev_or_test_network("production"));
         assert!(!is_dev_or_test_network(""));
-        assert!(!is_dev_or_test_network("testnet"));
-        assert!(!is_dev_or_test_network("pretestnet"));
+        assert!(is_dev_or_test_network("testnet"));
+        assert!(is_dev_or_test_network("pretestnet"));
         assert!(is_dev_or_test_network("DEV"));
+        assert!(is_dev_or_test_network("  PRETESTNET "));
     }
 
     #[test]
     fn faucet_requires_explicit_opt_in_and_private_network_mode() {
         assert!(!faucet_enabled_for("", "dev"));
-        assert!(!faucet_enabled_for("true", "testnet"));
-        assert!(!faucet_enabled_for("true", "pretestnet"));
+        assert!(faucet_enabled_for("true", "testnet"));
+        assert!(faucet_enabled_for("true", "pretestnet"));
         assert!(!faucet_enabled_for("1", "test"));
         assert!(faucet_enabled_for("true", "test"));
         assert!(faucet_enabled_for(" TRUE ", "development"));
