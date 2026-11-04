@@ -92,6 +92,10 @@ pub fn ensure_live_finality_mode_supported(active_validator_count: usize) -> Res
     }
 }
 
+fn should_skip_block(pending_tx_count: usize, accepted_tx_count: usize) -> bool {
+    pending_tx_count > 0 && accepted_tx_count == 0
+}
+
 // ── ProducerConfig ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -285,6 +289,8 @@ impl BlockProducer {
 
         loop {
             ticker.tick().await;
+            // Empty pools produce empty blocks; None means another proposer
+            // owns this slot or a nonempty batch was entirely rejected.
             match self.produce_one().await {
                 Ok(Some(fb)) => {
                     info!(
@@ -297,7 +303,7 @@ impl BlockProducer {
                     );
                     let _ = self.block_tx.send(fb);
                 }
-                Ok(None) => { /* empty pool — skip slot */ }
+                Ok(None) => {}
                 Err(e) => error!("[BlockProducer] {}", e),
             }
         }
@@ -314,6 +320,8 @@ impl BlockProducer {
 
         loop {
             ticker.tick().await;
+            // Empty pools produce empty blocks; None means another proposer
+            // owns this slot or a nonempty batch was entirely rejected.
             match self_arc.produce_one().await {
                 Ok(Some(fb)) => {
                     info!(
@@ -326,7 +334,7 @@ impl BlockProducer {
                     );
                     let _ = self_arc.block_tx.send(fb);
                 }
-                Ok(None) => { /* empty pool — skip slot */ }
+                Ok(None) => {}
                 Err(e) => error!("[BlockProducer] {}", e),
             }
         }
@@ -351,9 +359,6 @@ impl BlockProducer {
             .tx_pool
             .peek_for_block(self.config.max_txs_per_block)
             .await;
-        if pending.is_empty() {
-            return Ok(None);
-        }
         let tx_count = pending.len();
 
         // ── 2: Read chain tip ─────────────────────────────────────────────────
@@ -548,7 +553,6 @@ impl BlockProducer {
         let mut block_txs: Vec<Transaction> = Vec::with_capacity(tx_count);
         let mut failed_tx_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut total_gas: u64 = 0;
-        let any_pending = !pending.is_empty();
         {
             let mut state = self.state.lock();
             for (idx, gas, vm_ok, diff) in &vm_results {
@@ -639,13 +643,11 @@ impl BlockProducer {
             self.tx_pool.remove_confirmed(failed_tx_id).await;
         }
 
-        if block_txs.is_empty() {
-            if any_pending {
-                info!(
-                    "[BlockProducer] All pending transactions failed; no block produced at height {}",
-                    next_height
-                );
-            }
+        if should_skip_block(pending.len(), block_txs.len()) {
+            info!(
+                "[BlockProducer] All pending transactions failed; no block produced at height {}",
+                next_height
+            );
             return Ok(None);
         }
 
@@ -966,7 +968,7 @@ impl BlockProducer {
 
 #[cfg(test)]
 mod live_finality_policy_tests {
-    use super::ensure_live_finality_mode_supported;
+    use super::{ensure_live_finality_mode_supported, should_skip_block};
 
     #[test]
     fn live_commit_requires_a_nonempty_committee() {
@@ -974,6 +976,13 @@ mod live_finality_policy_tests {
         assert!(ensure_live_finality_mode_supported(1).is_ok());
         assert!(ensure_live_finality_mode_supported(2).is_ok());
         assert!(ensure_live_finality_mode_supported(100).is_ok());
+    }
+
+    #[test]
+    fn empty_slots_produce_blocks_but_all_failed_transactions_do_not() {
+        assert!(!should_skip_block(0, 0));
+        assert!(!should_skip_block(3, 2));
+        assert!(should_skip_block(3, 0));
     }
 }
 
