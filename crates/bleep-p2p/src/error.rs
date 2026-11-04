@@ -16,6 +16,9 @@ pub enum P2PError {
     #[error("Peer not found: {peer_id}")]
     PeerNotFound { peer_id: String },
 
+    #[error("Peer already present: {0}")]
+    PeerAlreadyPresent(crate::types::NodeId),
+
     #[error("Peer is banned: {peer_id}")]
     PeerBanned { peer_id: String },
 

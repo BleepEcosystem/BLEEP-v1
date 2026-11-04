@@ -10,7 +10,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::sync::broadcast;
@@ -25,6 +25,27 @@ use crate::error::{P2PError, P2PResult};
 use crate::kademlia_dht::KademliaDht;
 use crate::quantum_crypto::sphincs_verify;
 use crate::types::{unix_now, NodeId, PeerInfo, PeerStatus};
+
+const IDENTITY_CHALLENGE_TTL: Duration = Duration::from_secs(10);
+const MAX_PENDING_IDENTITY_CHALLENGES: usize = 4096;
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct IdentityChallenge {
+    pub connection_id: [u8; 16],
+    pub nonce: [u8; 32],
+}
+
+struct PendingIdentityChallenge {
+    expected_peer: NodeId,
+    nonce: [u8; 32],
+    expires_at: Instant,
+}
+
+pub struct VerifiedPeerIdentity {
+    id: NodeId,
+    identity_public_key: Vec<u8>,
+    sphincs_public_key: Vec<u8>,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PEER EVENTS
@@ -75,6 +96,8 @@ pub struct PeerManager {
     peers: DashMap<NodeId, PeerInfo>,
     /// Explicitly banned peers (persist across restarts conceptually).
     banned: DashMap<NodeId, u64>,
+    /// Connection ID → verifier-generated challenge, consumed on proof check.
+    pending_challenges: DashMap<[u8; 16], PendingIdentityChallenge>,
     dht: Arc<KademliaDht>,
     scoring: Arc<PeerScoring>,
     sybil: Arc<SybilDetector>,
@@ -94,6 +117,7 @@ impl PeerManager {
             config,
             peers: DashMap::new(),
             banned: DashMap::new(),
+            pending_challenges: DashMap::new(),
             dht,
             scoring: Arc::new(PeerScoring::new()),
             sybil: Arc::new(SybilDetector::new()),
@@ -105,54 +129,112 @@ impl PeerManager {
 
     // ── ADMISSION ─────────────────────────────────────────────────────────────
 
+    /// Create a verifier-owned, single-use identity challenge for one connection.
+    pub fn issue_identity_challenge(&self, expected_peer: NodeId) -> P2PResult<IdentityChallenge> {
+        let now = Instant::now();
+        self.pending_challenges
+            .retain(|_, pending| pending.expires_at > now);
+        if self.pending_challenges.len() >= MAX_PENDING_IDENTITY_CHALLENGES {
+            return Err(P2PError::AuthenticationFailed);
+        }
+        let mut connection_id = [0; 16];
+        let mut nonce = [0; 32];
+        let mut rng = rand::thread_rng();
+        loop {
+            rand::RngCore::fill_bytes(&mut rng, &mut connection_id);
+            if !self.pending_challenges.contains_key(&connection_id) {
+                break;
+            }
+        }
+        rand::RngCore::fill_bytes(&mut rng, &mut nonce);
+        self.pending_challenges.insert(
+            connection_id,
+            PendingIdentityChallenge {
+                expected_peer,
+                nonce,
+                expires_at: now + IDENTITY_CHALLENGE_TTL,
+            },
+        );
+        Ok(IdentityChallenge {
+            connection_id,
+            nonce,
+        })
+    }
+
+    /// Consume the challenge for `connection_id` and verify the peer's proof.
+    pub fn verify_identity_proof(
+        &self,
+        connection_id: [u8; 16],
+        identity_public_key: Vec<u8>,
+        sphincs_public_key: Vec<u8>,
+        signature: &[u8],
+    ) -> P2PResult<VerifiedPeerIdentity> {
+        let (_, pending) = self
+            .pending_challenges
+            .remove(&connection_id)
+            .ok_or(P2PError::AuthenticationFailed)?;
+        if pending.expires_at <= Instant::now()
+            || NodeId::from_bytes(&identity_public_key) != pending.expected_peer
+            || identity_public_key != sphincs_public_key
+        {
+            return Err(P2PError::AuthenticationFailed);
+        }
+        sphincs_verify(&pending.nonce, signature, &sphincs_public_key)
+            .map_err(|_| P2PError::AuthenticationFailed)?;
+        Ok(VerifiedPeerIdentity {
+            id: pending.expected_peer,
+            identity_public_key,
+            sphincs_public_key,
+        })
+    }
+
     /// Admit a new peer after full verification.
     ///
     /// Steps:
     /// 1. Check the peer is not banned.
     /// 2. Sybil detection on the remote address.
-    /// 3. Verify the SPHINCS+ proof-of-identity.
+    /// 3. Bind the peer ID and both public-key fields to the verified signer.
     /// 4. Compute initial trust score.
-    /// 5. Insert into peer table and DHT.
+    /// 5. Insert into peer table and DHT without replacing an existing peer.
     pub async fn add_peer(
         &self,
         id: NodeId,
         addr: SocketAddr,
-        identity_public_key: Vec<u8>,
-        sphincs_pubkey: Vec<u8>,
-        identity_proof_challenge: &[u8],
-        identity_proof_signature: &[u8],
+        verified_identity: VerifiedPeerIdentity,
     ) -> P2PResult<()> {
-        // 1. Banned check
+        // Check bans before any admission work.
         if self.banned.contains_key(&id) {
             return Err(P2PError::PeerBanned {
                 peer_id: id.to_string(),
             });
         }
 
-        // 2. Max peers guard
+        let identity_public_key = verified_identity.identity_public_key;
+        let sphincs_pubkey = verified_identity.sphincs_public_key;
+        if verified_identity.id != id
+            || NodeId::from_bytes(&identity_public_key) != id
+            || identity_public_key != sphincs_pubkey
+        {
+            return Err(P2PError::AuthenticationFailed);
+        }
+        if self.peers.contains_key(&id) {
+            return Err(P2PError::PeerAlreadyPresent(id));
+        }
+
+        // Max peers guard
         if self.peers.len() >= self.config.max_peers {
             // Evict the lowest-scoring non-banned peer to make room
             self.evict_lowest_scored_peer().await;
         }
 
-        // 3. Sybil check
+        // Sybil check
         if self.sybil.register(&id, &addr) {
             return Err(P2PError::SybilDetected {
                 peer_id: id.to_string(),
             });
         }
 
-        // 4. SPHINCS+ identity proof
-        sphincs_verify(
-            identity_proof_challenge,
-            identity_proof_signature,
-            &sphincs_pubkey,
-        )
-        .map_err(|_| P2PError::QuantumIdentityFailed {
-            peer_id: id.to_string(),
-        })?;
-
-        // 5. Build PeerInfo and score
+        // Build PeerInfo and score
         let mut peer = PeerInfo::new(id.clone(), addr, identity_public_key, sphincs_pubkey);
         let score = self.scoring.calculate_score(&id);
         peer.trust_score = score;
@@ -164,8 +246,17 @@ impl PeerManager {
             PeerStatus::Malicious
         };
 
-        // 6. Insert
-        self.peers.insert(id.clone(), peer.clone());
+        // Atomically refuse duplicate admission; the early check avoids wasted
+        // work while the entry check prevents a concurrent overwrite.
+        match self.peers.entry(id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                self.sybil.deregister(&id, &addr);
+                return Err(P2PError::PeerAlreadyPresent(id));
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(peer.clone());
+            }
+        }
         self.dht.add_peer(peer.clone()).await;
         self.dht.store_peer_addr(&id, &addr);
 
@@ -378,7 +469,7 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quantum_crypto::{sphincs_sign, SphincsKeypair};
+    use crate::quantum_crypto::SphincsKeypair;
 
     fn make_test_pm() -> (Arc<PeerManager>, broadcast::Receiver<PeerEvent>) {
         let local_id = NodeId::random();
@@ -387,21 +478,21 @@ mod tests {
 
     async fn add_test_peer(pm: &PeerManager, seed: u8) -> NodeId {
         let identity_kp = SphincsKeypair::generate();
-        let sphincs_kp = SphincsKeypair::generate();
         let id = NodeId::from_bytes(&identity_kp.public_key_bytes());
         let addr: SocketAddr = format!("10.0.0.{}:9000", seed).parse().unwrap();
-        let challenge = b"test-handshake-context";
-        let sig = sphincs_sign(challenge, sphincs_kp.secret_key.expose()).unwrap();
-        pm.add_peer(
-            id.clone(),
-            addr,
-            identity_kp.public_key_bytes(),
-            sphincs_kp.public_key.0.clone(),
-            challenge,
-            &sig,
-        )
-        .await
-        .unwrap();
+        let challenge = pm.issue_identity_challenge(id.clone()).unwrap();
+        let sig = identity_kp.sign(&challenge.nonce);
+        let verified_identity = pm
+            .verify_identity_proof(
+                challenge.connection_id,
+                identity_kp.public_key_bytes(),
+                identity_kp.public_key_bytes(),
+                &sig,
+            )
+            .unwrap();
+        pm.add_peer(id.clone(), addr, verified_identity)
+            .await
+            .unwrap();
         id
     }
 
@@ -425,25 +516,41 @@ mod tests {
     #[tokio::test]
     async fn test_ban_prevents_readmission() {
         let (pm, _rx) = make_test_pm();
-        let id = add_test_peer(&pm, 3).await;
+        let identity_kp = SphincsKeypair::generate();
+        let identity_public_key = identity_kp.public_key_bytes();
+        let id = NodeId::from_bytes(&identity_public_key);
+        let challenge = pm.issue_identity_challenge(id.clone()).unwrap();
+        let signature = identity_kp.sign(&challenge.nonce);
+        let verified_identity = pm
+            .verify_identity_proof(
+                challenge.connection_id,
+                identity_public_key.clone(),
+                identity_public_key.clone(),
+                &signature,
+            )
+            .unwrap();
+        pm.add_peer(
+            id.clone(),
+            "10.0.0.3:9000".parse().unwrap(),
+            verified_identity,
+        )
+        .await
+        .unwrap();
         pm.ban_peer(&id).await;
         assert!(pm.is_banned(&id));
 
-        let identity_kp = SphincsKeypair::generate();
-        let sphincs_kp = SphincsKeypair::generate();
         let addr: SocketAddr = "10.0.0.3:9001".parse().unwrap();
-        let challenge = b"re-admit-context";
-        let sig = sphincs_sign(challenge, sphincs_kp.secret_key.expose()).unwrap();
-        let result = pm
-            .add_peer(
-                id.clone(),
-                addr,
+        let challenge = pm.issue_identity_challenge(id.clone()).unwrap();
+        let sig = identity_kp.sign(&challenge.nonce);
+        let verified_identity = pm
+            .verify_identity_proof(
+                challenge.connection_id,
                 identity_kp.public_key_bytes(),
-                sphincs_kp.public_key.0.clone(),
-                challenge,
+                identity_kp.public_key_bytes(),
                 &sig,
             )
-            .await;
+            .unwrap();
+        let result = pm.add_peer(id.clone(), addr, verified_identity).await;
         assert!(matches!(result, Err(P2PError::PeerBanned { .. })));
     }
 
@@ -451,24 +558,98 @@ mod tests {
     async fn test_invalid_identity_proof_rejected() {
         let (pm, _rx) = make_test_pm();
         let identity_kp = SphincsKeypair::generate();
-        let sphincs_kp = SphincsKeypair::generate();
         let id = NodeId::from_bytes(&identity_kp.public_key_bytes());
-        let addr: SocketAddr = "10.0.0.99:9000".parse().unwrap();
-        let challenge = b"some-context";
-        let bad_sig = vec![0u8; 64]; // invalid signature
-        let result = pm
-            .add_peer(
-                id,
-                addr,
-                identity_kp.public_key_bytes(),
-                sphincs_kp.public_key.0,
-                challenge,
-                &bad_sig,
+        let challenge = pm.issue_identity_challenge(id.clone()).unwrap();
+        let bad_sig = vec![0u8; 64];
+        let result = pm.verify_identity_proof(
+            challenge.connection_id,
+            identity_kp.public_key_bytes(),
+            identity_kp.public_key_bytes(),
+            &bad_sig,
+        );
+        assert!(matches!(result, Err(P2PError::AuthenticationFailed)));
+    }
+
+    #[tokio::test]
+    async fn peer_cannot_be_admitted_twice_under_one_node_id() {
+        let (pm, _rx) = make_test_pm();
+        let identity_kp = SphincsKeypair::generate();
+        let identity_public_key = identity_kp.public_key_bytes();
+        let id = NodeId::from_bytes(&identity_public_key);
+        let addr: SocketAddr = "10.0.0.42:9000".parse().unwrap();
+
+        let challenge = pm.issue_identity_challenge(id.clone()).unwrap();
+        let signature = identity_kp.sign(&challenge.nonce);
+        let verified_identity = pm
+            .verify_identity_proof(
+                challenge.connection_id,
+                identity_public_key.clone(),
+                identity_public_key.clone(),
+                &signature,
             )
-            .await;
+            .unwrap();
+        pm.add_peer(id.clone(), addr, verified_identity)
+            .await
+            .unwrap();
+
+        let challenge = pm.issue_identity_challenge(id.clone()).unwrap();
+        let signature = identity_kp.sign(&challenge.nonce);
+        let verified_identity = pm
+            .verify_identity_proof(
+                challenge.connection_id,
+                identity_public_key.clone(),
+                identity_public_key,
+                &signature,
+            )
+            .unwrap();
         assert!(matches!(
-            result,
-            Err(P2PError::QuantumIdentityFailed { .. })
+            pm.add_peer(id.clone(), addr, verified_identity).await,
+            Err(P2PError::PeerAlreadyPresent(duplicate_id)) if duplicate_id == id
+        ));
+        assert_eq!(pm.peer_count(), 1);
+    }
+
+    #[test]
+    fn identity_challenge_is_single_use_and_expires() {
+        let (pm, _rx) = make_test_pm();
+        let signer = SphincsKeypair::generate();
+        let public_key = signer.public_key_bytes();
+        let id = NodeId::from_bytes(&public_key);
+        let challenge = pm.issue_identity_challenge(id).unwrap();
+        let signature = signer.sign(&challenge.nonce);
+
+        pm.verify_identity_proof(
+            challenge.connection_id,
+            public_key.clone(),
+            public_key.clone(),
+            &signature,
+        )
+        .unwrap();
+        assert!(matches!(
+            pm.verify_identity_proof(
+                challenge.connection_id,
+                public_key.clone(),
+                public_key.clone(),
+                &signature,
+            ),
+            Err(P2PError::AuthenticationFailed)
+        ));
+
+        let expired = pm
+            .issue_identity_challenge(NodeId::from_bytes(&public_key))
+            .unwrap();
+        pm.pending_challenges
+            .get_mut(&expired.connection_id)
+            .unwrap()
+            .expires_at = Instant::now() - Duration::from_secs(1);
+        assert!(matches!(
+            pm.verify_identity_proof(
+                expired.connection_id,
+                public_key.clone(),
+                public_key,
+                &signer.sign(&expired.nonce),
+            ),
+            Err(P2PError::AuthenticationFailed)
         ));
     }
 

@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{P2PError, P2PResult};
-use crate::peer_manager::PeerManager;
+use crate::peer_manager::{IdentityChallenge, PeerManager};
 use crate::quantum_crypto::{
     kyber_decapsulate, kyber_encapsulate, sphincs_verify, KyberKeypair, SessionKey, SphincsKeypair,
 };
@@ -63,13 +63,16 @@ struct HandshakeHello {
     sphincs_pubkey: Vec<u8>,
     kyber_pubkey: Vec<u8>,
     listen_addr: SocketAddr,
-    challenge: Vec<u8>,
-    signature: Vec<u8>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum WireFrame {
     Handshake(HandshakeHello),
+    HandshakeChallenge(IdentityChallenge),
+    HandshakeProof {
+        connection_id: [u8; 16],
+        signature: Vec<u8>,
+    },
     SessionInit {
         peer_id: NodeId,
         ciphertext: Vec<u8>,
@@ -121,8 +124,7 @@ impl NonceCache {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct MessageProtocol {
-    local_identity: Arc<SphincsKeypair>,
-    local_sphincs: Arc<SphincsKeypair>,
+    local_signing_key: Arc<SphincsKeypair>,
     local_kyber: Arc<KyberKeypair>,
     local_id: NodeId,
     advertised_addr: std::sync::RwLock<SocketAddr>,
@@ -137,16 +139,14 @@ pub struct MessageProtocol {
 
 impl MessageProtocol {
     pub fn new(
-        local_identity: SphincsKeypair,
-        local_sphincs: SphincsKeypair,
+        local_signing_key: SphincsKeypair,
         local_kyber: KyberKeypair,
         peer_manager: Arc<PeerManager>,
     ) -> (Arc<Self>, mpsc::Receiver<InboundMessage>) {
-        let local_id = NodeId::from_bytes(&local_identity.public_key_bytes());
+        let local_id = NodeId::from_bytes(&local_signing_key.public_key_bytes());
         let (tx, rx) = mpsc::channel(4096);
         let proto = Arc::new(MessageProtocol {
-            local_identity: Arc::new(local_identity),
-            local_sphincs: Arc::new(local_sphincs),
+            local_signing_key: Arc::new(local_signing_key),
             local_kyber: Arc::new(local_kyber),
             local_id,
             advertised_addr: std::sync::RwLock::new(SocketAddr::from(([0, 0, 0, 0], 0))),
@@ -222,20 +222,16 @@ impl MessageProtocol {
     }
 
     fn local_handshake(&self) -> HandshakeHello {
-        let mut challenge = vec![0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut challenge);
         HandshakeHello {
-            version: 1,
+            version: 2,
             node_id: self.local_id.clone(),
-            identity_pubkey: self.local_identity.public_key_bytes(),
-            sphincs_pubkey: self.local_sphincs.public_key_bytes(),
+            identity_pubkey: self.local_signing_key.public_key_bytes(),
+            sphincs_pubkey: self.local_signing_key.public_key_bytes(),
             kyber_pubkey: self.local_kyber.public_key.0.clone(),
             listen_addr: *self
                 .advertised_addr
                 .read()
                 .expect("advertised address lock poisoned"),
-            challenge: challenge.clone(),
-            signature: self.local_sphincs.sign(&challenge),
         }
     }
 
@@ -293,14 +289,13 @@ impl MessageProtocol {
     }
 
     fn verify_hello(hello: &HandshakeHello) -> P2PResult<()> {
-        if hello.version != 1 || NodeId::from_bytes(&hello.identity_pubkey) != hello.node_id {
+        if hello.version != 2
+            || NodeId::from_bytes(&hello.identity_pubkey) != hello.node_id
+            || hello.identity_pubkey != hello.sphincs_pubkey
+        {
             return Err(P2PError::AuthenticationFailed);
         }
-        crate::quantum_crypto::sphincs_verify(
-            &hello.challenge,
-            &hello.signature,
-            &hello.sphincs_pubkey,
-        )
+        Ok(())
     }
 
     pub(crate) async fn establish_outbound(&self, addr: SocketAddr) -> P2PResult<NodeId> {
@@ -316,16 +311,38 @@ impl MessageProtocol {
             _ => return Err(P2PError::AuthenticationFailed),
         };
         Self::verify_hello(&remote)?;
+        let remote_challenge = match Self::decode_wire(&mut stream).await? {
+            WireFrame::HandshakeChallenge(challenge) => challenge,
+            _ => return Err(P2PError::AuthenticationFailed),
+        };
+        let local_challenge = self
+            .peer_manager
+            .issue_identity_challenge(remote.node_id.clone())?;
+        Self::write_wire(&mut stream, &WireFrame::HandshakeChallenge(local_challenge)).await?;
+        Self::write_wire(
+            &mut stream,
+            &WireFrame::HandshakeProof {
+                connection_id: remote_challenge.connection_id,
+                signature: self.local_signing_key.sign(&remote_challenge.nonce),
+            },
+        )
+        .await?;
+        let (connection_id, signature) = match Self::decode_wire(&mut stream).await? {
+            WireFrame::HandshakeProof {
+                connection_id,
+                signature,
+            } if connection_id == local_challenge.connection_id => (connection_id, signature),
+            _ => return Err(P2PError::AuthenticationFailed),
+        };
+        let verified_identity = self.peer_manager.verify_identity_proof(
+            connection_id,
+            remote.identity_pubkey.clone(),
+            remote.sphincs_pubkey.clone(),
+            &signature,
+        )?;
         if self.peer_manager.get_peer(&remote.node_id).is_none() {
             self.peer_manager
-                .add_peer(
-                    remote.node_id.clone(),
-                    addr,
-                    remote.identity_pubkey,
-                    remote.sphincs_pubkey,
-                    &remote.challenge,
-                    &remote.signature,
-                )
+                .add_peer(remote.node_id.clone(), addr, verified_identity)
                 .await?;
         }
         let ciphertext = self.initiate_session(&remote.node_id, &remote.kyber_pubkey)?;
@@ -374,7 +391,7 @@ impl MessageProtocol {
             nonce,
             timestamp: unix_now(),
         };
-        msg.signature = self.local_identity.sign(&msg.signing_bytes());
+        msg.signature = self.local_signing_key.sign(&msg.signing_bytes());
         Ok(msg)
     }
 
@@ -542,20 +559,45 @@ impl MessageProtocol {
                 } else {
                     hello.listen_addr
                 };
-                if self.peer_manager.get_peer(&hello.node_id).is_none() {
-                    self.peer_manager
-                        .add_peer(
-                            hello.node_id.clone(),
-                            listen_addr,
-                            hello.identity_pubkey,
-                            hello.sphincs_pubkey,
-                            &hello.challenge,
-                            &hello.signature,
-                        )
-                        .await?;
-                }
+                let local_challenge = self
+                    .peer_manager
+                    .issue_identity_challenge(hello.node_id.clone())?;
                 Self::write_wire(&mut stream, &WireFrame::Handshake(self.local_handshake()))
                     .await?;
+                Self::write_wire(&mut stream, &WireFrame::HandshakeChallenge(local_challenge))
+                    .await?;
+                let remote_challenge = match Self::decode_wire(&mut stream).await? {
+                    WireFrame::HandshakeChallenge(challenge) => challenge,
+                    _ => return Err(P2PError::AuthenticationFailed),
+                };
+                let (connection_id, signature) = match Self::decode_wire(&mut stream).await? {
+                    WireFrame::HandshakeProof {
+                        connection_id,
+                        signature,
+                    } if connection_id == local_challenge.connection_id => {
+                        (connection_id, signature)
+                    }
+                    _ => return Err(P2PError::AuthenticationFailed),
+                };
+                let verified_identity = self.peer_manager.verify_identity_proof(
+                    connection_id,
+                    hello.identity_pubkey.clone(),
+                    hello.sphincs_pubkey.clone(),
+                    &signature,
+                )?;
+                if self.peer_manager.get_peer(&hello.node_id).is_none() {
+                    self.peer_manager
+                        .add_peer(hello.node_id.clone(), listen_addr, verified_identity)
+                        .await?;
+                }
+                Self::write_wire(
+                    &mut stream,
+                    &WireFrame::HandshakeProof {
+                        connection_id: remote_challenge.connection_id,
+                        signature: self.local_signing_key.sign(&remote_challenge.nonce),
+                    },
+                )
+                .await?;
                 let (peer_id, ciphertext) = match Self::decode_wire(&mut stream).await? {
                     WireFrame::SessionInit {
                         peer_id,
@@ -628,9 +670,27 @@ mod tests {
         let kyber = KyberKeypair::generate();
         let local_id = NodeId::from_bytes(&identity.public_key_bytes());
         let (pm, _) = PeerManager::new(local_id.clone(), PeerManagerConfig::default());
-        let sphincs = SphincsKeypair::generate();
-        let (proto, rx) = MessageProtocol::new(identity, sphincs, kyber, pm.clone());
+        let (proto, rx) = MessageProtocol::new(identity, kyber, pm.clone());
         (proto, rx, pm)
+    }
+
+    #[test]
+    fn hello_rejects_mismatched_identity_and_signing_keys() {
+        let identity = SphincsKeypair::generate();
+        let signer = SphincsKeypair::generate();
+        let hello = HandshakeHello {
+            version: 2,
+            node_id: NodeId::from_bytes(&identity.public_key_bytes()),
+            identity_pubkey: identity.public_key_bytes(),
+            sphincs_pubkey: signer.public_key_bytes(),
+            kyber_pubkey: vec![],
+            listen_addr: "127.0.0.1:9000".parse().unwrap(),
+        };
+
+        assert!(matches!(
+            MessageProtocol::verify_hello(&hello),
+            Err(P2PError::AuthenticationFailed)
+        ));
     }
 
     #[tokio::test]
@@ -781,12 +841,12 @@ mod tests {
             .unwrap();
 
         assert!(proto_b
-            .open_message(&msg, &proto_b.local_identity.public_key_bytes())
+            .open_message(&msg, &proto_b.local_signing_key.public_key_bytes())
             .await
             .is_err());
         assert_eq!(
             proto_b
-                .open_message(&msg, &proto_a.local_identity.public_key_bytes())
+                .open_message(&msg, &proto_a.local_signing_key.public_key_bytes())
                 .await
                 .unwrap(),
             b"authenticated"

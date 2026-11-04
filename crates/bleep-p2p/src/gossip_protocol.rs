@@ -209,7 +209,7 @@ mod tests {
         let (pm, _) = PeerManager::new(local_id.clone(), PeerManagerConfig::default());
         let identity = SphincsKeypair::generate();
         let kyber = KyberKeypair::generate();
-        let (mp, _) = MessageProtocol::new(identity, SphincsKeypair::generate(), kyber, pm.clone());
+        let (mp, _) = MessageProtocol::new(identity, kyber, pm.clone());
         GossipProtocol::new(pm, mp)
     }
 
