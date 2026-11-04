@@ -32,6 +32,7 @@ pub use rbac::{AccessDecision, Permission, RbacEngine, Role};
 pub use session::{SessionClaims, SessionManager, SessionToken};
 pub use validator_binding::{ValidatorBinding, ValidatorBindingProof, ValidatorBindingRegistry};
 
+use dashmap::DashMap;
 use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -53,6 +54,23 @@ pub struct AuthService {
     pub validator_bindings: Arc<RwLock<ValidatorBindingRegistry>>,
     pub audit: Arc<RwLock<AuditLog>>,
     pub rate_limiter: Arc<RateLimiter>,
+    admin_challenges: DashMap<String, PendingAdminChallenge>,
+    admin_bootstrapped: bool,
+}
+
+struct PendingAdminChallenge {
+    challenge: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+const ADMIN_LOGIN_DOMAIN: &[u8] = b"BLEEP:AUTH:ADMIN_LOGIN:V1\0";
+
+/// Build the domain-separated bytes an administrator must sign to authenticate.
+pub fn admin_login_signing_payload(challenge: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(ADMIN_LOGIN_DOMAIN.len() + challenge.len());
+    payload.extend_from_slice(ADMIN_LOGIN_DOMAIN);
+    payload.extend_from_slice(challenge.as_bytes());
+    payload
 }
 
 impl AuthService {
@@ -65,7 +83,99 @@ impl AuthService {
             validator_bindings: Arc::new(RwLock::new(ValidatorBindingRegistry::new())),
             audit: Arc::new(RwLock::new(AuditLog::new())),
             rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::strict())),
+            admin_challenges: DashMap::new(),
+            admin_bootstrapped: false,
         })
+    }
+
+    /// Configure the sole system administrator from the chain's genesis public key.
+    ///
+    /// The public key is the principal identifier; authenticating that principal
+    /// still requires a valid SPHINCS+ signature over a fresh login challenge.
+    pub fn bootstrap_admin(&mut self, genesis_admin_pubkey: &[u8]) -> AuthResult<()> {
+        if self.admin_bootstrapped || self.rbac.has_any_system_admin() {
+            return Err(AuthError::AlreadyBootstrapped);
+        }
+        if genesis_admin_pubkey.len() != 64 {
+            return Err(AuthError::InvalidKeyMaterial(format!(
+                "genesis admin SPHINCS+ public key must be 64 bytes, got {}",
+                genesis_admin_pubkey.len()
+            )));
+        }
+        self.rbac
+            .assign_role_principal(genesis_admin_pubkey, Role::SystemAdmin);
+        self.admin_bootstrapped = true;
+        Ok(())
+    }
+
+    /// Issue a one-time challenge for the configured genesis administrator.
+    pub fn create_admin_challenge(&self, public_key: &[u8]) -> AuthResult<String> {
+        let principal = hex::encode(public_key);
+        if !self.rbac.get_roles(&principal).contains(&Role::SystemAdmin) {
+            return Err(AuthError::Unauthorized(
+                "Public key is not the configured system administrator".into(),
+            ));
+        }
+
+        let mut random = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut random);
+        let challenge = hex::encode(random);
+        self.admin_challenges.insert(
+            principal,
+            PendingAdminChallenge {
+                challenge: challenge.clone(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            },
+        );
+        Ok(challenge)
+    }
+
+    /// Authenticate the configured administrator by proving possession of its key.
+    pub async fn login_with_admin_signature(
+        &self,
+        public_key: &[u8],
+        challenge: &str,
+        signature: &[u8],
+    ) -> AuthResult<SessionToken> {
+        let principal = hex::encode(public_key);
+        if !self.rbac.get_roles(&principal).contains(&Role::SystemAdmin) {
+            return Err(AuthError::Unauthorized(
+                "Public key is not the configured system administrator".into(),
+            ));
+        }
+        if !bleep_crypto::verify_tx_signature(
+            &admin_login_signing_payload(challenge),
+            signature,
+            public_key,
+        ) {
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        let now = chrono::Utc::now();
+        let Some((_, pending)) = self.admin_challenges.remove_if(&principal, |_, pending| {
+            pending.challenge == challenge && pending.expires_at > now
+        }) else {
+            return Err(AuthError::InvalidSession);
+        };
+        if pending.expires_at <= now {
+            return Err(AuthError::ExpiredSession);
+        }
+
+        let roles = self.rbac.get_roles(&principal);
+        let token = self
+            .sessions
+            .issue(&principal, &roles, chrono::Duration::hours(8))
+            .await?;
+        self.audit.write().await.record(AuditEvent {
+            kind: AuditEventKind::Login,
+            actor_id: principal,
+            resource: "session".into(),
+            action: "admin_login".into(),
+            outcome: "success".into(),
+            details: format!("jti={}", token.jti),
+            timestamp: chrono::Utc::now(),
+        });
+        Ok(token)
     }
 
     // ─── Registration ──────────────────────────────────────────────────────

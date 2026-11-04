@@ -62,6 +62,8 @@ Mode switches are logged, signed, and traceable in the tamper-evident audit log.
 
 ## Block Production Pipeline
 
+The first slot starts 10 seconds after producer startup so the node's RPC ingress can become ready; subsequent slots use the 3-second block interval.
+
 Every block produced by `BlockProducer` follows this sequence:
 
 ```

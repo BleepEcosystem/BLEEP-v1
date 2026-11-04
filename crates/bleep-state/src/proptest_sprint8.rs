@@ -157,7 +157,7 @@ mod proptest_state {
             nonce    in 0u64..=1000u64,
         ) {
             let mut mgr = StateManager::new();
-            mgr.set_balance(&sender, initial.into());
+            mgr.set_balance(&sender, initial.into()).expect("seed balance");
 
             let total_before = mgr.get_balance(&sender)
                 .saturating_add(mgr.get_balance(&receiver));
@@ -205,7 +205,7 @@ mod proptest_state {
             if sender == receiver { return Ok(()); }
 
             let mut mgr = StateManager::new();
-            mgr.set_balance(&sender, balance);
+            mgr.set_balance(&sender, balance.into()).expect("seed balance");
 
             let excess_amount = balance.saturating_add(overspend);
             let result = mgr.apply_transfer(&sender, &receiver, excess_amount, nonce);
@@ -234,7 +234,7 @@ mod proptest_state {
             if sender == receiver { return Ok(()); }
 
             let mut mgr = StateManager::new();
-            mgr.set_balance(&sender, initial);
+            mgr.set_balance(&sender, initial.into()).expect("seed balance");
 
             let _ = mgr.apply_transfer(&sender, &receiver, amount, nonce);
 
@@ -254,7 +254,7 @@ mod proptest_state {
             if sender == receiver { return Ok(()); }
 
             let mut mgr = StateManager::new();
-            mgr.set_balance(&sender, balance);
+            mgr.set_balance(&sender, balance.into()).expect("seed balance");
             let root_before = mgr.root_hash();
 
             let _ = mgr.apply_transfer(&sender, &receiver, 0, nonce);

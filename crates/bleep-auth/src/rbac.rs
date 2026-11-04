@@ -194,6 +194,11 @@ impl RbacEngine {
             .insert(role);
     }
 
+    /// Assign a role to the principal identified by its public-key bytes.
+    pub fn assign_role_principal(&self, public_key: &[u8], role: Role) {
+        self.assign_role(&hex::encode(public_key), role);
+    }
+
     pub fn revoke_role(&self, identity_id: &str, role: &Role) {
         if let Some(mut roles) = self.assignments.get_mut(identity_id) {
             roles.remove(role);
@@ -211,6 +216,13 @@ impl RbacEngine {
             .get(identity_id)
             .map(|r| r.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Return whether any principal currently has the system-admin role.
+    pub fn has_any_system_admin(&self) -> bool {
+        self.assignments
+            .iter()
+            .any(|entry| entry.value().contains(&Role::SystemAdmin))
     }
 
     /// Evaluate whether a role set grants the required permission.

@@ -7,6 +7,36 @@ mod tests {
     use bleep_crypto::pq_crypto::SignatureScheme;
     use std::collections::VecDeque;
 
+    proptest::proptest! {
+        #[test]
+        fn random_balance_deltas_match_the_authoritative_u64_view(
+            deltas in proptest::collection::vec((0u8..4, -500i16..501), 0..100)
+        ) {
+            let manager = std::sync::Arc::new(parking_lot::Mutex::new(
+                bleep_state::state_manager::StateManager::new(),
+            ));
+            let view = BlockchainState::with_state_manager(std::sync::Arc::clone(&manager));
+            let addresses = ["account-0", "account-1", "account-2", "account-3"];
+            for (index, delta) in deltas {
+                let _ = manager
+                    .lock()
+                    .apply_balance_delta(addresses[index as usize], i128::from(delta));
+            }
+
+            let state = manager.lock();
+            proptest::prop_assert!(state.verify_supply_invariant().is_ok());
+            let account_total: u128 = state.export_balances().values().copied().sum();
+            proptest::prop_assert_eq!(state.total_supply(), account_total);
+            drop(state);
+            for address in addresses {
+                proptest::prop_assert_eq!(
+                    u128::from(view.balance_of(address).expect("u64 balance view")),
+                    manager.lock().get_balance(address)
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_block_creation() {
         let transactions = vec![];
@@ -51,15 +81,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_account_balance_is_zero() {
-        assert_eq!(BlockchainState::new().balance_of("unknown"), 0);
+    fn balance_view_requires_an_authoritative_source() {
+        assert!(BlockchainState::new().balance_of("unknown").is_err());
     }
 
     #[test]
-    fn reverting_block_restores_sequential_transfers() {
-        let mut state = BlockchainState::new();
-        state.credit("alice", 20);
-        let before = state.clone();
+    fn block_preflight_reads_without_mutating_the_authoritative_view() {
+        let manager = std::sync::Arc::new(parking_lot::Mutex::new(
+            bleep_state::state_manager::StateManager::new(),
+        ));
+        manager.lock().mint("alice", 20).expect("genesis balance");
+        let state = BlockchainState::with_state_manager(std::sync::Arc::clone(&manager));
         let block = Block::new(
             1,
             vec![
@@ -86,18 +118,19 @@ mod tests {
         );
 
         state.apply_block(&block).unwrap();
-        state.revert_block(&block);
-
-        assert_eq!(state.balance_of("alice"), before.balance_of("alice"));
-        assert_eq!(state.balance_of("bob"), before.balance_of("bob"));
-        assert_eq!(state.balance_of("carol"), before.balance_of("carol"));
+        assert_eq!(state.balance_of("alice").unwrap(), 20);
+        assert_eq!(state.balance_of("bob").unwrap(), 0);
+        assert_eq!(manager.lock().get_balance("alice"), 20);
     }
 
     #[test]
     fn invalid_fork_does_not_change_chain_or_state() {
         let genesis = Block::new(0, vec![], String::new());
-        let mut state = BlockchainState::new();
-        state.credit("alice", 10);
+        let manager = std::sync::Arc::new(parking_lot::Mutex::new(
+            bleep_state::state_manager::StateManager::new(),
+        ));
+        manager.lock().mint("alice", 10).expect("genesis balance");
+        let state = BlockchainState::with_state_manager(manager);
         let tx_pool = TransactionPool::new(100);
         let mut blockchain = Blockchain::new(genesis.clone(), state, tx_pool);
         let mut candidate = VecDeque::from([genesis.clone()]);
@@ -111,6 +144,6 @@ mod tests {
             blockchain.latest_block().unwrap().compute_hash(),
             genesis.compute_hash()
         );
-        assert_eq!(blockchain.balance_of("alice"), 10);
+        assert_eq!(blockchain.balance_of("alice").unwrap(), 10);
     }
 }

@@ -79,6 +79,7 @@ pub struct FinalizedBlock {
 
 pub const MAX_TXS_PER_BLOCK: usize = 4_096;
 pub const BLOCK_INTERVAL_MS: u64 = 3_000;
+const INITIAL_BLOCK_DELAY_MS: u64 = 10_000;
 const BLOCKS_PER_EPOCH: u64 = 1_000;
 const PROTOCOL_VERSION: u32 = bleep_core::block::CURRENT_PROTOCOL_VERSION;
 /// BLEEP native chain ID for intent routing
@@ -90,6 +91,22 @@ pub fn ensure_live_finality_mode_supported(active_validator_count: usize) -> Res
     } else {
         Ok(())
     }
+}
+
+fn should_skip_block(pending_tx_count: usize, accepted_tx_count: usize) -> bool {
+    pending_tx_count > 0 && accepted_tx_count == 0
+}
+
+fn vm_account_bytes(address: &str) -> [u8; 32] {
+    let mut account = [0; 32];
+    let address = address.as_bytes();
+    let copied_len = address.len().min(account.len());
+    account[..copied_len].copy_from_slice(&address[..copied_len]);
+    account
+}
+
+fn is_transfer_account(account: &[u8; 32], address: &str) -> bool {
+    *account == vm_account_bytes(address)
 }
 
 // ── ProducerConfig ────────────────────────────────────────────────────────────
@@ -281,10 +298,16 @@ impl BlockProducer {
             "[BlockProducer] Starting — {}ms slots, validator={}",
             BLOCK_INTERVAL_MS, self.config.validator_id
         );
-        let mut ticker = tokio::time::interval(Duration::from_millis(BLOCK_INTERVAL_MS));
+        let slot_interval = Duration::from_millis(BLOCK_INTERVAL_MS);
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(INITIAL_BLOCK_DELAY_MS),
+            slot_interval,
+        );
 
         loop {
             ticker.tick().await;
+            // Empty pools produce empty blocks; None means another proposer
+            // owns this slot or a nonempty batch was entirely rejected.
             match self.produce_one().await {
                 Ok(Some(fb)) => {
                     info!(
@@ -297,7 +320,7 @@ impl BlockProducer {
                     );
                     let _ = self.block_tx.send(fb);
                 }
-                Ok(None) => { /* empty pool — skip slot */ }
+                Ok(None) => {}
                 Err(e) => error!("[BlockProducer] {}", e),
             }
         }
@@ -310,10 +333,16 @@ impl BlockProducer {
             "[BlockProducer] Starting — {}ms slots, validator={}",
             BLOCK_INTERVAL_MS, self_arc.config.validator_id
         );
-        let mut ticker = tokio::time::interval(Duration::from_millis(BLOCK_INTERVAL_MS));
+        let slot_interval = Duration::from_millis(BLOCK_INTERVAL_MS);
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(INITIAL_BLOCK_DELAY_MS),
+            slot_interval,
+        );
 
         loop {
             ticker.tick().await;
+            // Empty pools produce empty blocks; None means another proposer
+            // owns this slot or a nonempty batch was entirely rejected.
             match self_arc.produce_one().await {
                 Ok(Some(fb)) => {
                     info!(
@@ -326,7 +355,7 @@ impl BlockProducer {
                     );
                     let _ = self_arc.block_tx.send(fb);
                 }
-                Ok(None) => { /* empty pool — skip slot */ }
+                Ok(None) => {}
                 Err(e) => error!("[BlockProducer] {}", e),
             }
         }
@@ -351,9 +380,6 @@ impl BlockProducer {
             .tx_pool
             .peek_for_block(self.config.max_txs_per_block)
             .await;
-        if pending.is_empty() {
-            return Ok(None);
-        }
         let tx_count = pending.len();
 
         // ── 2: Read chain tip ─────────────────────────────────────────────────
@@ -402,13 +428,13 @@ impl BlockProducer {
                         })
                         .map(|validator| validator.vrf_public_key.as_slice())
                 });
-            let previous_randomness =
-                PoSConsensusEngine::randomness_from_parent_block(&parent_block, parent_vrf_public_key)
-                    .map_err(|error| {
-                        format!(
-                            "Cannot derive proposer randomness at height {next_height}: {error}"
-                        )
-                    })?;
+            let previous_randomness = PoSConsensusEngine::randomness_from_parent_block(
+                &parent_block,
+                parent_vrf_public_key,
+            )
+            .map_err(|error| {
+                format!("Cannot derive proposer randomness at height {next_height}: {error}")
+            })?;
             let local_vrf_public_key =
                 PoSConsensusEngine::derive_vrf_public_key(&self.config.validator_sk)?;
             let local_identity = active_identities
@@ -503,12 +529,8 @@ impl BlockProducer {
         // (pending_index, gas, vm_accepted, state_diff)
 
         for (idx, zt) in pending.iter().enumerate() {
-            let mut from_bytes = [0u8; 32];
-            let mut to_bytes = [0u8; 32];
-            let from_b = zt.sender.as_bytes();
-            let to_b = zt.receiver.as_bytes();
-            from_bytes[..from_b.len().min(32)].copy_from_slice(&from_b[..from_b.len().min(32)]);
-            to_bytes[..to_b.len().min(32)].copy_from_slice(&to_b[..to_b.len().min(32)]);
+            let from_bytes = vm_account_bytes(&zt.sender);
+            let to_bytes = vm_account_bytes(&zt.receiver);
 
             let intent = Intent::new_unsigned(
                 IntentKind::Transfer(TransferIntent {
@@ -548,7 +570,6 @@ impl BlockProducer {
         let mut block_txs: Vec<Transaction> = Vec::with_capacity(tx_count);
         let mut failed_tx_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut total_gas: u64 = 0;
-        let any_pending = !pending.is_empty();
         {
             let mut state = self.state.lock();
             for (idx, gas, vm_ok, diff) in &vm_results {
@@ -593,16 +614,18 @@ impl BlockProducer {
                     let addr = hex::encode(acct_bytes);
                     // Only apply VM diff for accounts that are not the direct
                     // transfer pair (those are handled by apply_transfer above).
-                    if addr == zt.sender || addr == zt.receiver {
+                    if is_transfer_account(acct_bytes, &zt.sender)
+                        || is_transfer_account(acct_bytes, &zt.receiver)
+                    {
                         continue;
                     }
-                    let current = state.get_balance(&addr);
-                    let new_bal = if update.delta >= 0 {
-                        current.saturating_add(update.delta as u128)
-                    } else {
-                        current.saturating_sub(update.delta.unsigned_abs())
-                    };
-                    state.set_balance(&addr, new_bal);
+                    state
+                        .apply_balance_delta(&addr, update.delta)
+                        .map_err(|error| {
+                            format!(
+                                "VM balance delta rejected for account {addr} in block {next_height}: {error}"
+                            )
+                        })?;
                 }
 
                 // Path 3: apply nonce updates from VM diff.
@@ -611,7 +634,7 @@ impl BlockProducer {
                 // until we reach the target. Skip sender (already bumped by apply_transfer).
                 for (acct_bytes, nonce_update) in &diff.nonces {
                     let addr = hex::encode(acct_bytes);
-                    if addr == zt.sender {
+                    if is_transfer_account(acct_bytes, &zt.sender) {
                         continue; // already bumped by apply_transfer above
                     }
                     // Bring nonce up to the VM-reported new_nonce
@@ -639,13 +662,11 @@ impl BlockProducer {
             self.tx_pool.remove_confirmed(failed_tx_id).await;
         }
 
-        if block_txs.is_empty() {
-            if any_pending {
-                info!(
-                    "[BlockProducer] All pending transactions failed; no block produced at height {}",
-                    next_height
-                );
-            }
+        if should_skip_block(pending.len(), block_txs.len()) {
+            info!(
+                "[BlockProducer] All pending transactions failed; no block produced at height {}",
+                next_height
+            );
             return Ok(None);
         }
 
@@ -684,11 +705,8 @@ impl BlockProducer {
             &block.previous_hash,
         )
         .map_err(|error| format!("Block {next_height} VRF generation failed: {error}"))?;
-        block.zk_proof = PoSConsensusEngine::encode_vrf_stark_envelope(
-            &vrf_output,
-            &vrf_proof,
-            &[],
-        );
+        block.zk_proof =
+            PoSConsensusEngine::encode_vrf_stark_envelope(&vrf_output, &vrf_proof, &[]);
 
         // Every non-genesis block must carry a real SPHINCS+ signature.
         block
@@ -735,11 +753,21 @@ impl BlockProducer {
 
         // ── 10: Commit to chain only after the PBFT commit quorum ───────────────
         let accepted = {
-            let mut chain = self
-                .blockchain
-                .write()
-                .map_err(|e| format!("blockchain write lock: {}", e))?;
-            let accepted = chain.add_block_with_validator_set(block.clone(), &epoch_validator_keys);
+            let mut chain = match self.blockchain.write() {
+                Ok(chain) => chain,
+                Err(error) => {
+                    let rejection = format!("blockchain write lock: {error}");
+                    let cleanup = finality.abandon_proposal(next_height);
+                    return Err(match cleanup {
+                        Ok(()) => rejection,
+                        Err(cleanup_error) => {
+                            format!("{rejection}; PBFT cleanup failed: {cleanup_error}")
+                        }
+                    });
+                }
+            };
+            let accepted =
+                chain.add_committed_block_with_validator_set(block.clone(), &epoch_validator_keys);
             if accepted {
                 if let Err(e) = self.state.lock().persist_canonical_block(
                     &block,
@@ -750,9 +778,14 @@ impl BlockProducer {
                     &Block::genesis_for_chain(self.config.chain_id.clone()).compute_hash(),
                 ) {
                     chain.rollback();
+                    let cleanup = finality.abandon_proposal(next_height);
                     return Err(format!(
-                        "Block {} durable commit failed: {}",
-                        next_height, e
+                        "Block {} durable commit failed: {}; PBFT cleanup: {}",
+                        next_height,
+                        e,
+                        cleanup
+                            .err()
+                            .unwrap_or_else(|| "proposal abandoned".to_string())
                     ));
                 }
             }
@@ -760,11 +793,18 @@ impl BlockProducer {
         };
 
         if !accepted {
+            let cleanup = finality.abandon_proposal(next_height);
             error!(
                 "[BlockProducer] Block {} rejected — validation failed, not adding to chain",
                 next_height
             );
-            return Err(format!("Block {} validation failed", next_height));
+            return Err(format!(
+                "Block {} validation failed; PBFT cleanup: {}",
+                next_height,
+                cleanup
+                    .err()
+                    .unwrap_or_else(|| "proposal abandoned".to_string())
+            ));
         }
 
         // Inbound validators require each transaction's full signature. Until
@@ -947,7 +987,7 @@ impl BlockProducer {
 
 #[cfg(test)]
 mod live_finality_policy_tests {
-    use super::ensure_live_finality_mode_supported;
+    use super::{ensure_live_finality_mode_supported, should_skip_block};
 
     #[test]
     fn live_commit_requires_a_nonempty_committee() {
@@ -955,6 +995,13 @@ mod live_finality_policy_tests {
         assert!(ensure_live_finality_mode_supported(1).is_ok());
         assert!(ensure_live_finality_mode_supported(2).is_ok());
         assert!(ensure_live_finality_mode_supported(100).is_ok());
+    }
+
+    #[test]
+    fn empty_slots_produce_blocks_but_all_failed_transactions_do_not() {
+        assert!(!should_skip_block(0, 0));
+        assert!(!should_skip_block(3, 2));
+        assert!(should_skip_block(3, 0));
     }
 }
 
@@ -1053,6 +1100,19 @@ mod real_transaction_benchmark {
     use super::*;
     use bleep_core::blockchain::{Blockchain, BlockchainState};
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+
+    #[test]
+    fn vm_transfer_accounts_match_native_addresses() {
+        let address = "BLEEP1sender";
+        let account = vm_account_bytes(address);
+
+        assert!(is_transfer_account(&account, address));
+        assert!(!is_transfer_account(&account, "BLEEP1receiver"));
+        assert!(is_transfer_account(
+            &vm_account_bytes(&"BLEEP1".repeat(8)),
+            &"BLEEP1".repeat(8)
+        ));
+    }
 
     #[test]
     fn legacy_signing_failure_does_not_append_block() {

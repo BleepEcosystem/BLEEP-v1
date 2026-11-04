@@ -33,6 +33,9 @@ pub enum AuthError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("System administrator has already been bootstrapped")]
+    AlreadyBootstrapped,
+
     // ── Rate limiting ────────────────────────────────────────────────────
     #[error("Rate limit exceeded for identity '{identity}' on action '{action}' — retry after {retry_after_secs}s")]
     RateLimitExceeded {

@@ -21,10 +21,25 @@ pub enum StateError {
     AccountNotFound(String),
     #[error("Storage error: {0}")]
     Storage(String),
+    #[error("Invalid state configuration: {0}")]
+    InvalidConfiguration(String),
     #[error("Serialisation error: {0}")]
     Serialisation(String),
     #[error("Snapshot error: {0}")]
     Snapshot(String),
+    #[error("Balance arithmetic overflow")]
+    Overflow,
+    #[error("Insufficient balance")]
+    InsufficientBalance,
+    #[error("Supply cap exceeded")]
+    SupplyCapExceeded,
+    #[error("Issued supply invariant violated: issued={issued}, account_total={account_total}")]
+    SupplyInvariantViolation { issued: u128, account_total: u128 },
+    #[error("Balance deltas sum to {account_delta}, but issuance delta is {issuance_delta}")]
+    SupplyDeltaMismatch {
+        account_delta: i128,
+        issuance_delta: i128,
+    },
 }
 
 pub type StateResult<T> = Result<T, StateError>;
@@ -34,11 +49,13 @@ const PREFIX_ACCOUNT: &[u8] = b"acct:";
 const PREFIX_BLOCK: &[u8] = b"chain:block:";
 const PREFIX_APPLICATION: &[u8] = b"app:";
 const KEY_HEIGHT: &[u8] = b"sys:block_height";
+const KEY_ISSUED_SUPPLY: &[u8] = b"sys:issued_supply";
 const KEY_CHAIN_ID: &[u8] = b"chain:id";
 const KEY_TIP_HASH: &[u8] = b"chain:tip_hash";
 const SNAPSHOT_MANIFEST: &str = "bleep-snapshot-manifest.json";
 const SNAPSHOT_TRIE: &str = "bleep-state-trie.bin";
 const TRANSACTION_REPLAY_WINDOW_SECS: u64 = 30;
+pub const MAX_SUPPLY: u128 = 200_000_000 * 100_000_000u128;
 
 /// Persisted account record.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -107,6 +124,7 @@ struct CacheEntry {
 pub struct StateCheckpoint {
     cache: HashMap<String, CacheEntry>,
     block_height: u64,
+    issued_supply: u128,
     trie: SparseMerkleTrie,
 }
 
@@ -118,6 +136,8 @@ pub struct StateManager {
     db_path: PathBuf,
     cache: HashMap<String, CacheEntry>,
     block_height: u64,
+    issued_supply: u128,
+    blocks_per_epoch: u64,
     /// Sprint 3: Sparse Merkle Trie for O(1)-amortised cryptographic state root.
     trie: SparseMerkleTrie,
 }
@@ -147,6 +167,17 @@ impl StateManager {
             Ok(None) => 0,
             Err(e) => return Err(StateError::Storage(e.to_string())),
         };
+        let persisted_issued_supply = match db.get(KEY_ISSUED_SUPPLY) {
+            Ok(Some(value)) => {
+                let bytes: [u8; 16] = value
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| StateError::Storage("corrupt issued_supply".into()))?;
+                Some(u128::from_le_bytes(bytes))
+            }
+            Ok(None) => None,
+            Err(error) => return Err(StateError::Storage(error.to_string())),
+        };
 
         log::info!("[StateManager] Opened DB — block_height={}", block_height);
         let mut state = Self {
@@ -154,8 +185,14 @@ impl StateManager {
             db_path,
             cache: HashMap::new(),
             block_height,
+            issued_supply: persisted_issued_supply.unwrap_or(0),
+            blocks_per_epoch: 1_000,
             trie: SparseMerkleTrie::new(),
         };
+        if persisted_issued_supply.is_none() {
+            state.issued_supply = state.sum_account_balances()?;
+        }
+        state.verify_supply_invariant()?;
         state.rebuild_trie_from_db()?;
         Ok(state)
     }
@@ -178,10 +215,115 @@ impl StateManager {
         self.get_account(address).balance
     }
 
-    pub fn set_balance(&mut self, address: &str, balance: u128) {
+    /// Configure the audit cadence to match the active chain's epoch length.
+    pub fn set_blocks_per_epoch(&mut self, blocks_per_epoch: u64) -> StateResult<()> {
+        if blocks_per_epoch == 0 {
+            return Err(StateError::InvalidConfiguration(
+                "blocks_per_epoch must be greater than zero".into(),
+            ));
+        }
+        self.blocks_per_epoch = blocks_per_epoch;
+        Ok(())
+    }
+
+    /// Apply an issuance or burn delta to an account through the authoritative ledger.
+    ///
+    /// Transfers use `apply_transfer`, which moves balances without changing
+    /// total issuance.
+    pub fn apply_balance_delta(&mut self, address: &str, delta: i128) -> StateResult<()> {
+        self.apply_balance_deltas(&[(address, delta)], delta)
+    }
+
+    fn apply_balance_deltas(
+        &mut self,
+        changes: &[(&str, i128)],
+        issuance_delta: i128,
+    ) -> StateResult<()> {
+        let mut account_deltas = HashMap::<&str, i128>::new();
+        for (address, delta) in changes {
+            let current = account_deltas.get(address).copied().unwrap_or_default();
+            account_deltas.insert(
+                *address,
+                current.checked_add(*delta).ok_or(StateError::Overflow)?,
+            );
+        }
+        let account_delta = account_deltas.values().try_fold(0i128, |total, delta| {
+            total.checked_add(*delta).ok_or(StateError::Overflow)
+        })?;
+        if account_delta != issuance_delta {
+            return Err(StateError::SupplyDeltaMismatch {
+                account_delta,
+                issuance_delta,
+            });
+        }
+
+        let mut next_balances = Vec::with_capacity(account_deltas.len());
+        for (address, delta) in account_deltas {
+            let current = self.get_balance(address);
+            let next = if delta >= 0 {
+                current
+                    .checked_add(delta as u128)
+                    .ok_or(StateError::Overflow)?
+            } else {
+                current
+                    .checked_sub(delta.unsigned_abs())
+                    .ok_or(StateError::InsufficientBalance)?
+            };
+            next_balances.push((address.to_string(), next));
+        }
+
+        let next_supply = if issuance_delta >= 0 {
+            self.issued_supply
+                .checked_add(issuance_delta as u128)
+                .ok_or(StateError::Overflow)?
+        } else {
+            self.issued_supply
+                .checked_sub(issuance_delta.unsigned_abs())
+                .ok_or(StateError::InsufficientBalance)?
+        };
+        if next_supply > MAX_SUPPLY {
+            return Err(StateError::SupplyCapExceeded);
+        }
+
+        for (address, balance) in next_balances {
+            self.set_balance_raw(&address, balance);
+            self.debug_assert_account_balance_view(&address, balance);
+        }
+        self.issued_supply = next_supply;
+        Ok(())
+    }
+
+    /// Set an account balance while updating issued supply by the same delta.
+    pub fn set_balance(&mut self, address: &str, balance: u128) -> StateResult<()> {
+        let current = self.get_balance(address);
+        if balance >= current {
+            let delta = balance - current;
+            let delta = i128::try_from(delta).map_err(|_| StateError::Overflow)?;
+            self.apply_balance_delta(address, delta)
+        } else {
+            let delta = current - balance;
+            let delta = i128::try_from(delta).map_err(|_| StateError::Overflow)?;
+            self.apply_balance_delta(address, -delta)
+        }
+    }
+
+    fn set_balance_raw(&mut self, address: &str, balance: u128) {
         let e = self.cache_entry(address);
         e.state.balance = balance;
         e.dirty = true;
+    }
+
+    fn debug_assert_account_balance_view(&self, address: &str, balance: u128) {
+        #[cfg(debug_assertions)]
+        {
+            let balance_view = u64::try_from(balance)
+                .expect("StateManager balance exceeds the u64 blockchain balance view");
+            debug_assert_eq!(
+                u128::from(balance_view),
+                balance,
+                "balance view drift for {address}"
+            );
+        }
     }
 
     pub fn increment_nonce(&mut self, address: &str) -> u64 {
@@ -229,6 +371,7 @@ impl StateManager {
         StateCheckpoint {
             cache: self.cache.clone(),
             block_height: self.block_height,
+            issued_supply: self.issued_supply,
             trie: self.trie.clone(),
         }
     }
@@ -237,6 +380,7 @@ impl StateManager {
     pub fn restore_checkpoint(&mut self, checkpoint: StateCheckpoint) {
         self.cache = checkpoint.cache;
         self.block_height = checkpoint.block_height;
+        self.issued_supply = checkpoint.issued_supply;
         self.trie = checkpoint.trie;
     }
 
@@ -266,6 +410,7 @@ impl StateManager {
         genesis_hash: &str,
     ) -> StateResult<()> {
         self.check_next_canonical_block(index, previous_hash, chain_id, genesis_hash)?;
+        self.verify_supply_at_block(index)?;
         self.block_height = index;
         self.sync_trie();
         if let Err(e) =
@@ -294,6 +439,7 @@ impl StateManager {
         )?;
 
         let original_cache = self.cache.clone();
+        let original_supply = self.issued_supply;
         let original_trie = self.trie.clone();
         for transfer in context.transfers {
             if self.get_nonce(&transfer.sender) != transfer.nonce
@@ -305,6 +451,8 @@ impl StateManager {
                 )
             {
                 self.cache = original_cache.clone();
+                self.issued_supply = original_supply;
+                self.trie = original_trie.clone();
                 return Err(StateError::Storage(format!(
                     "block {} transaction state transition rejected for {}",
                     context.index, transfer.sender
@@ -312,9 +460,16 @@ impl StateManager {
             }
         }
 
+        if let Err(error) = self.verify_supply_at_block(context.index) {
+            self.cache = original_cache;
+            self.issued_supply = original_supply;
+            self.trie = original_trie;
+            return Err(error);
+        }
         let actual_post_state_root = hex::encode(self.state_root());
         if actual_post_state_root != context.expected_post_state_root {
             self.cache = original_cache;
+            self.issued_supply = original_supply;
             self.trie = original_trie;
             return Err(StateError::Storage(format!(
                 "block {} post-state root mismatch: expected {}, computed {}",
@@ -333,6 +488,7 @@ impl StateManager {
         ) {
             self.block_height = context.index.saturating_sub(1);
             self.cache = original_cache;
+            self.issued_supply = original_supply;
             self.trie = original_trie;
             return Err(e);
         }
@@ -502,6 +658,7 @@ impl StateManager {
             }
         }
         batch.put(KEY_HEIGHT, index.to_le_bytes());
+        batch.put(KEY_ISSUED_SUPPLY, self.issued_supply.to_le_bytes());
         batch.put(KEY_CHAIN_ID, chain_id.as_bytes());
         batch.put(KEY_TIP_HASH, block_hash.as_bytes());
         batch.put(block_key, block_value);
@@ -795,40 +952,19 @@ impl StateManager {
             return false;
         }
 
-        let bal = self.get_balance(sender);
-
-        // Checked subtraction — rejects if sender has insufficient funds.
-        let new_sender_bal = match bal.checked_sub(amount) {
-            Some(v) => v,
-            None => {
-                log::warn!(
-                    "[StateManager] apply_transfer: {} has {}, needs {} (insufficient)",
-                    sender,
-                    bal,
-                    amount
-                );
+        let amount_delta = match i128::try_from(amount) {
+            Ok(amount) => amount,
+            Err(_) => {
+                log::error!("[StateManager] apply_transfer: amount exceeds signed delta range");
                 return false;
             }
         };
-
-        let recv = self.get_balance(receiver);
-
-        // Checked addition — rejects on receiver balance overflow.
-        let new_recv_bal = match recv.checked_add(amount) {
-            Some(v) => v,
-            None => {
-                log::error!(
-                    "[StateManager] apply_transfer: receiver {} balance overflow ({} + {})",
-                    receiver,
-                    recv,
-                    amount
-                );
-                return false;
-            }
-        };
-
-        self.set_balance(sender, new_sender_bal);
-        self.set_balance(receiver, new_recv_bal);
+        if let Err(error) =
+            self.apply_balance_deltas(&[(sender, -amount_delta), (receiver, amount_delta)], 0)
+        {
+            log::warn!("[StateManager] apply_transfer: balance update failed: {error}");
+            return false;
+        }
         let sender_entry = self.cache_entry(sender);
         sender_entry.state.nonce = next_nonce;
         sender_entry.dirty = true;
@@ -847,35 +983,12 @@ impl StateManager {
     /// 2. Uses `checked_add` for the per-address balance update.
     /// 3. Returns `Ok(new_balance)` or `Err` — callers must handle the error.
     pub fn mint(&mut self, address: &str, amount: u128) -> Result<u128, String> {
-        /// Constitutional supply cap: 200,000,000 BLEEP × 10^8 (8 decimals) = 20×10^15 µBLEEP.
-        /// This constant must match `bleep-economics::tokenomics::MAX_SUPPLY`.
-        const MAX_SUPPLY: u128 = 200_000_000 * 100_000_000u128;
-
-        let current_total = self.total_supply();
-        let new_total = current_total.checked_add(amount).ok_or_else(|| {
-            format!(
-                "[StateManager] mint: total supply arithmetic overflow ({} + {})",
-                current_total, amount
-            )
-        })?;
-
-        if new_total > MAX_SUPPLY {
-            return Err(format!(
-                "[StateManager] mint: cap exceeded — current={} requested={} cap={}",
-                current_total, amount, MAX_SUPPLY
-            ));
-        }
-
-        let bal = self.get_balance(address);
-        let new_bal = bal.checked_add(amount).ok_or_else(|| {
-            format!(
-                "[StateManager] mint: address {} balance overflow ({} + {})",
-                address, bal, amount
-            )
-        })?;
-
-        self.set_balance(address, new_bal);
-        Ok(new_bal)
+        let delta = i128::try_from(amount)
+            .map_err(|_| StateError::Overflow)
+            .map_err(|error| error.to_string())?;
+        self.apply_balance_delta(address, delta)
+            .map_err(|error| error.to_string())?;
+        Ok(self.get_balance(address))
     }
 
     /// Compute total circulating supply from the canonical account set.
@@ -884,36 +997,25 @@ impl StateManager {
     /// the in-memory cache, so a restart or a cache flush cannot silently
     /// undercount supply.
     pub fn total_supply(&self) -> u128 {
-        let mut balances = HashMap::new();
+        self.issued_supply
+    }
 
-        for item in self.db.prefix_iterator(PREFIX_ACCOUNT) {
-            let Ok((key, value)) = item else {
-                continue;
-            };
-            if !key.starts_with(PREFIX_ACCOUNT) {
-                break;
-            }
-
-            let Ok(addr) = std::str::from_utf8(&key[PREFIX_ACCOUNT.len()..]) else {
-                continue;
-            };
-            let Ok(acct) = serde_json::from_slice::<AccountState>(&value) else {
-                continue;
-            };
-            balances.insert(addr.to_string(), acct.balance);
+    /// Verify that recorded issuance matches the sum of all authoritative balances.
+    pub fn verify_supply_invariant(&self) -> StateResult<()> {
+        if self.issued_supply > MAX_SUPPLY {
+            return Err(StateError::SupplyCapExceeded);
         }
-
-        for (addr, entry) in &self.cache {
-            balances.insert(addr.clone(), entry.state.balance);
+        let account_total = self.sum_account_balances()?;
+        if account_total != self.issued_supply {
+            return Err(StateError::SupplyInvariantViolation {
+                issued: self.issued_supply,
+                account_total,
+            });
         }
-
-        balances.values().copied().sum()
+        Ok(())
     }
 
     /// Export account balances from persistent storage and in-memory cache.
-    ///
-    /// This is used to seed legacy `bleep-core` balances when the node boots
-    /// with a live `StateManager`.
     pub fn export_balances(&self) -> HashMap<String, u128> {
         let mut balances = HashMap::new();
         let prefix = PREFIX_ACCOUNT;
@@ -939,6 +1041,40 @@ impl StateManager {
         }
 
         balances
+    }
+
+    fn sum_account_balances(&self) -> StateResult<u128> {
+        let mut balances = HashMap::new();
+        for item in self.db.prefix_iterator(PREFIX_ACCOUNT) {
+            let (key, value) = item.map_err(|error| StateError::Storage(error.to_string()))?;
+            if !key.starts_with(PREFIX_ACCOUNT) {
+                break;
+            }
+            let address = std::str::from_utf8(&key[PREFIX_ACCOUNT.len()..])
+                .map_err(|error| StateError::Serialisation(error.to_string()))?;
+            let account: AccountState = serde_json::from_slice(&value)
+                .map_err(|error| StateError::Serialisation(error.to_string()))?;
+            balances.insert(address.to_string(), account.balance);
+        }
+        for (address, entry) in &self.cache {
+            balances.insert(address.clone(), entry.state.balance);
+        }
+        balances.values().try_fold(0u128, |total, balance| {
+            total.checked_add(*balance).ok_or(StateError::Overflow)
+        })
+    }
+
+    fn verify_supply_at_block(&self, block_index: u64) -> StateResult<()> {
+        #[cfg(debug_assertions)]
+        {
+            let _ = block_index;
+            self.verify_supply_invariant()?;
+        }
+        #[cfg(not(debug_assertions))]
+        if block_index.is_multiple_of(self.blocks_per_epoch) {
+            self.verify_supply_invariant()?;
+        }
+        Ok(())
     }
 
     // ── Trie query helpers ────────────────────────────────────────────────────
@@ -1021,6 +1157,7 @@ impl StateManager {
         }
 
         batch.put(KEY_HEIGHT, self.block_height.to_le_bytes());
+        batch.put(KEY_ISSUED_SUPPLY, self.issued_supply.to_le_bytes());
 
         self.db
             .write(batch)
@@ -1133,7 +1270,7 @@ mod tests {
     fn balance_roundtrip() {
         let mut m = fresh();
         assert_eq!(m.get_balance("alice"), 0);
-        m.set_balance("alice", 1_000);
+        m.set_balance("alice", 1_000).expect("set initial balance");
         assert_eq!(m.get_balance("alice"), 1_000);
     }
 
@@ -1255,6 +1392,43 @@ mod tests {
         m.mint("a", 1_000).expect("mint");
         m.mint("b", 2_000).expect("mint");
         assert_eq!(m.total_supply(), 3_000);
+        m.verify_supply_invariant().expect("supply invariant");
+    }
+
+    #[test]
+    fn supply_invariant_rejects_a_one_sided_ledger_update() {
+        let mut m = fresh();
+        m.mint("alice", 500).expect("mint");
+        m.issued_supply += 1;
+        assert!(matches!(
+            m.verify_supply_invariant(),
+            Err(StateError::SupplyInvariantViolation {
+                issued: 501,
+                account_total: 500
+            })
+        ));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn random_balance_deltas_preserve_issued_supply(
+            deltas in proptest::collection::vec((0u8..4, -500i16..501), 0..100)
+        ) {
+            let mut state = fresh();
+            let addresses = ["account-0", "account-1", "account-2", "account-3"];
+            for (index, delta) in deltas {
+                let _ = state.apply_balance_delta(addresses[index as usize], i128::from(delta));
+            }
+
+            proptest::prop_assert!(state.verify_supply_invariant().is_ok());
+            let account_total: u128 = state.export_balances().values().copied().sum();
+            proptest::prop_assert_eq!(state.total_supply(), account_total);
+            for address in addresses {
+                let balance = state.get_balance(address);
+                let u64_view = u64::try_from(balance).expect("supply cap fits u64");
+                proptest::prop_assert_eq!(u128::from(u64_view), balance);
+            }
+        }
     }
 
     #[test]
@@ -1273,7 +1447,9 @@ mod tests {
         let block_hash = "block-one-hash";
 
         let mut state = StateManager::open(&path).expect("open state");
-        state.set_balance("alice", 123);
+        state
+            .set_balance("alice", 123)
+            .expect("set initial balance");
         state
             .persist_canonical_block(&block, 1, block_hash, genesis_hash, chain_id, genesis_hash)
             .expect("persist block");
@@ -1304,7 +1480,7 @@ mod tests {
         let chain_id = "test-chain";
         let block_hash = "block-one-hash";
         let mut state = StateManager::open(&path).expect("open state");
-        state.set_balance("alice", 50);
+        state.set_balance("alice", 50).expect("set initial balance");
 
         let rejected_transfer = CanonicalTransfer {
             sender: "alice".into(),
@@ -1459,7 +1635,9 @@ mod tests {
         ));
         let db_path = test_dir.join("db");
         let mut state = StateManager::open(&db_path).expect("open state");
-        state.set_balance("carol", 9999);
+        state
+            .set_balance("carol", 9999)
+            .expect("set initial balance");
         state
             .persist_canonical_block(
                 &"block-one",

@@ -40,7 +40,8 @@ fuzz_target!(|input: FuzzInput| {
         let capped = bal.min(&10_000_000_000_000u64); // 100k BLEEP max per account
         let addr_str = hex::encode(addr);
         if let Ok(new_total) = total_supply.checked_add(*capped) {
-            mgr.set_balance(&addr_str, *capped);
+            mgr.set_balance(&addr_str, u128::from(*capped))
+                .expect("bounded initial balance");
             total_supply = new_total;
         }
     }

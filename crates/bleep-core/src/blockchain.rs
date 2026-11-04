@@ -3,26 +3,24 @@
 //! Wires the full execution path:
 //!   add_block()  →  validate  →  apply state  →  drain tx pool  →  log
 //!
-//! `BlockchainState` (in-memory) tracks balances and is updated atomically
-//! with each accepted block.  Sprint 3 replaces the HashMap with a RocksDB
-//! sparse Merkle trie via bleep-state::state_storage.
+//! Account balances are owned by `StateManager`; `BlockchainState` is a
+//! read-only balance view used for preflight checks.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
-use crate::block::{Block, Transaction};
+use crate::block::Block;
 use crate::block_validation::BlockValidator;
 use crate::transaction_pool::TransactionPool;
 
 // ─── In-memory account state ─────────────────────────────────────────────────
 
-/// Simple in-memory account balance table.
+/// Read-only balance projection supplied by the authoritative state manager.
 ///
-/// Sprint 2: HashMap<address, balance_in_atomic_units>
-/// Sprint 3: replaced by RocksDB sparse Merkle trie.
-#[derive(Default, Clone)]
+/// The legacy core blockchain does not maintain a second balance ledger.
+#[derive(Clone, Default)]
 pub struct BlockchainState {
-    pub balances: HashMap<String, u64>,
+    state_manager: Option<Arc<parking_lot::Mutex<bleep_state::state_manager::StateManager>>>,
 }
 
 impl BlockchainState {
@@ -30,87 +28,76 @@ impl BlockchainState {
         Self::default()
     }
 
-    /// Credit `amount` to `address`.  Creates the account if it doesn't exist.
-    pub fn credit(&mut self, address: &str, amount: u64) {
-        *self.balances.entry(address.to_string()).or_insert(0) += amount;
-    }
-
-    /// Debit `amount` from `address`.
-    ///
-    /// Returns `Err` if the account has insufficient balance.  This is the only
-    /// place balance checks are enforced — all callers must go through here.
-    pub fn debit(&mut self, address: &str, amount: u64) -> Result<(), String> {
-        let balance = self.balances.entry(address.to_string()).or_insert(0);
-        if *balance < amount {
-            return Err(format!(
-                "Insufficient balance for {}: has {}, needs {}",
-                address, balance, amount
-            ));
+    /// Create a read-only balance view over the authoritative state manager.
+    pub fn with_state_manager(
+        state_manager: Arc<parking_lot::Mutex<bleep_state::state_manager::StateManager>>,
+    ) -> Self {
+        Self {
+            state_manager: Some(state_manager),
         }
-        *balance -= amount;
-        Ok(())
     }
 
-    /// Query balance without mutating state.
-    pub fn balance_of(&self, address: &str) -> u64 {
-        self.balances.get(address).copied().unwrap_or(0)
+    /// Query the authoritative balance through its u64 compatibility view.
+    pub fn balance_of(&self, address: &str) -> Result<u64, String> {
+        let state_manager = self
+            .state_manager
+            .as_ref()
+            .ok_or_else(|| "Authoritative balance view is unavailable".to_string())?;
+        u64::try_from(state_manager.lock().get_balance(address))
+            .map_err(|error| format!("balance for {address} does not fit u64: {error}"))
     }
 
-    /// Apply a single confirmed transaction to the balance table.
-    ///
-    /// SAFETY: Debit is checked before credit; any failure rolls back nothing
-    /// because debit happens first and credit only follows on success.
-    pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), String> {
-        if tx.sender == tx.receiver {
-            return Err(format!("Self-transfer rejected for {}", tx.sender));
+    /// Preflight a block against the authoritative view without mutating balances.
+    pub fn apply_block(&self, block: &Block) -> Result<(), String> {
+        if block.transactions.is_empty() {
+            return Ok(());
         }
-        if tx.amount == 0 {
-            return Err("Zero-amount transaction rejected".to_string());
-        }
-        self.debit(&tx.sender, tx.amount)?;
-        self.credit(&tx.receiver, tx.amount);
-        Ok(())
-    }
-
-    /// Apply all transactions in a block, in order.
-    ///
-    /// On first failure the state is NOT partially updated — we roll back
-    /// all successful transactions in the failed block.
-    pub fn apply_block(&mut self, block: &Block) -> Result<(), String> {
-        // Snapshot balances so we can roll back on failure
-        let snapshot = self.balances.clone();
+        let state_manager = self
+            .state_manager
+            .as_ref()
+            .ok_or_else(|| "Authoritative balance view is unavailable".to_string())?;
+        let state_manager = state_manager.lock();
+        let mut staged = HashMap::new();
         for tx in &block.transactions {
-            if let Err(e) = self.apply_transaction(tx) {
-                log::warn!(
-                    "Block {} tx from={} to={} amount={} rejected: {} — rolling back block",
-                    block.index,
-                    tx.sender,
-                    tx.receiver,
-                    tx.amount,
-                    e
-                );
-                self.balances = snapshot;
-                return Err(e);
+            if tx.sender == tx.receiver {
+                return Err(format!("Self-transfer rejected for {}", tx.sender));
             }
+            if tx.amount == 0 {
+                return Err("Zero-amount transaction rejected".to_string());
+            }
+            let sender_balance = match staged.get(&tx.sender) {
+                Some(balance) => *balance,
+                None => u64::try_from(state_manager.get_balance(&tx.sender)).map_err(|error| {
+                    format!("balance for {} does not fit u64: {error}", tx.sender)
+                })?,
+            };
+            let next_sender = sender_balance.checked_sub(tx.amount).ok_or_else(|| {
+                format!(
+                    "Insufficient balance for {}: has {}, needs {}",
+                    tx.sender, sender_balance, tx.amount
+                )
+            })?;
+            let receiver_balance = match staged.get(&tx.receiver) {
+                Some(balance) => *balance,
+                None => {
+                    u64::try_from(state_manager.get_balance(&tx.receiver)).map_err(|error| {
+                        format!("balance for {} does not fit u64: {error}", tx.receiver)
+                    })?
+                }
+            };
+            let next_receiver = receiver_balance
+                .checked_add(tx.amount)
+                .ok_or_else(|| format!("Balance overflow for {}", tx.receiver))?;
+            staged.insert(tx.sender.clone(), next_sender);
+            staged.insert(tx.receiver.clone(), next_receiver);
         }
         log::debug!(
-            "Block {} applied: {} transactions, {} accounts touched",
+            "Block {} preflighted: {} transactions, {} accounts touched",
             block.index,
             block.transactions.len(),
-            block.transactions.len() * 2
+            staged.len()
         );
         Ok(())
-    }
-
-    /// Revert a previously-applied block.  Used by `Blockchain::rollback()`.
-    pub fn revert_block(&mut self, block: &Block) {
-        for tx in block.transactions.iter().rev() {
-            // Reverse: credit sender, debit receiver
-            self.credit(&tx.sender, tx.amount);
-            if let Some(b) = self.balances.get_mut(&tx.receiver) {
-                *b = b.saturating_sub(tx.amount);
-            }
-        }
     }
 }
 
@@ -171,14 +158,16 @@ impl Blockchain {
 
     // ── Block acceptance ──────────────────────────────────────────────────────
 
-    /// Validate, apply state, drain pool, and append a block.
+    /// Validate, preflight through the authoritative state view, and append a block.
     ///
     /// Returns `true` on success.  `public_key` is the expected validator key;
     /// genesis uses `&[]` and is always accepted without signature check.
     pub fn add_block(&mut self, block: Block, public_key: &[u8]) -> bool {
-        self.add_block_inner(block, |previous, block| {
-            BlockValidator::validate_full_block(previous, block, public_key)
-        })
+        self.add_block_inner(
+            block,
+            |previous, block| BlockValidator::validate_full_block(previous, block, public_key),
+            true,
+        )
     }
 
     /// Validate, apply, drain pool, and append a block whose proposer key must
@@ -188,12 +177,39 @@ impl Blockchain {
         block: Block,
         validator_keys: &[Vec<u8>],
     ) -> bool {
-        self.add_block_inner(block, |previous, block| {
-            BlockValidator::validate_full_block_with_validator_set(previous, block, validator_keys)
-        })
+        self.add_block_inner(
+            block,
+            |previous, block| {
+                BlockValidator::validate_full_block_with_validator_set(
+                    previous,
+                    block,
+                    validator_keys,
+                )
+            },
+            true,
+        )
     }
 
-    fn add_block_inner<F>(&mut self, block: Block, validate: F) -> bool
+    /// Append a block whose execution has already been committed to the authoritative state.
+    pub fn add_committed_block_with_validator_set(
+        &mut self,
+        block: Block,
+        validator_keys: &[Vec<u8>],
+    ) -> bool {
+        self.add_block_inner(
+            block,
+            |previous, block| {
+                BlockValidator::validate_full_block_with_validator_set(
+                    previous,
+                    block,
+                    validator_keys,
+                )
+            },
+            false,
+        )
+    }
+
+    fn add_block_inner<F>(&mut self, block: Block, validate: F, preflight_balances: bool) -> bool
     where
         F: FnOnce(&Block, &Block) -> bool,
     {
@@ -211,9 +227,10 @@ impl Blockchain {
             return false;
         }
 
-        // ── 2. Apply transactions to in-memory state ─────────────────────
-        {
-            let mut state = self.state.write().unwrap();
+        // The authoritative StateManager commits account changes separately.
+        // This legacy chain index only performs read-only preflight where needed.
+        if preflight_balances {
+            let state = self.state.read().unwrap();
             if let Err(e) = state.apply_block(&block) {
                 log::error!("Block {} state application failed: {}", block.index, e);
                 return false;
@@ -277,7 +294,7 @@ impl Blockchain {
     }
 
     /// Query the balance of an address from in-memory state.
-    pub fn balance_of(&self, address: &str) -> u64 {
+    pub fn balance_of(&self, address: &str) -> Result<u64, String> {
         self.state.read().unwrap().balance_of(address)
     }
 
@@ -302,9 +319,9 @@ impl Blockchain {
     /// Validate and adopt a longer fork, using the validator set for each
     /// candidate block's epoch.
     ///
-    /// State changes are staged on a clone: orphaned blocks are reverted to the
-    /// common ancestor, then candidate blocks are applied. Neither chain nor
-    /// state is changed unless the complete transition succeeds.
+    /// Account state is owned by StateManager and is not changed by this legacy
+    /// block index. Callers must commit the selected fork's account state there
+    /// before adopting it.
     pub fn handle_fork(
         &mut self,
         new_chain: VecDeque<Block>,
@@ -354,35 +371,18 @@ impl Blockchain {
             return Err("Candidate fork has no common ancestor".into());
         }
 
-        let mut state = self.state.write().unwrap();
-        let mut staged_state = state.clone();
-        for orphaned in self.chain.iter().skip(common_prefix_len).rev() {
-            staged_state.revert_block(orphaned);
-        }
-        for block in new_chain.iter().skip(common_prefix_len) {
-            staged_state.apply_block(block).map_err(|error| {
-                format!(
-                    "Candidate fork state transition failed at block {}: {}",
-                    block.index, error
-                )
-            })?;
-        }
-
         log::warn!(
             "Fork detected — adopting validated chain of length {} (was {})",
             new_chain.len(),
             self.chain.len()
         );
-        *state = staged_state;
         self.chain = new_chain;
         Ok(())
     }
 
-    /// Roll back the tip of the chain, reverting its state changes.
+    /// Roll back the tip of this block index. Account state is owned by StateManager.
     pub fn rollback(&mut self) {
         if let Some(removed) = self.chain.pop_back() {
-            let mut state = self.state.write().unwrap();
-            state.revert_block(&removed);
             log::warn!("Block {} rolled back", removed.index);
         }
     }

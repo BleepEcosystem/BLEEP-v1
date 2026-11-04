@@ -37,7 +37,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
 
-use bleep_auth::{AuthError, AuthService, Permission, SessionClaims};
+use bleep_auth::{admin_login_signing_payload, AuthError, AuthService, Permission, SessionClaims};
 use bleep_core::{transaction_pool::TransactionPool, Blockchain};
 use bleep_crypto::verify_tx_signature;
 use bleep_p2p::{p2p_node::P2PNode, types::MessageType};
@@ -683,7 +683,10 @@ pub fn rpc_routes_with_state(
                             tx_id: "error".to_string(),
                             status: "TransactionPool not attached to RPC state",
                         });
-                        return Ok::<_, warp::Rejection>(resp);
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            resp,
+                            warp::http::StatusCode::OK,
+                        ));
                     }
                 };
 
@@ -702,10 +705,13 @@ pub fn rpc_routes_with_state(
                     Ok(payload) => payload,
                     Err(error) => {
                         log::error!("Failed to serialize accepted transaction for gossip: {error}");
-                        return Ok::<_, warp::Rejection>(warp::reply::json(&TxResp {
-                            tx_id: "error".to_string(),
-                            status: "serialization_failed",
-                        }));
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&TxResp {
+                                tx_id: "error".to_string(),
+                                status: "serialization_failed",
+                            }),
+                            warp::http::StatusCode::OK,
+                        ));
                     }
                 };
                 let tx_id = format!(
@@ -724,13 +730,16 @@ pub fn rpc_routes_with_state(
                         tx_id,
                         status: "accepted",
                     });
-                    Ok(resp)
+                    Ok(warp::reply::with_status(
+                        resp,
+                        warp::http::StatusCode::ACCEPTED,
+                    ))
                 } else {
                     let resp = warp::reply::json(&TxResp {
                         tx_id: "rejected".to_string(),
                         status: "validation_failed",
                     });
-                    Ok(resp)
+                    Ok(warp::reply::with_status(resp, warp::http::StatusCode::OK))
                 }
             },
         );
@@ -1384,6 +1393,7 @@ pub fn rpc_routes_with_state(
         .or(faucet_status(Arc::clone(&state_inner)))
         .or(auth_register_operator(Arc::clone(&state_inner)))
         .or(auth_register_dapp(Arc::clone(&state_inner)))
+        .or(auth_admin_challenge(Arc::clone(&state_inner)))
         .or(auth_login(Arc::clone(&state_inner)))
         .or(auth_logout(Arc::clone(&state_inner)))
         .or(auth_rotate_secret(Arc::clone(&state_inner)))
@@ -1632,11 +1642,10 @@ fn public_native_mint_enabled() -> bool {
         && matches!(explicitly_enabled.as_str(), "1" | "true" | "yes" | "on")
 }
 
+const FAUCET_NETWORKS: &[&str] = &["dev", "development", "test", "pretestnet", "testnet"];
+
 fn is_dev_or_test_network(network_mode: &str) -> bool {
-    matches!(
-        network_mode.trim().to_ascii_lowercase().as_str(),
-        "dev" | "development" | "test"
-    )
+    FAUCET_NETWORKS.contains(&network_mode.trim().to_ascii_lowercase().as_str())
 }
 
 fn faucet_enabled_for(enabled: &str, network_mode: &str) -> bool {
@@ -3241,6 +3250,17 @@ struct AuthRegisterDappReq {
 }
 
 #[derive(Deserialize)]
+struct AuthAdminChallengeReq {
+    public_key_hex: String,
+}
+
+#[derive(Serialize)]
+struct AuthAdminChallengeResp {
+    challenge: String,
+    signing_payload_hex: String,
+}
+
+#[derive(Deserialize)]
 struct AuthRegisterOperatorReq {
     operator_handle: String,
     display_name: String,
@@ -3250,8 +3270,16 @@ struct AuthRegisterOperatorReq {
 
 #[derive(Deserialize)]
 struct AuthLoginReq {
-    identity_id: String,
-    password: String,
+    #[serde(default)]
+    identity_id: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    public_key_hex: Option<String>,
+    #[serde(default)]
+    challenge: Option<String>,
+    #[serde(default)]
+    signature_hex: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3404,58 +3432,6 @@ fn faucet_drip(
                     )) as Box<dyn warp::Reply + Send>;
                 }
 
-                if let Some(blockchain) = &st.blockchain {
-                    let bc = blockchain.read().unwrap();
-                    let mut core_state = bc.state.write().unwrap();
-                    let previous_balances = core_state.balances.clone();
-                    if core_state
-                        .balance_of(FAUCET_TREASURY_ADDRESS)
-                        .checked_add(RpcState::FAUCET_DRIP_AMOUNT)
-                        .is_none()
-                        || core_state
-                            .balance_of(&address)
-                            .checked_add(RpcState::FAUCET_DRIP_AMOUNT)
-                            .is_none()
-                    {
-                        mgr.restore_checkpoint(checkpoint);
-                        st.faucet_balance.fetch_add(
-                            RpcState::FAUCET_DRIP_AMOUNT,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        return Box::new(warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: "Faucet transfer failed.".into(),
-                            }),
-                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                        )) as Box<dyn warp::Reply + Send>;
-                    }
-                    core_state.credit(FAUCET_TREASURY_ADDRESS, RpcState::FAUCET_DRIP_AMOUNT);
-                    let legacy_tx = bleep_core::block::Transaction {
-                        chain_id: std::env::var("BLEEP_CHAIN_ID")
-                            .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string()),
-                        sender: FAUCET_TREASURY_ADDRESS.to_string(),
-                        receiver: address.clone(),
-                        amount: RpcState::FAUCET_DRIP_AMOUNT,
-                        timestamp: now,
-                        nonce: source_nonce,
-                        signature: Vec::new(),
-                    };
-                    if let Err(error) = core_state.apply_transaction(&legacy_tx) {
-                        core_state.balances = previous_balances;
-                        mgr.restore_checkpoint(checkpoint);
-                        st.faucet_balance.fetch_add(
-                            RpcState::FAUCET_DRIP_AMOUNT,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        log::error!("Legacy faucet state transition failed: {error}");
-                        return Box::new(warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: "Faucet transfer failed.".into(),
-                            }),
-                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                        )) as Box<dyn warp::Reply + Send>;
-                    }
-                }
                 drop(mgr);
 
                 drips.insert(address.clone(), now);
@@ -3601,7 +3577,7 @@ fn auth_register_dapp(
                             jti: token.jti,
                             expires_at: token.expires_at.to_rfc3339(),
                         }),
-                        warp::http::StatusCode::CREATED,
+                        warp::http::StatusCode::OK,
                     )),
                     Err(err) => Ok(warp::reply::with_status(
                         warp::reply::json(&ErrResp {
@@ -3612,6 +3588,54 @@ fn auth_register_dapp(
                 }
             },
         )
+}
+
+fn auth_admin_challenge(
+    state: Arc<RpcState>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("rpc" / "auth" / "admin" / "challenge")
+        .and(warp::post())
+        .and(limited_json_body::<AuthAdminChallengeReq>())
+        .and(with_arc_state(state))
+        .and_then(|req: AuthAdminChallengeReq, st: Arc<RpcState>| async move {
+            let Some(auth_service) = st.auth_service.as_ref() else {
+                return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "Auth service not mounted in RPC state.".into(),
+                    }),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            };
+            let public_key = match hex::decode(req.public_key_hex) {
+                Ok(key) => key,
+                Err(error) => {
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: format!("Invalid public_key_hex: {error}"),
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    ));
+                }
+            };
+            match auth_service.create_admin_challenge(&public_key) {
+                Ok(challenge) => {
+                    let signing_payload = admin_login_signing_payload(&challenge);
+                    Ok(warp::reply::with_status(
+                        warp::reply::json(&AuthAdminChallengeResp {
+                            challenge,
+                            signing_payload_hex: hex::encode(signing_payload),
+                        }),
+                        warp::http::StatusCode::OK,
+                    ))
+                }
+                Err(error) => Ok(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: format!("Admin challenge failed: {error}"),
+                    }),
+                    warp::http::StatusCode::UNAUTHORIZED,
+                )),
+            }
+        })
 }
 
 fn auth_login(
@@ -3634,7 +3658,32 @@ fn auth_login(
                 }
             };
 
-            match auth_service.login(&req.identity_id, &req.password).await {
+            let login_result = match (
+                req.identity_id,
+                req.password,
+                req.public_key_hex,
+                req.challenge,
+                req.signature_hex,
+            ) {
+                (Some(identity_id), Some(password), None, None, None) => {
+                    auth_service.login(&identity_id, &password).await
+                }
+                (None, None, Some(public_key_hex), Some(challenge), Some(signature_hex)) => {
+                    match (hex::decode(public_key_hex), hex::decode(signature_hex)) {
+                        (Ok(public_key), Ok(signature)) => {
+                            auth_service
+                                .login_with_admin_signature(&public_key, &challenge, &signature)
+                                .await
+                        }
+                        (Err(error), _) | (_, Err(error)) => {
+                            Err(AuthError::InvalidKeyMaterial(error.to_string()))
+                        }
+                    }
+                }
+                _ => Err(AuthError::InvalidCredentials),
+            };
+
+            match login_result {
                 Ok(token) => Ok(warp::reply::with_status(
                     warp::reply::json(&AuthTokenResp {
                         token: token.token,
@@ -4366,7 +4415,10 @@ mod tests {
         };
 
         let state_manager = Arc::new(Mutex::new(StateManager::new()));
-        state_manager.lock().set_balance(&account, 10_000);
+        state_manager
+            .lock()
+            .set_balance(&account, 10_000)
+            .expect("seed account balance");
         let registry = Arc::new(Mutex::new(ValidatorRegistry::new()));
         let state = RpcState::new()
             .with_state_manager(Arc::clone(&state_manager))
@@ -4709,16 +4761,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn faucet_drip_updates_both_state_manager_and_blockchain_state() {
+    async fn faucet_drip_updates_authoritative_state_and_its_blockchain_view() {
         let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
         let address = "BLEEP1faucetaddress".to_string();
 
         let state_mgr = Arc::new(Mutex::new(StateManager::new()));
         let tx_pool = TransactionPool::new(10);
         let genesis = Block::new(0, vec![], "0".to_string());
+        let core_state = CoreBlockchainState::with_state_manager(Arc::clone(&state_mgr));
         let blockchain = Arc::new(RwLock::new(Blockchain::new(
             genesis,
-            CoreBlockchainState::default(),
+            core_state,
             tx_pool.clone(),
         )));
 
@@ -4754,17 +4807,8 @@ mod tests {
         assert_eq!(balance, RpcState::FAUCET_DRIP_AMOUNT as u128);
         assert_eq!(state_mgr.lock().get_nonce(FAUCET_TREASURY_ADDRESS), 1);
 
-        let core_bal = blockchain
-            .read()
-            .unwrap()
-            .state
-            .read()
-            .unwrap()
-            .balances
-            .get(&address)
-            .copied()
-            .unwrap_or(0);
-        assert_eq!(core_bal, RpcState::FAUCET_DRIP_AMOUNT);
+        let core_view = blockchain.read().unwrap().balance_of(&address).unwrap();
+        assert_eq!(u128::from(core_view), balance);
     }
 
     #[tokio::test]
@@ -4830,17 +4874,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn faucet_is_disabled_on_public_testnet_modes() {
+    async fn faucet_is_available_on_testnet_with_explicit_opt_in() {
         let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
         let previous_network_mode = std::env::var_os("BLEEP_NETWORK_MODE");
         let previous_faucet_enabled = std::env::var_os("BLEEP_FAUCET_ENABLED");
         std::env::set_var("BLEEP_NETWORK_MODE", "testnet");
         std::env::set_var("BLEEP_FAUCET_ENABLED", "true");
-        let routes = rpc_routes_with_state(RpcState::new());
+        let address = "BLEEP1public-testnet";
+        let state_manager = Arc::new(Mutex::new(StateManager::new()));
+        let routes =
+            rpc_routes_with_state(RpcState::new().with_state_manager(Arc::clone(&state_manager)));
 
         let response = request()
             .method("POST")
-            .path("/faucet/BLEEP1public-testnet")
+            .path(&format!("/faucet/{address}"))
             .reply(&routes)
             .await;
 
@@ -4855,7 +4902,11 @@ mod tests {
             std::env::remove_var("BLEEP_FAUCET_ENABLED");
         }
 
-        assert_eq!(response.status(), warp::http::StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), warp::http::StatusCode::OK);
+        assert_eq!(
+            state_manager.lock().get_balance(address),
+            RpcState::FAUCET_DRIP_AMOUNT as u128
+        );
     }
 
     #[tokio::test]
@@ -4879,7 +4930,10 @@ mod tests {
         chain.chain.push_back(block);
         let blockchain = Arc::new(RwLock::new(chain));
         let state_manager = Arc::new(Mutex::new(StateManager::new()));
-        state_manager.lock().set_balance(&address, 123);
+        state_manager
+            .lock()
+            .set_balance(&address, 123)
+            .expect("seed account balance");
         let routes = rpc_routes_with_state(
             RpcState::new()
                 .with_blockchain(Arc::clone(&blockchain))
@@ -5050,7 +5104,106 @@ mod tests_sprint8 {
             .json(&request_body)
             .reply(&routes)
             .await;
-        assert_eq!(admin_response.status(), warp::http::StatusCode::CREATED);
+        assert_eq!(admin_response.status(), warp::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_admin_auth_smoke() {
+        use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+
+        let (admin_public_key, admin_secret_key) = generate_tx_keypair();
+        let mut auth_service = AuthService::new((0u8..32).collect()).unwrap();
+        auth_service.bootstrap_admin(&admin_public_key).unwrap();
+        assert!(matches!(
+            auth_service.bootstrap_admin(&admin_public_key),
+            Err(AuthError::AlreadyBootstrapped)
+        ));
+        let auth_service = Arc::new(auth_service);
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_auth_service(Arc::clone(&auth_service))
+                .with_transaction_pool(TransactionPool::new(10)),
+        );
+
+        let challenge_response = warp::test::request()
+            .method("POST")
+            .path("/rpc/auth/admin/challenge")
+            .json(&serde_json::json!({
+                "public_key_hex": hex::encode(&admin_public_key)
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(challenge_response.status(), warp::http::StatusCode::OK);
+        let challenge_body: serde_json::Value =
+            serde_json::from_slice(challenge_response.body()).unwrap();
+        let challenge = challenge_body["challenge"].as_str().unwrap();
+        let login_payload =
+            hex::decode(challenge_body["signing_payload_hex"].as_str().unwrap()).unwrap();
+        let admin_signature = sign_tx_payload(&login_payload, &admin_secret_key).unwrap();
+
+        let admin_login = warp::test::request()
+            .method("POST")
+            .path("/rpc/auth/login")
+            .json(&serde_json::json!({
+                "public_key_hex": hex::encode(&admin_public_key),
+                "challenge": challenge,
+                "signature_hex": hex::encode(admin_signature),
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(admin_login.status(), warp::http::StatusCode::OK);
+        let admin_token: serde_json::Value = serde_json::from_slice(admin_login.body()).unwrap();
+
+        let dapp_registration = warp::test::request()
+            .method("POST")
+            .path("/rpc/auth/register/dapp")
+            .header(
+                "authorization",
+                format!("Bearer {}", admin_token["token"].as_str().unwrap()),
+            )
+            .json(&serde_json::json!({
+                "developer_handle": "genesis-admin-smoke-dapp",
+                "display_name": "Genesis Admin Smoke",
+                "password": "smoke-test-dapp-password"
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(dapp_registration.status(), warp::http::StatusCode::OK);
+        let dapp_token: serde_json::Value =
+            serde_json::from_slice(dapp_registration.body()).unwrap();
+
+        let (sender_public_key, sender_secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&sender_public_key);
+        let receiver = "BLEEP1bootstrap-smoke-recipient";
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID;
+        let amount = 1;
+        let timestamp = 1_700_000_000;
+        let nonce = 0;
+        let payload = tx_payload(chain_id, &sender, receiver, amount, timestamp, nonce);
+        let mut transaction_signature = sender_public_key;
+        transaction_signature.extend(sign_tx_payload(&payload, &sender_secret_key).unwrap());
+        let transaction_response = warp::test::request()
+            .method("POST")
+            .path("/rpc/tx")
+            .header(
+                "authorization",
+                format!("Bearer {}", dapp_token["token"].as_str().unwrap()),
+            )
+            .json(&serde_json::json!({
+                "chain_id": chain_id,
+                "sender": sender,
+                "receiver": receiver,
+                "amount": amount,
+                "timestamp": timestamp,
+                "nonce": nonce,
+                "signature": transaction_signature,
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(
+            transaction_response.status(),
+            warp::http::StatusCode::ACCEPTED
+        );
     }
 
     #[tokio::test]
@@ -5097,20 +5250,21 @@ mod tests_sprint8 {
     }
 
     #[test]
-    fn production_and_unknown_networks_never_enable_dev_gates() {
+    fn faucet_network_policy_allows_test_networks_but_not_production_or_unknown() {
         assert!(!is_dev_or_test_network("mainnet"));
         assert!(!is_dev_or_test_network("production"));
         assert!(!is_dev_or_test_network(""));
-        assert!(!is_dev_or_test_network("testnet"));
-        assert!(!is_dev_or_test_network("pretestnet"));
+        assert!(is_dev_or_test_network("testnet"));
+        assert!(is_dev_or_test_network("pretestnet"));
         assert!(is_dev_or_test_network("DEV"));
+        assert!(is_dev_or_test_network("  PRETESTNET "));
     }
 
     #[test]
     fn faucet_requires_explicit_opt_in_and_private_network_mode() {
         assert!(!faucet_enabled_for("", "dev"));
-        assert!(!faucet_enabled_for("true", "testnet"));
-        assert!(!faucet_enabled_for("true", "pretestnet"));
+        assert!(faucet_enabled_for("true", "testnet"));
+        assert!(faucet_enabled_for("true", "pretestnet"));
         assert!(!faucet_enabled_for("1", "test"));
         assert!(faucet_enabled_for("true", "test"));
         assert!(faucet_enabled_for(" TRUE ", "development"));
