@@ -640,6 +640,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .into());
         }
     };
+    state
+        .set_blocks_per_epoch(blocks_per_epoch)
+        .map_err(|error| format!("StateManager epoch configuration failed: {error}"))?;
     pin_genesis_admin_config(&mut state, network_config.genesis_admin_pubkey.as_deref())?;
 
     // Mint the canonical launch unlocks only into a fresh genesis state.
@@ -679,6 +682,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
             INITIAL_CIRCULATING_SUPPLY / 100_000_000
         );
     }
+    state
+        .verify_supply_invariant()
+        .map_err(|error| format!("Issued supply invariant failed during startup: {error}"))?;
 
     // Rebuild the Sparse Merkle Trie from the persisted DB state
     state
@@ -712,18 +718,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mempool = Mempool::new(chain_id.clone(), Mempool::embedded_sender_public_key);
 
     let blockchain = {
-        let mut core_state = CoreBlockchainState::default();
-        let state_guard = state.lock();
-        for (address, balance) in state_guard.export_balances() {
-            match u64::try_from(balance) {
-                Ok(balance_u64) if balance_u64 > 0 => core_state.credit(&address, balance_u64),
-                Ok(_) => {}
-                Err(_) => error!(
-                    "StateManager balance overflow for account {}: {}",
-                    address, balance
-                ),
-            }
-        }
+        let core_state = CoreBlockchainState::with_state_manager(Arc::clone(&state));
         let mut blockchain = Blockchain::new(genesis, core_state, tx_pool.clone());
         blockchain
             .restore_blocks(canonical_blocks)
@@ -1836,7 +1831,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     transfers: &transfers,
                                 },
                             ) {
-                                Ok(()) => chain.add_block_with_validator_set(
+                                Ok(()) => chain.add_committed_block_with_validator_set(
                                     block.clone(),
                                     &epoch_validator_keys,
                                 ),

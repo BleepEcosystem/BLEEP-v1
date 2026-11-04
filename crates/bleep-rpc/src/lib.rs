@@ -3433,58 +3433,6 @@ fn faucet_drip(
                     )) as Box<dyn warp::Reply + Send>;
                 }
 
-                if let Some(blockchain) = &st.blockchain {
-                    let bc = blockchain.read().unwrap();
-                    let mut core_state = bc.state.write().unwrap();
-                    let previous_balances = core_state.balances.clone();
-                    if core_state
-                        .balance_of(FAUCET_TREASURY_ADDRESS)
-                        .checked_add(RpcState::FAUCET_DRIP_AMOUNT)
-                        .is_none()
-                        || core_state
-                            .balance_of(&address)
-                            .checked_add(RpcState::FAUCET_DRIP_AMOUNT)
-                            .is_none()
-                    {
-                        mgr.restore_checkpoint(checkpoint);
-                        st.faucet_balance.fetch_add(
-                            RpcState::FAUCET_DRIP_AMOUNT,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        return Box::new(warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: "Faucet transfer failed.".into(),
-                            }),
-                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                        )) as Box<dyn warp::Reply + Send>;
-                    }
-                    core_state.credit(FAUCET_TREASURY_ADDRESS, RpcState::FAUCET_DRIP_AMOUNT);
-                    let legacy_tx = bleep_core::block::Transaction {
-                        chain_id: std::env::var("BLEEP_CHAIN_ID")
-                            .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string()),
-                        sender: FAUCET_TREASURY_ADDRESS.to_string(),
-                        receiver: address.clone(),
-                        amount: RpcState::FAUCET_DRIP_AMOUNT,
-                        timestamp: now,
-                        nonce: source_nonce,
-                        signature: Vec::new(),
-                    };
-                    if let Err(error) = core_state.apply_transaction(&legacy_tx) {
-                        core_state.balances = previous_balances;
-                        mgr.restore_checkpoint(checkpoint);
-                        st.faucet_balance.fetch_add(
-                            RpcState::FAUCET_DRIP_AMOUNT,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        log::error!("Legacy faucet state transition failed: {error}");
-                        return Box::new(warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: "Faucet transfer failed.".into(),
-                            }),
-                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                        )) as Box<dyn warp::Reply + Send>;
-                    }
-                }
                 drop(mgr);
 
                 drips.insert(address.clone(), now);
@@ -4468,7 +4416,10 @@ mod tests {
         };
 
         let state_manager = Arc::new(Mutex::new(StateManager::new()));
-        state_manager.lock().set_balance(&account, 10_000);
+        state_manager
+            .lock()
+            .set_balance(&account, 10_000)
+            .expect("seed account balance");
         let registry = Arc::new(Mutex::new(ValidatorRegistry::new()));
         let state = RpcState::new()
             .with_state_manager(Arc::clone(&state_manager))
@@ -4811,16 +4762,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn faucet_drip_updates_both_state_manager_and_blockchain_state() {
+    async fn faucet_drip_updates_authoritative_state_and_its_blockchain_view() {
         let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
         let address = "BLEEP1faucetaddress".to_string();
 
         let state_mgr = Arc::new(Mutex::new(StateManager::new()));
         let tx_pool = TransactionPool::new(10);
         let genesis = Block::new(0, vec![], "0".to_string());
+        let core_state = CoreBlockchainState::with_state_manager(Arc::clone(&state_mgr));
         let blockchain = Arc::new(RwLock::new(Blockchain::new(
             genesis,
-            CoreBlockchainState::default(),
+            core_state,
             tx_pool.clone(),
         )));
 
@@ -4856,17 +4808,8 @@ mod tests {
         assert_eq!(balance, RpcState::FAUCET_DRIP_AMOUNT as u128);
         assert_eq!(state_mgr.lock().get_nonce(FAUCET_TREASURY_ADDRESS), 1);
 
-        let core_bal = blockchain
-            .read()
-            .unwrap()
-            .state
-            .read()
-            .unwrap()
-            .balances
-            .get(&address)
-            .copied()
-            .unwrap_or(0);
-        assert_eq!(core_bal, RpcState::FAUCET_DRIP_AMOUNT);
+        let core_view = blockchain.read().unwrap().balance_of(&address).unwrap();
+        assert_eq!(u128::from(core_view), balance);
     }
 
     #[tokio::test]
@@ -4981,7 +4924,10 @@ mod tests {
         chain.chain.push_back(block);
         let blockchain = Arc::new(RwLock::new(chain));
         let state_manager = Arc::new(Mutex::new(StateManager::new()));
-        state_manager.lock().set_balance(&address, 123);
+        state_manager
+            .lock()
+            .set_balance(&address, 123)
+            .expect("seed account balance");
         let routes = rpc_routes_with_state(
             RpcState::new()
                 .with_blockchain(Arc::clone(&blockchain))

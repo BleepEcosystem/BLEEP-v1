@@ -596,13 +596,13 @@ impl BlockProducer {
                     if addr == zt.sender || addr == zt.receiver {
                         continue;
                     }
-                    let current = state.get_balance(&addr);
-                    let new_bal = if update.delta >= 0 {
-                        current.saturating_add(update.delta as u128)
-                    } else {
-                        current.saturating_sub(update.delta.unsigned_abs())
-                    };
-                    state.set_balance(&addr, new_bal);
+                    state
+                        .apply_balance_delta(&addr, update.delta)
+                        .map_err(|error| {
+                            format!(
+                                "VM balance delta rejected for account {addr} in block {next_height}: {error}"
+                            )
+                        })?;
                 }
 
                 // Path 3: apply nonce updates from VM diff.
@@ -745,7 +745,8 @@ impl BlockProducer {
                     });
                 }
             };
-            let accepted = chain.add_block_with_validator_set(block.clone(), &epoch_validator_keys);
+            let accepted =
+                chain.add_committed_block_with_validator_set(block.clone(), &epoch_validator_keys);
             if accepted {
                 if let Err(e) = self.state.lock().persist_canonical_block(
                     &block,
