@@ -16,14 +16,14 @@
 //! )
 //! ```
 //!
-//! The 64-byte seed is deterministically mapped to a BLEEP signing keypair:
+//! The 64-byte seed is reduced to a 32-byte BLEEP wallet seed:
 //! ```text
-//!   seed[..32]  → SPHINCS+ / Falcon secret key material
-//!   seed[32..]  → Kyber KEM key material
+//!   seed[..32]  → input to versioned transaction-key derivation
 //! ```
 
-use pbkdf2::pbkdf2_hmac;
-use sha2::Sha512;
+use bip39::{Language, Mnemonic};
+use rand::{rngs::OsRng, RngCore};
+use zeroize::Zeroizing;
 
 /// Number of PBKDF2 rounds (BIP-39 standard).
 pub const BIP39_ROUNDS: u32 = 2048;
@@ -37,26 +37,8 @@ pub const SEED_LEN: usize = 64;
 ///
 /// Returns a 64-byte seed on success, or an error string.
 pub fn mnemonic_to_seed(mnemonic: &str, passphrase: &str) -> Result<[u8; SEED_LEN], String> {
-    let word_count = mnemonic.split_whitespace().count();
-    if word_count < 12 {
-        return Err(format!("Mnemonic must be ≥12 words, got {}", word_count));
-    }
-    if word_count > 24 {
-        return Err(format!("Mnemonic must be ≤24 words, got {}", word_count));
-    }
-
-    // BIP-39 salt = UTF-8("mnemonic" + passphrase)
-    let salt = format!("mnemonic{}", passphrase);
-
-    let mut seed = [0u8; SEED_LEN];
-    pbkdf2_hmac::<Sha512>(
-        mnemonic.as_bytes(),
-        salt.as_bytes(),
-        BIP39_ROUNDS,
-        &mut seed,
-    );
-
-    Ok(seed)
+    let mnemonic = Mnemonic::parse(mnemonic).map_err(|error| error.to_string())?;
+    Ok(mnemonic.to_seed(passphrase))
 }
 
 /// Validate a mnemonic phrase (basic structural check).
@@ -64,33 +46,27 @@ pub fn mnemonic_to_seed(mnemonic: &str, passphrase: &str) -> Result<[u8; SEED_LE
 /// Checks: word count is 12/15/18/21/24, all characters are ASCII.
 /// Full BIP-39 wordlist validation is not yet implemented.
 pub fn validate_mnemonic(mnemonic: &str) -> Result<(), String> {
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
-    let count = words.len();
-    if ![12, 15, 18, 21, 24].contains(&count) {
-        return Err(format!(
-            "Mnemonic must have 12/15/18/21/24 words, got {}",
-            count
-        ));
-    }
-    for (i, word) in words.iter().enumerate() {
-        if !word.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(format!(
-                "Word {} '{}' contains non-ASCII characters",
-                i + 1,
-                word
-            ));
-        }
-    }
-    Ok(())
+    Mnemonic::parse(mnemonic)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Generate a standard 24-word BIP-39 recovery phrase from fresh OS entropy.
+pub fn generate_mnemonic() -> Result<String, String> {
+    let mut entropy = Zeroizing::new([0u8; 32]);
+    OsRng.fill_bytes(entropy.as_mut());
+    Mnemonic::from_entropy_in(Language::English, entropy.as_ref())
+        .map(|mnemonic| mnemonic.to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// Derive a BLEEP wallet seed (32 bytes) from a mnemonic + passphrase.
 ///
 /// Calls `mnemonic_to_seed` and returns the first 32 bytes of the 64-byte output.
-/// This seed is not a SPHINCS+ key; SPHINCS+ keys are generated with OS
-/// randomness and persisted using the encrypted key-file API.
+/// The returned bytes are key-derivation input, not a signing key. Version-2
+/// mnemonic wallets use them to derive an SLH-DSA keypair.
 pub fn mnemonic_to_bleep_seed(mnemonic: &str, passphrase: &str) -> Result<[u8; 32], String> {
-    let full = mnemonic_to_seed(mnemonic, passphrase)?;
+    let full = Zeroizing::new(mnemonic_to_seed(mnemonic, passphrase)?);
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&full[..32]);
     Ok(seed)

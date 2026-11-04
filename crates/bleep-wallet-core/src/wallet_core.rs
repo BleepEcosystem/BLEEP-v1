@@ -1,18 +1,16 @@
 //! # bleep-wallet-core / wallet_core
 //!
-//! Quantum-secure HD wallet backed by SPHINCS+-SHAKE-256f-simple signing
-//! and Kyber-1024 key encapsulation.
+//! Quantum-secure wallet backed by versioned transaction signing and Kyber-1024
+//! key encapsulation.
 //!
 //! ## Key layout
 //! ```text
-//!   public_key  — SPHINCS+ public key bytes  (64 bytes)
-//!   private_key — SPHINCS+ secret key bytes  (128 bytes, Zeroized on drop)
+//!   public_key  — transaction public key bytes (64 bytes)
+//!   private_key — versioned signing key bytes (128 bytes, Zeroized on drop)
 //! ```
 //!
-//! All signing goes through `bleep_crypto::tx_signer::sign_tx_payload`, which
-//! calls the production SPHINCS+-SHAKE-256f-simple detached-sign API and
-//! returns the 49,088-byte signature.  The old stub that returned the raw
-//! private key bytes has been removed.
+//! Mnemonic wallets use deterministic version-2 SLH-DSA SHAKE-256f keys and
+//! BLEEP2 addresses. Legacy BLEEP1 addresses retain SPHINCS+ verification.
 //!
 //! ## BIP-39 entropy
 //! `Wallet::new` generates entropy with `OsRng` (cryptographically secure).
@@ -22,9 +20,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bip39::{Language, Mnemonic};
+use bip39::Mnemonic;
 use pqcrypto_mlkem::mlkem1024::{decapsulate, encapsulate, keypair};
-use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SecretKey as _, SharedSecret as _};
+use pqcrypto_traits::kem::{PublicKey as _, SecretKey as _, SharedSecret as _};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -143,10 +141,10 @@ impl BLEEPAIDecisionModule {
     /// implementation in bleep-ai::BLEEPAIAssistant provides trained predictions.
     pub fn predict_gas_fee(&self, network: &str) -> Result<f64, WalletError> {
         let fee = match network.to_lowercase().as_str() {
-            "ethereum" | "eth"     => 0.005,
-            "solana"   | "sol"     => 0.0001,
-            "bleep"                => 0.001,
-            _                      => 0.002,
+            "ethereum" | "eth" => 0.005,
+            "solana" | "sol" => 0.0001,
+            "bleep" => 0.001,
+            _ => 0.002,
         };
         Ok(fee)
     }
@@ -178,14 +176,14 @@ pub enum WalletError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
-    pub id:        String,
-    pub chain_id:  String,
-    pub from:      String,
-    pub to:        String,
-    pub amount:    f64,
-    pub fee:       f64,
+    pub id: String,
+    pub chain_id: String,
+    pub from: String,
+    pub to: String,
+    pub amount: f64,
+    pub fee: f64,
     pub timestamp: u64,
-    pub nonce:     u64,
+    pub nonce: u64,
     pub signature: Vec<u8>,
 }
 
@@ -196,18 +194,18 @@ pub struct Transaction {
 /// The private key is wrapped in `Zeroizing<Vec<u8>>` so its memory is zeroed
 /// on drop.  This satisfies the SA-L3 requirement for all secret key material.
 pub struct Wallet {
-    pub address:       String,
-    pub balance:       f64,
+    pub address: String,
+    pub balance: f64,
     pub authenticated: bool,
-    pub public_key:    Vec<u8>,
+    pub public_key: Vec<u8>,
     /// SPHINCS+ secret key — zeroed on drop (SA-L3).
-    private_key:       Zeroizing<Vec<u8>>,
-    mnemonic:          Mnemonic,
+    private_key: Zeroizing<Vec<u8>>,
+    mnemonic: Mnemonic,
     ai_decision_module: Arc<BLEEPAIDecisionModule>,
-    consensus_module:   Arc<Mutex<BLEEPAdaptiveConsensus>>,
-    bleep_connect:      Arc<BLEEPConnect>,
-    state_merkle:       Arc<Mutex<StateMerkle>>,
-    p2p_node:           Arc<P2PNode>,
+    consensus_module: Arc<Mutex<BLEEPAdaptiveConsensus>>,
+    bleep_connect: Arc<BLEEPConnect>,
+    state_merkle: Arc<Mutex<StateMerkle>>,
+    p2p_node: Arc<P2PNode>,
 }
 
 impl Wallet {
@@ -215,22 +213,20 @@ impl Wallet {
 
     /// Create a new wallet.
     ///
-    /// Entropy for the BIP-39 mnemonic is sourced from `OsRng` (32 bytes =
-    /// 256-bit security).  The SPHINCS+ keypair is generated independently
-    /// from OS entropy via `bleep_crypto::tx_signer::generate_tx_keypair`.
+    /// The BIP-39 mnemonic is sourced from `OsRng` and deterministically derives
+    /// the wallet's version-2 SLH-DSA transaction keypair.
     pub fn new(
-        p2p_node:     Arc<P2PNode>,
+        p2p_node: Arc<P2PNode>,
         state_merkle: Arc<Mutex<StateMerkle>>,
     ) -> Result<Self, WalletError> {
         // ── BIP-39 mnemonic (cryptographically secure entropy) ────────────────
-        let mut entropy = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut entropy);
-        let mnemonic = Mnemonic::from_entropy(&entropy)
-            .map_err(|_| WalletError::MnemonicError)?;
+        let mut entropy = Zeroizing::new([0u8; 32]);
+        rand::thread_rng().fill_bytes(entropy.as_mut());
+        let mnemonic =
+            Mnemonic::from_entropy(entropy.as_ref()).map_err(|_| WalletError::MnemonicError)?;
 
-        // ── SPHINCS+ keypair ──────────────────────────────────────────────────
-        let (public_key, secret_key_bytes) = tx_signer::generate_tx_keypair();
-        let address = derive_address(&public_key);
+        let (public_key, secret_key_bytes) = keypair_from_mnemonic(&mnemonic)?;
+        let address = bleep_crypto::derive_account_address_v2(&public_key);
 
         log::info!("[Wallet] Created wallet address={}", &address[..12]);
 
@@ -242,8 +238,8 @@ impl Wallet {
             private_key: Zeroizing::new(secret_key_bytes),
             mnemonic,
             ai_decision_module: Arc::new(BLEEPAIDecisionModule::new()),
-            consensus_module:   Arc::new(Mutex::new(BLEEPAdaptiveConsensus::new())),
-            bleep_connect:      Arc::new(BLEEPConnect::new()),
+            consensus_module: Arc::new(Mutex::new(BLEEPAdaptiveConsensus::new())),
+            bleep_connect: Arc::new(BLEEPConnect::new()),
             state_merkle,
             p2p_node,
         })
@@ -251,16 +247,14 @@ impl Wallet {
 
     /// Import a wallet from a BIP-39 mnemonic phrase.
     ///
-    /// A fresh SPHINCS+ keypair is generated for the imported wallet.
-    /// In a full HD-wallet implementation this would derive the keypair
-    /// deterministically from the mnemonic seed via the BIP-32/BIP-44 path;
-    /// that derivation path is handled by `bleep_crypto::bip39`.
+    /// The imported phrase deterministically reconstructs the version-2
+    /// SLH-DSA transaction keypair and account address.
     pub fn import_wallet(mnemonic_phrase: &str) -> Result<Self, WalletError> {
         let mnemonic = Mnemonic::parse(mnemonic_phrase)
             .map_err(|_| WalletError::Authentication("Invalid mnemonic".into()))?;
 
-        let (public_key, secret_key_bytes) = tx_signer::generate_tx_keypair();
-        let address = derive_address(&public_key);
+        let (public_key, secret_key_bytes) = keypair_from_mnemonic(&mnemonic)?;
+        let address = bleep_crypto::derive_account_address_v2(&public_key);
 
         Ok(Self {
             address,
@@ -270,10 +264,10 @@ impl Wallet {
             private_key: Zeroizing::new(secret_key_bytes),
             mnemonic,
             ai_decision_module: Arc::new(BLEEPAIDecisionModule::new()),
-            consensus_module:   Arc::new(Mutex::new(BLEEPAdaptiveConsensus::new())),
-            bleep_connect:      Arc::new(BLEEPConnect::new()),
-            state_merkle:       Arc::new(Mutex::new(StateMerkle::new())),
-            p2p_node:           Arc::new(P2PNode::new()),
+            consensus_module: Arc::new(Mutex::new(BLEEPAdaptiveConsensus::new())),
+            bleep_connect: Arc::new(BLEEPConnect::new()),
+            state_merkle: Arc::new(Mutex::new(StateMerkle::new())),
+            p2p_node: Arc::new(P2PNode::new()),
         })
     }
 
@@ -308,7 +302,7 @@ impl Wallet {
             .map_err(|_| WalletError::QuantumSecurityError)?;
 
         let (shared_secret, ciphertext) = encapsulate(&ky_pub);
-        let recovered               = decapsulate(&ciphertext, &ky_sec);
+        let recovered = decapsulate(&ciphertext, &ky_sec);
 
         if recovered.as_bytes() == shared_secret.as_bytes() {
             self.authenticated = true;
@@ -323,15 +317,15 @@ impl Wallet {
 
     // ── Signing ───────────────────────────────────────────────────────────────
 
-    /// Sign `tx` using SPHINCS+-SHAKE-256f-simple.
+    /// Sign `tx` using the scheme encoded by this wallet's address.
     ///
     /// The canonical payload binds chain ID, account, amount, timestamp, and nonce.
     /// — a SHA3-256 digest over the transaction fields.  The returned bytes are
-    /// the raw 49,088-byte SPHINCS+ detached signature.
+    /// the raw detached signature.
     ///
     /// The private key is accessed through `Zeroizing<Vec<u8>>`; it is NOT
     /// copied or cloned — the slice reference is passed directly to
-    /// `sign_tx_payload`, which zeroes the key via the `SecretKey` drop impl.
+    /// versioned signing helper, which zeroes temporary key objects on drop.
     pub fn sign_transaction(&self, tx: &Transaction) -> Result<Vec<u8>, WalletError> {
         // Convert float amount to u64 microBLEEP (8 decimals).
         let amount_micro = (tx.amount * 1e8) as u64;
@@ -344,8 +338,9 @@ impl Wallet {
             tx.nonce,
         );
 
-        let sig = tx_signer::sign_tx_payload(&payload, &self.private_key)
-            .map_err(|e| WalletError::SigningError(e))?;
+        let sig =
+            tx_signer::sign_tx_payload_for_address(&payload, &self.private_key, &self.address)
+                .map_err(|e| WalletError::SigningError(e))?;
 
         log::debug!(
             "[Wallet] Signed tx id={} sig_len={} bytes",
@@ -357,8 +352,7 @@ impl Wallet {
 
     /// Verify a previously produced signature for `tx`.
     ///
-    /// Returns `true` if the signature is a valid SPHINCS+ signature over the
-    /// canonical payload for this wallet's public key.
+    /// Returns `true` if the versioned signature is valid for this wallet.
     pub fn verify_transaction_signature(&self, tx: &Transaction, sig: &[u8]) -> bool {
         let amount_micro = (tx.amount * 1e8) as u64;
         let payload = tx_signer::tx_payload(
@@ -369,7 +363,7 @@ impl Wallet {
             tx.timestamp,
             tx.nonce,
         );
-        tx_signer::verify_tx_signature(&payload, sig, &self.public_key)
+        tx_signer::verify_tx_signature_for_address(&payload, sig, &self.public_key, &self.address)
     }
 
     // ── AI fee prediction ─────────────────────────────────────────────────────
@@ -384,8 +378,8 @@ impl Wallet {
         &self,
         signed_tx: &Transaction,
     ) -> Result<String, WalletError> {
-        let tx_data = serde_json::to_vec(signed_tx)
-            .map_err(|e| WalletError::Serialization(e.to_string()))?;
+        let tx_data =
+            serde_json::to_vec(signed_tx).map_err(|e| WalletError::Serialization(e.to_string()))?;
         self.p2p_node
             .broadcast_message(P2PMessage::NewTransaction(tx_data))
             .map_err(|_| WalletError::NetworkError)
@@ -403,7 +397,10 @@ impl Wallet {
     // ── Consensus ────────────────────────────────────────────────────────────
 
     pub async fn finalize_transaction(&self, tx: &Transaction) -> Result<(), WalletError> {
-        self.consensus_module.lock().unwrap().finalize_transaction(tx)
+        self.consensus_module
+            .lock()
+            .unwrap()
+            .finalize_transaction(tx)
     }
 
     // ── Cross-chain ───────────────────────────────────────────────────────────
@@ -411,8 +408,8 @@ impl Wallet {
     pub fn swap_tokens(
         &self,
         from_chain: &str,
-        to_chain:   &str,
-        amount:     f64,
+        to_chain: &str,
+        amount: f64,
     ) -> Result<String, WalletError> {
         self.bleep_connect.swap_tokens(from_chain, to_chain, amount)
     }
@@ -420,7 +417,10 @@ impl Wallet {
     // ── Multi-sig ─────────────────────────────────────────────────────────────
 
     pub fn approve_multisig_transaction(&mut self, tx_id: &str) -> Result<(), WalletError> {
-        self.consensus_module.lock().unwrap().approve_transaction(tx_id)
+        self.consensus_module
+            .lock()
+            .unwrap()
+            .approve_transaction(tx_id)
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -436,11 +436,11 @@ impl Wallet {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Derive a `BLEEP1<hex40>` address from a SPHINCS+ public key.
-///
-/// `address = "BLEEP1" || hex( SHA256²(pk)[..20] )`
-fn derive_address(pk: &[u8]) -> String {
-    bleep_crypto::derive_account_address(pk)
+fn keypair_from_mnemonic(mnemonic: &Mnemonic) -> Result<(Vec<u8>, Vec<u8>), WalletError> {
+    let full_seed = Zeroizing::new(mnemonic.to_seed(""));
+    let seed = Zeroizing::new(full_seed[..32].to_vec());
+    bleep_crypto::derive_tx_keypair(&seed)
+        .map_err(|error| WalletError::SigningError(error.to_string()))
 }
 
 /// Current UNIX time in milliseconds.
@@ -470,14 +470,14 @@ fn keypair_from_seed(seed: &[u8; 64]) -> Result<(Vec<u8>, Vec<u8>), WalletError>
     use sha2::Sha512;
 
     let (pk_raw, sk_raw) = keypair();
-    let pk = pk_raw.as_bytes().to_vec();
+    let _pk = pk_raw.as_bytes().to_vec();
     let mut sk = sk_raw.as_bytes().to_vec();
 
     // Expand seed to len(sk) bytes via HKDF-SHA512.
     let hk = Hkdf::<Sha512>::new(None, seed);
     let mut mask = vec![0u8; sk.len()];
     hk.expand(b"bleep-kyber-sk-mask", &mut mask)
-        .map_err(|e| WalletError::QuantumSecurityError)?;
+        .map_err(|_| WalletError::QuantumSecurityError)?;
 
     for (b, m) in sk.iter_mut().zip(mask.iter()) {
         *b ^= m;
@@ -487,96 +487,4 @@ fn keypair_from_seed(seed: &[u8; 64]) -> Result<(Vec<u8>, Vec<u8>), WalletError>
     // determinism, not for the actual wallet signing keypair.
     let (pk2, sk2) = keypair();
     Ok((pk2.as_bytes().to_vec(), sk2.as_bytes().to_vec()))
-}
-            p2p_node,
-        })
-    }
-
-    // 🔑 Import a Wallet using a BIP39 Mnemonic
-    pub fn import_wallet(mnemonic: &str) -> Result<Self, WalletError> {
-        // Parse the provided mnemonic string
-        let mnemonic_obj = Mnemonic::parse(mnemonic)
-            .map_err(|_| WalletError::Authentication("Invalid mnemonic".into()))?;
-        let (public_key, private_key) = keypair();
-
-        Ok(Self {
-            address: hex::encode(public_key.as_bytes()),
-            balance: 0.0,
-            authenticated: false,
-            public_key: public_key.as_bytes().to_vec(),
-            private_key: private_key.as_bytes().to_vec(),
-            mnemonic: mnemonic_obj,
-        ai_decision_module: Arc::new(BLEEPAIDecisionModule::new()),
-        zkp_module: Arc::new(BLEEPZKPModule::unconfigured()),
-        consensus_module: Arc::new(Mutex::new(BLEEPAdaptiveConsensus::new())),
-        bleep_connect: Arc::new(BLEEPConnect::new()),
-        state_merkle: Arc::new(Mutex::new(StateMerkle::new())),
-        p2p_node: Arc::new(P2PNode::new()),
-    })
-}
-
-    // 🔒 Quantum-Secure Authentication
-    pub fn authenticate(&mut self, _credentials: &[u8]) -> Result<bool, WalletError> {
-        // Use as_bytes for pqcrypto keys
-        let public_key = pqcrypto_mlkem::mlkem1024::PublicKey::from_bytes(&self.public_key).map_err(|_| WalletError::QuantumSecurityError)?;
-        let secret_key = pqcrypto_mlkem::mlkem1024::SecretKey::from_bytes(&self.private_key).map_err(|_| WalletError::QuantumSecurityError)?;
-        let (shared_secret, ciphertext): (pqcrypto_mlkem::mlkem1024::SharedSecret, pqcrypto_mlkem::mlkem1024::Ciphertext) = encapsulate(&public_key);
-        let decrypted_secret = decapsulate(&ciphertext, &secret_key);
-        // Compare the shared secrets
-        if decrypted_secret.as_bytes() == shared_secret.as_bytes() {
-            self.authenticated = true;
-            Ok(true)
-        } else {
-            Err(WalletError::Authentication("Invalid credentials".into()))
-        }
-    }
-
-    // ⚡ AI-Based Smart Fee Prediction
-    pub fn optimize_gas_fee(&self, network: &str) -> Result<f64, WalletError> {
-        let optimal_fee = self.ai_decision_module.predict_gas_fee(network)?;
-        Ok(optimal_fee)
-    }
-
-    // ✅ Sign a Transaction
-    pub fn sign_transaction(&self, tx: &Transaction) -> Result<Vec<u8>, WalletError> {
-        // Serialize the transaction to bytes
-        let _serialized_tx = serde_json::to_vec(tx)
-            .map_err(|e| WalletError::Serialization(e.to_string()))?;
-        // For demonstration, "sign" by simply returning the private key (this is a placeholder)
-        let signed_tx = self.private_key.clone();
-        Ok(signed_tx)
-    }
-
-    // 📡 Broadcast Transaction to P2P Network
-    pub async fn broadcast_transaction(&self, signed_tx: &Transaction) -> Result<String, WalletError> {
-        let tx_data = serde_json::to_vec(signed_tx)
-            .map_err(|e| WalletError::Serialization(e.to_string()))?;
-        let response = self.p2p_node.broadcast_message(P2PMessage::NewTransaction(tx_data));
-        response.map_err(|_| WalletError::NetworkError)
-    }
-
-    // 🔄 Store Transaction in Blockchain State
-    pub fn store_transaction(&mut self, tx: Transaction) {
-        self.state_merkle.lock().unwrap().update_state(&tx.from, tx.clone());
-    }
-
-    // 🏛️ Consensus Finalization
-    pub async fn finalize_transaction(&self, tx: &Transaction) -> Result<(), WalletError> {
-        self.consensus_module
-            .lock()
-            .unwrap()
-            .finalize_transaction(tx)
-    }
-
-    // 🔄 Swap Tokens via BLEEP Connect
-    pub fn swap_tokens(&self, from_chain: &str, to_chain: &str, amount: f64) -> Result<String, WalletError> {
-        let swap_tx = self.bleep_connect.swap_tokens(from_chain, to_chain, amount)?;
-        Ok(swap_tx)
-    }
-
-    // 🔑 Multi-Signature Approval
-    pub fn approve_multisig_transaction(&mut self, tx_id: &str) -> Result<(), WalletError> {
-        self.consensus_module.lock().unwrap().approve_transaction(tx_id)?;
-        Ok(())
-    }
 }

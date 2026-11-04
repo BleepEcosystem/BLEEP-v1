@@ -18,6 +18,7 @@ Copyright © 2026 Muhammad Attahir.
 | Primitive | Algorithm | Standard | Security Level | Role |
 |---|---|---|---|---|
 | **Signatures (primary)** | SPHINCS+-SHAKE-256f-simple | Legacy/round-3 API; FIPS 205 conformance not claimed | Level 5 parameter set | Transaction signing, block signing, P2P auth |
+| **Signatures (mnemonic wallets)** | SLH-DSA SHAKE-256f | FIPS 205 algorithm; implementation conformance not claimed | Level 5 parameter set | Deterministic version-2 wallet keys and transactions |
 | **Key encapsulation** | ML-KEM-1024 | FIPS 203 algorithm; implementation conformance not claimed | Level 5 parameter set | Validator binding, peer KEM, onion routing |
 | **Symmetric encryption** | AES-256-GCM | NIST SP 800-38D | 256-bit classical | Metadata, payload, session encryption |
 | **State hashing** | SHA3-256 | FIPS 202 | 128-bit PQ | State roots, Merkle nodes, block hashes, audit log chaining |
@@ -38,6 +39,7 @@ bleep-crypto
 ├── quantum_secure      — QuantumSecure: ML-KEM-1024 + AES-256-GCM hybrid encrypt/decrypt
 ├── quantum_resistance  — Additional PQC wrappers and utilities
 ├── bip39               — BIP-39 mnemonic generation, validation, seed derivation
+├── derivation          — HKDF-separated deterministic SLH-DSA SHAKE-256f wallet keys
 ├── tx_signer           — Transaction signing (SPHINCS+ on quantum-enabled builds)
 ├── merkle_commitment   — Merkle proof construction and verification (SHA3-256)
 ├── merkletree          — General-purpose SHA3-256 Merkle tree

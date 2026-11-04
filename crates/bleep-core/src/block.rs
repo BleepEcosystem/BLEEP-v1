@@ -35,7 +35,7 @@ use bleep_zkp::{
 };
 
 // Transaction signature helpers used by block compaction and validation.
-use bleep_crypto::tx_signer::{tx_payload, verify_tx_signature};
+use bleep_crypto::tx_signer::{tx_payload, verify_tx_signature_for_address};
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 
@@ -93,7 +93,7 @@ impl Transaction {
         }
         let pk_bytes = &self.signature[..SPHINCS_PK_LEN];
         let sig_bytes = &self.signature[SPHINCS_PK_LEN..];
-        if bleep_crypto::derive_account_address(pk_bytes) != self.sender {
+        if !bleep_crypto::account_address_matches_public_key(&self.sender, pk_bytes) {
             return false;
         }
         let payload = tx_payload(
@@ -104,7 +104,7 @@ impl Transaction {
             self.timestamp,
             self.nonce,
         );
-        verify_tx_signature(&payload, sig_bytes, pk_bytes)
+        verify_tx_signature_for_address(&payload, sig_bytes, pk_bytes, &self.sender)
     }
 }
 

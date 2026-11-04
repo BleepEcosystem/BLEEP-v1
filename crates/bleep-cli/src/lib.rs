@@ -103,11 +103,11 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum WalletCommand {
-    /// Generate a new SPHINCS+ + Kyber-1024 keypair and encrypted wallet
+    /// Create a deterministic SLH-DSA wallet and display its BIP-39 recovery phrase
     Create,
     /// Query balance from /rpc/state (offline fallback to local RocksDB)
     Balance,
-    /// Import from BIP-39 mnemonic (PBKDF2-HMAC-SHA512, 2048 rounds)
+    /// Restore a version-2 SLH-DSA wallet from a BIP-39 recovery phrase
     Import { phrase: String },
     /// Export wallet addresses
     Export,
@@ -121,7 +121,7 @@ pub enum WalletCommand {
 pub enum TxCommand {
     /// Sign and broadcast a transfer transaction
     Send {
-        /// Recipient BLEEP1 address
+        /// Recipient versioned BLEEP account address
         to: String,
         /// Amount in BLEEP base units
         amount: u64,

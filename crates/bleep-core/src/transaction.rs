@@ -135,14 +135,14 @@ impl ZKTransaction {
         quantum_secure.verify(data.as_bytes(), &self.signature)
     }
 
-    /// Verify the SPHINCS+ transaction signature and bind its key to `sender`.
+    /// Verify the versioned transaction signature and bind its key to `sender`.
     pub fn verify_account_authorization(&self) -> bool {
         const SPHINCS_PK_LEN: usize = 64;
         if self.chain_id.is_empty() || self.signature.len() <= SPHINCS_PK_LEN {
             return false;
         }
         let (pk_bytes, sig_bytes) = self.signature.split_at(SPHINCS_PK_LEN);
-        if bleep_crypto::derive_account_address(pk_bytes) != self.sender {
+        if !bleep_crypto::account_address_matches_public_key(&self.sender, pk_bytes) {
             return false;
         }
         let payload = bleep_crypto::tx_payload(
@@ -153,7 +153,7 @@ impl ZKTransaction {
             self.timestamp,
             self.nonce,
         );
-        bleep_crypto::verify_tx_signature(&payload, sig_bytes, pk_bytes)
+        bleep_crypto::verify_tx_signature_for_address(&payload, sig_bytes, pk_bytes, &self.sender)
     }
 }
 

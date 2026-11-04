@@ -48,6 +48,8 @@ hex          = "0.4"
 rand         = "0.8"
 rayon        = "1.8"
 uuid         = { version = "1", features = ["v4", "serde"] }
+hkdf         = "0.12"
+pbkdf2       = { version = "0.12", features = ["hmac"] }
 
 # NOTE: Removed for MVP:
 #   tch    — LibTorch (not used in any lib.rs module)
