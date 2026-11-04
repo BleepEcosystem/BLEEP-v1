@@ -126,6 +126,14 @@ fn zkp_verification_fails_closed() {
     assert!(!BLEEPZKPModule::unconfigured()
         .verify_proof(&[1, 2], &[3, 4])
         .expect("verification result"));
+
+    let configured = BLEEPZKPModule::from_keys(vec![1], vec![2]).expect("valid keys");
+    let hash_placeholder = configured
+        .generate_proof(b"not a zero-knowledge proof")
+        .expect("placeholder generation succeeds");
+    assert!(!configured
+        .verify_proof(&hash_placeholder, b"not a zero-knowledge proof")
+        .expect("unimplemented verifier rejects placeholder"));
 }
 
 #[test]
