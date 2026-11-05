@@ -553,6 +553,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_block_100_proof_verifies() {
+        let prover = ParallelBatchSigProver::new(100, bleep_proof_options());
+        let mut inputs = test_pub_inputs(0);
+        inputs.block_index = 100;
+        inputs.epoch_id = 1;
+        inputs.batch_seq_id = 100;
+
+        assert!(inputs.is_consistent());
+        let mut stale_epoch_inputs = inputs.clone();
+        stale_epoch_inputs.epoch_id = 0;
+        assert!(!stale_epoch_inputs.is_consistent());
+
+        let trace = prover.build_trace(&inputs, &[]);
+        let proof = prover.prove(trace).expect("block 100 proof generation");
+
+        ParallelBatchSigProver::verify_block(inputs, proof, &bleep_proof_options())
+            .expect("block 100 proof verification");
+    }
+
+    #[test]
     fn tampered_pub_inputs_fails_verify() {
         let fast_options = ProofOptions::new(
             10,

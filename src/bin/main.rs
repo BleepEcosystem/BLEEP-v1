@@ -1172,6 +1172,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(sal_bridge.clone()),
     );
     block_producer.set_chain_id(chain_id.clone());
+    block_producer.set_blocks_per_epoch(blocks_per_epoch)?;
     block_producer.set_validator_registry(Arc::clone(&validator_registry));
     block_producer.set_pbft_finality(Arc::clone(&live_pbft_finality));
     let canonical_commit_lock = Arc::new(tokio::sync::Mutex::new(()));

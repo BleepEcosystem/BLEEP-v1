@@ -157,6 +157,7 @@ pub struct BlockProducer {
     my_stake: u64,
     canonical_commit_lock: Arc<tokio::sync::Mutex<()>>,
     config: ProducerConfig,
+    blocks_per_epoch: u64,
     block_tx: tokio::sync::broadcast::Sender<FinalizedBlock>,
     /// Live TPS benchmark — records wall-clock throughput from real block production.
     bench: PLMutex<PerformanceBenchmark>,
@@ -166,6 +167,15 @@ impl BlockProducer {
     /// Pin transaction execution to the node's configured network chain ID.
     pub fn set_chain_id(&mut self, chain_id: impl Into<String>) {
         self.config.chain_id = chain_id.into();
+    }
+
+    /// Set the configured epoch length used for block metadata and STARK inputs.
+    pub fn set_blocks_per_epoch(&mut self, blocks_per_epoch: u64) -> Result<(), String> {
+        if blocks_per_epoch == 0 {
+            return Err("blocks_per_epoch must be > 0".into());
+        }
+        self.blocks_per_epoch = blocks_per_epoch;
+        Ok(())
     }
 
     /// Attach the active validator set used for deterministic proposer choice
@@ -271,6 +281,7 @@ impl BlockProducer {
                 my_stake,
                 canonical_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
                 config,
+                blocks_per_epoch: BLOCKS_PER_EPOCH,
                 block_tx,
                 bench,
             },
@@ -516,7 +527,7 @@ impl BlockProducer {
         };
 
         // ── 3: Epoch ──────────────────────────────────────────────────────────
-        let epoch_id = next_height / BLOCKS_PER_EPOCH;
+        let epoch_id = next_height / self.blocks_per_epoch;
 
         // ── 4: VM execution + state accounting ────────────────────────────────
         //
@@ -717,6 +728,7 @@ impl BlockProducer {
         // STARK. There is no Fiat-Shamir or legacy proof downgrade path.
         let (sal_proof_bytes, prove_time_ms) = Self::generate_extended_proof(
             &block,
+            self.blocks_per_epoch,
             &self.config.validator_pk,
             &self.config.validator_sk,
             sal_commitment_root,
@@ -892,6 +904,7 @@ impl BlockProducer {
     /// `Block::verify_zkp()`, which detects the `EXTSTARK1` magic prefix.
     fn generate_extended_proof(
         block: &Block,
+        blocks_per_epoch: u64,
         validator_pk: &[u8],
         validator_sk: &[u8],
         sig_commitment_root: [u8; 32],
@@ -917,15 +930,6 @@ impl BlockProducer {
         };
         let smt_root: [u8; 32] = Sha3_256::digest(block.shard_state_root.as_bytes()).into();
 
-        // blocks_per_epoch: testnet=100, mainnet=1000. Derive from epoch_id/index
-        // or use the protocol constant. We use 100 for Phase-6 testnet.
-        let blocks_per_epoch: u64 = if block.epoch_id > 0 && block.index > 0 {
-            // Back-calculate from block index and epoch_id
-            block.index / block.epoch_id.max(1)
-        } else {
-            100 // Phase-6 testnet default
-        };
-
         let pub_inputs = ExtendedBlockPublicInputs {
             block_index: block.index,
             epoch_id: block.epoch_id,
@@ -940,6 +944,12 @@ impl BlockProducer {
             sig_count: sig_hashes.len() as u32,
             batch_seq_id: block.index, // use block index as monotonic seq id
         };
+        if !pub_inputs.is_consistent() {
+            return Err(format!(
+                "Extended proof metadata is inconsistent at block {}: epoch={}, blocks_per_epoch={}",
+                block.index, block.epoch_id, blocks_per_epoch
+            ));
+        }
 
         // ── Convert sig_hashes to raw_signatures for ParallelBatchSigProver ─
         // The prover recomputes sig_commitment_root internally; we pass the
