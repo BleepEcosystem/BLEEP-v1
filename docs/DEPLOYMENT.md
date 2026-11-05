@@ -310,6 +310,24 @@ kubectl rollout status deployment/bleep-validator -n bleep
 
 #### Validator Node
 
+Before a validator starts with a fresh state, provision the network's canonical
+validator registry snapshot and its trusted SHA-256 digest. Obtain the digest
+from an authenticated network release/configuration channel; never compute the
+pin from an untrusted snapshot. Startup rejects missing or mismatched pins and
+does not self-register on shared networks.
+
+```bash
+export BLEEP_VALIDATOR_REGISTRY_SNAPSHOT=/etc/bleep/genesis-validator-registry.json
+export BLEEP_VALIDATOR_REGISTRY_SHA256=<trusted-64-hex-character-digest>
+```
+
+The same digest is checked against the persisted registry on subsequent
+restarts. After an authorized validator-set change, distribute the matching
+authenticated checkpoint snapshot and new digest to operators before restarting
+nodes. An empty registry can only be created through the explicit, loopback-only
+single-node development mode; that local set must never be used for a shared
+network.
+
 ```json
 {
   "node_id": "validator-1",

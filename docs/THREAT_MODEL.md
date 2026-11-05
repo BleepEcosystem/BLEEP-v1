@@ -74,7 +74,7 @@ The audit target consists of the following crates:
 |---|---|---|---|---|
 | CON-01 | Double-sign / equivocation attack | bleep-consensus | SlashingEngine; 33% stake slash; on-chain evidence | Slashed validator may have already profited |
 | CON-02 | Long-range reorg (weak subjectivity) | bleep-consensus | Finality threshold 66.67%; checkpoint anchoring | First sync without trusted checkpoint vulnerable |
-| CON-03 | Sybil validator set takeover | bleep-consensus | Proof-of-stake; minimum stake per validator | Economically expensive, not cryptographically prevented |
+| CON-03 | Sybil validator set takeover | bleep-consensus | Validator registry must match an operator-pinned genesis/checkpoint SHA-256; fresh shared-network nodes fail closed without it | Pin distribution and validator-set changes require authenticated governance/release procedures |
 | CON-04 | Block withholding (selfish mining) | bleep-consensus | 3-second timeout; peer reputation | Subtle grinding attacks possible |
 | CON-05 | Nothing-at-stake during fork | bleep-consensus | Slashing penalises signing both chains | Edge: slashing evidence must arrive before unbonding |
 | CON-06 | Unauthorized validator exit request | bleep-rpc, bleep-auth | Require active proof-verified operator binding or explicit system-admin permission | Compromise of the bound operator or system-admin account |
@@ -92,7 +92,7 @@ The audit target consists of the following crates:
 | ST-06 | PAT token supply overflow | bleep-pat | supply_cap enforced on mint; u128 arithmetic | Overflow not possible with checked arithmetic |
 | ST-07 | PAT caller impersonation | bleep-rpc, bleep-pat | Verify wallet signature, principal binding, chain ID, endpoint, and single-use nonce before mutation | Nonce replay tracking is scoped to the running PAT registry |
 | ST-08 | Restart with missing or inconsistent canonical history | bleep-state, bleep-core | Persist block bodies, parent/tip hashes, chain ID, account state, and height in one RocksDB batch; validate history before startup | Existing databases with nonzero height but no canonical history fail closed and require migration |
-| ST-09 | Invalid inbound block state application | bleep-rpc, bleep-state | Require an active validator signer, chain/link validation, transaction verification, nonce/balance checks, and atomic state/history persistence | Validator-set distribution and quorum confirmation remain incomplete |
+| ST-09 | Invalid inbound block state application | bleep-rpc, bleep-state | Require an active validator signer, chain/link validation, transaction verification, nonce/balance checks, and atomic state/history persistence | Validator-set changes require securely distributing a new trusted pin; quorum confirmation remains incomplete |
 
 ### 3.4 Cross-Chain / Bridge Threats
 

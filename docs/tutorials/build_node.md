@@ -87,13 +87,26 @@ cargo build --workspace --release
 
 ## 5. Run a Single-Node Devnet
 
-The default development configuration starts a single-node chain with the mainnet genesis parameters.
+Self-registration is disabled by default. To create a local-only validator,
+explicitly enable development mode and bind P2P to loopback:
 
 ```bash
+export BLEEP_NETWORK_MODE=dev
+export BLEEP_SINGLE_NODE_DEV_MODE=true
+export BLEEP_P2P_LISTEN_ADDR=127.0.0.1:7700
 cargo run --bin bleep
 ```
 
-You should see log output similar to:
+Set `BLEEP_JWT_SECRET` as described in the [README](../../README.md) before
+starting the node. It will refuse startup if P2P seeds are configured or the
+listener is not loopback-bound. The generated registry is for this local
+development chain only; it is not suitable for a shared network.
+
+On shared networks, provision the network's validator registry snapshot and
+its independently trusted SHA-256 pin instead; see the production configuration
+instructions in the [deployment guide](../DEPLOYMENT.md).
+
+When startup succeeds, you should see log output similar to:
 
 ```
 INFO  bleep_consensus::orchestrator > Consensus orchestrator initialized in mode: PoS

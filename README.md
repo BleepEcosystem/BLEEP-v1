@@ -857,7 +857,18 @@ At startup, `BLEEP_NETWORK_MODE=mainnet` selects the embedded
 select `config/testnet_config.json`. When unset, the build's default network
 feature selects the configuration. `BLEEP_CHAIN_ID` can explicitly override
 the configured chain ID. The selected ID is included in every block's canonical
-hash.
+hash. Nodes do not create their own validator set on a fresh state: provision
+`BLEEP_VALIDATOR_REGISTRY_SHA256` from a trusted network source, and for a fresh
+state also provide `BLEEP_VALIDATOR_REGISTRY_SNAPSHOT` pointing to the matching
+registry snapshot. The node verifies the snapshot hash before loading it and
+verifies persisted registries against the same pin. Do not derive the trusted
+hash from an untrusted snapshot.
+
+For isolated local development only, self-registration requires
+`BLEEP_NETWORK_MODE=dev` (or `development`/`test`) and
+`BLEEP_SINGLE_NODE_DEV_MODE=true`, with no `BLEEP_P2P_SEEDS` and
+`BLEEP_P2P_LISTEN_ADDR=127.0.0.1:7700`. This creates a local-only validator set
+and must not be used to join a shared network.
 
 ---
 

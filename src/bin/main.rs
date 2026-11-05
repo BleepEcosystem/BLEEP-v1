@@ -39,6 +39,7 @@
 //!   - Standalone `bleep-executor` binary for Layer 4 intent market
 
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 use tracing::{error, info, warn};
@@ -349,6 +350,101 @@ struct NetworkConfig {
 
 const GENESIS_ADMIN_PUBKEY_CONFIG_KEY: &str = "BLEEP_GENESIS_ADMIN_PUBKEY";
 const GENESIS_ADMIN_STATE_KEY: &str = "bleep:auth:genesis-admin-pubkey:v1";
+const VALIDATOR_REGISTRY_HASH_ENV: &str = "BLEEP_VALIDATOR_REGISTRY_SHA256";
+const VALIDATOR_REGISTRY_SNAPSHOT_ENV: &str = "BLEEP_VALIDATOR_REGISTRY_SNAPSHOT";
+const SINGLE_NODE_DEV_MODE_ENV: &str = "BLEEP_SINGLE_NODE_DEV_MODE";
+
+fn parse_validator_registry_hash(value: &str) -> Result<String, Box<dyn Error>> {
+    let decoded = hex::decode(value.trim()).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{VALIDATOR_REGISTRY_HASH_ENV} must be a SHA-256 hex digest: {error}"),
+        )
+    })?;
+    if decoded.len() != 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{VALIDATOR_REGISTRY_HASH_ENV} must decode to 32 bytes"),
+        )
+        .into());
+    }
+    Ok(hex::encode(decoded))
+}
+
+fn verify_validator_registry_hash(
+    snapshot: &[u8],
+    expected_hash: &str,
+) -> Result<(), Box<dyn Error>> {
+    let actual_hash = hex::encode(Sha256::digest(snapshot));
+    if actual_hash != expected_hash {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Validator registry snapshot hash mismatch: expected {expected_hash}, got {actual_hash}"
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn parse_validator_registry_snapshot(
+    snapshot: &[u8],
+    expected_hash: Option<&str>,
+) -> Result<ValidatorRegistry, Box<dyn Error>> {
+    if let Some(expected_hash) = expected_hash {
+        verify_validator_registry_hash(snapshot, expected_hash)?;
+    }
+    let registry = ValidatorRegistry::from_persistent_bytes(snapshot).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Validator registry snapshot is invalid: {error}"),
+        )
+    })?;
+    if registry.active_validator_count() == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Validator registry snapshot has no active validators",
+        )
+        .into());
+    }
+    Ok(registry)
+}
+
+fn single_node_dev_mode_enabled(
+    network_mode: Option<&str>,
+    enabled: Option<&str>,
+) -> Result<bool, Box<dyn Error>> {
+    let Some(enabled) = enabled else {
+        return Ok(false);
+    };
+    let enabled = match enabled.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => true,
+        "0" | "false" => false,
+        value => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{SINGLE_NODE_DEV_MODE_ENV} must be true or false, got '{value}'"),
+            )
+            .into())
+        }
+    };
+    if enabled
+        && !network_mode
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .is_some_and(|mode| matches!(mode.as_str(), "dev" | "development" | "test"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{SINGLE_NODE_DEV_MODE_ENV}=true requires BLEEP_NETWORK_MODE=dev, development, or test"
+            ),
+        )
+        .into());
+    }
+    Ok(enabled)
+}
 
 fn embedded_network_config(network_mode: Option<&str>) -> Result<&'static str, std::io::Error> {
     let default_mode = if cfg!(feature = "mainnet") {
@@ -545,10 +641,72 @@ mod epoch_config_tests {
         pin_genesis_admin_config(&mut unconfigured_state, None).unwrap();
         assert!(pin_genesis_admin_config(&mut unconfigured_state, Some(&public_key)).is_err());
     }
+
+    #[test]
+    fn validator_registry_hash_is_strict_and_verified() {
+        let expected = hex::encode(Sha256::digest(b"trusted registry"));
+        assert_eq!(
+            parse_validator_registry_hash(&expected.to_ascii_uppercase()).unwrap(),
+            expected
+        );
+        verify_validator_registry_hash(b"trusted registry", &expected).unwrap();
+        assert!(verify_validator_registry_hash(b"other registry", &expected).is_err());
+        assert!(parse_validator_registry_hash("abcd").is_err());
+
+        let empty_registry = ValidatorRegistry::new().to_persistent_bytes().unwrap();
+        assert!(parse_validator_registry_snapshot(&empty_registry, None).is_err());
+    }
+
+    #[test]
+    fn self_registration_requires_explicit_development_mode() {
+        assert!(!single_node_dev_mode_enabled(None, None).unwrap());
+        assert!(single_node_dev_mode_enabled(Some("dev"), Some("true")).unwrap());
+        assert!(single_node_dev_mode_enabled(Some("test"), Some("1")).unwrap());
+        assert!(single_node_dev_mode_enabled(Some("mainnet"), Some("true")).is_err());
+        assert!(single_node_dev_mode_enabled(Some("dev"), Some("yes")).is_err());
+    }
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let network_config = load_network_config()?;
+    let network_mode = std::env::var("BLEEP_NETWORK_MODE").ok();
+    let single_node_dev_mode = single_node_dev_mode_enabled(
+        network_mode.as_deref(),
+        std::env::var(SINGLE_NODE_DEV_MODE_ENV).ok().as_deref(),
+    )?;
+    let expected_registry_hash = std::env::var(VALIDATOR_REGISTRY_HASH_ENV)
+        .ok()
+        .map(|hash| parse_validator_registry_hash(&hash))
+        .transpose()?;
+    let validator_registry_snapshot = std::env::var(VALIDATOR_REGISTRY_SNAPSHOT_ENV).ok();
+    if !single_node_dev_mode && expected_registry_hash.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{VALIDATOR_REGISTRY_HASH_ENV} is required outside explicit single-node development mode"
+            ),
+        )
+        .into());
+    }
+    if validator_registry_snapshot.is_some() && expected_registry_hash.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{VALIDATOR_REGISTRY_SNAPSHOT_ENV} requires a trusted {VALIDATOR_REGISTRY_HASH_ENV}"
+            ),
+        )
+        .into());
+    }
+    let p2p_config = P2PNodeConfig::from_env().map_err(|error| format!("P2P config: {error}"))?;
+    if single_node_dev_mode
+        && (!p2p_config.bootstrap_peers.is_empty() || !p2p_config.listen_addr.ip().is_loopback())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Single-node development mode requires no BLEEP_P2P_SEEDS and a loopback BLEEP_P2P_LISTEN_ADDR",
+        )
+        .into());
+    }
     std::env::set_var("BLEEP_CHAIN_ID", &network_config.chain_id);
     let blocks_per_epoch = network_config.blocks_per_epoch;
     info!(
@@ -758,37 +916,70 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .get_application_data(VALIDATOR_REGISTRY_STORAGE_KEY)
             .map_err(|error| format!("Validator registry load failed: {error}"))?
         {
-            Some(bytes) => ValidatorRegistry::from_persistent_bytes(&bytes)
-                .map_err(|error| format!("Persisted validator registry is invalid: {error}"))?,
+            Some(bytes) => {
+                parse_validator_registry_snapshot(&bytes, expected_registry_hash.as_deref())?
+            }
             None if state_guard.block_height() == 0 => {
-                let validator_id = hex::encode(&sphincs_pk[..8]);
-                let identity = ValidatorIdentity::new_with_vrf_public_key(
-                    validator_id.clone(),
-                    kyber_pk.as_bytes().to_vec(),
-                    hex::encode(&sphincs_pk),
-                    bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(
-                        &sphincs_sk,
-                    )?,
-                    1_000_000u128,
-                    0,
-                )
-                .map_err(|error| format!("Genesis validator initialization failed: {error}"))?;
+                if let (Some(expected_hash), Some(snapshot_path)) = (
+                    expected_registry_hash.as_deref(),
+                    validator_registry_snapshot.as_deref(),
+                ) {
+                    let snapshot = std::fs::read(snapshot_path).map_err(|error| {
+                        format!("Validator registry snapshot {snapshot_path} could not be read: {error}")
+                    })?;
+                    let registry =
+                        parse_validator_registry_snapshot(&snapshot, Some(expected_hash))?;
+                    state_guard
+                        .put_application_data(VALIDATOR_REGISTRY_STORAGE_KEY, &snapshot)
+                        .map_err(|error| {
+                            format!("Genesis validator registry persistence failed: {error}")
+                        })?;
+                    info!("  ✅ Pinned genesis validator registry snapshot loaded.");
+                    registry
+                } else if single_node_dev_mode && expected_registry_hash.is_none() {
+                    let validator_id = hex::encode(&sphincs_pk[..8]);
+                    let identity = ValidatorIdentity::new_with_vrf_public_key(
+                        validator_id.clone(),
+                        kyber_pk.as_bytes().to_vec(),
+                        hex::encode(&sphincs_pk),
+                        bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(
+                            &sphincs_sk,
+                        )?,
+                        1_000_000u128,
+                        0,
+                    )
+                    .map_err(|error| {
+                        format!("Development validator initialization failed: {error}")
+                    })?;
 
-                let mut registry = ValidatorRegistry::new();
-                registry
-                    .register_validator(identity)
-                    .and_then(|_| registry.activate_validator(&validator_id))
-                    .map_err(|error| format!("Genesis validator activation failed: {error}"))?;
-                let snapshot = registry
-                    .to_persistent_bytes()
-                    .map_err(|error| format!("Genesis validator registry encoding failed: {error}"))?;
-                state_guard
-                    .put_application_data(VALIDATOR_REGISTRY_STORAGE_KEY, &snapshot)
-                    .map_err(|error| format!("Genesis validator registry persistence failed: {error}"))?;
-                info!(
-                    "  ✅ Genesis validator registered and persisted: id={validator_id}"
-                );
-                registry
+                    let mut registry = ValidatorRegistry::new();
+                    registry
+                        .register_validator(identity)
+                        .and_then(|_| registry.activate_validator(&validator_id))
+                        .map_err(|error| {
+                            format!("Development validator activation failed: {error}")
+                        })?;
+                    let snapshot = registry.to_persistent_bytes().map_err(|error| {
+                        format!("Development validator registry encoding failed: {error}")
+                    })?;
+                    state_guard
+                        .put_application_data(VALIDATOR_REGISTRY_STORAGE_KEY, &snapshot)
+                        .map_err(|error| {
+                            format!("Development validator registry persistence failed: {error}")
+                        })?;
+                    warn!(
+                        "Single-node development mode created local validator id={validator_id}; this registry is not valid for a shared network."
+                    );
+                    registry
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "Validator registry is missing at chain height 0. Set {VALIDATOR_REGISTRY_SNAPSHOT_ENV} to a trusted genesis snapshot and pin its SHA-256 with {VALIDATOR_REGISTRY_HASH_ENV}; self-registration is disabled."
+                        ),
+                    )
+                    .into());
+                }
             }
             None => {
                 return Err(format!(
@@ -898,7 +1089,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // ── Step 9: P2P ───────────────────────────────────────────────────────────
     info!("🌐 [12/16] Starting P2P node…");
-    let p2p_config = P2PNodeConfig::from_env().map_err(|e| format!("P2P config: {e}"))?;
     info!(
         "  P2P listen={} seeds={}",
         p2p_config.listen_addr,
