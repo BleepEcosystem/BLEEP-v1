@@ -4358,6 +4358,65 @@ mod tests {
         assert_eq!(rejected.status(), warp::http::StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    #[tokio::test]
+    async fn governance_routes_report_not_implemented_instead_of_mock_success() {
+        use bleep_auth::Role;
+
+        let auth_service = Arc::new(AuthService::new((0u8..32).collect()).expect("auth service"));
+        auth_service
+            .rbac
+            .assign_role("validator-1", Role::Validator);
+        let token = auth_service
+            .sessions
+            .issue(
+                "validator-1",
+                &[Role::Validator],
+                chrono::Duration::hours(1),
+            )
+            .await
+            .expect("validator token");
+        let bearer = format!("Bearer {}", token.token);
+        let state = Arc::new(RpcState::new().with_auth_service(auth_service));
+
+        let proposals = request()
+            .method("GET")
+            .path("/rpc/governance/proposals")
+            .reply(&governance_proposals_route(Arc::clone(&state)))
+            .await;
+        assert_eq!(proposals.status(), warp::http::StatusCode::NOT_IMPLEMENTED);
+        let proposals_body: serde_json::Value =
+            serde_json::from_slice(proposals.body()).expect("valid proposals error JSON");
+        assert_eq!(
+            proposals_body["error"],
+            "Governance proposals are unavailable until the governance engine is integrated."
+        );
+
+        let propose = request()
+            .method("POST")
+            .path("/rpc/governance/propose")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({
+                "title": "A proposal that must not be accepted",
+                "deposit": 10_000_000_000_000u64
+            }))
+            .reply(&governance_propose_route(Arc::clone(&state)))
+            .await;
+        assert_eq!(propose.status(), warp::http::StatusCode::NOT_IMPLEMENTED);
+
+        let vote = request()
+            .method("POST")
+            .path("/rpc/governance/vote")
+            .header("authorization", bearer.as_str())
+            .json(&serde_json::json!({
+                "proposal_id": 1,
+                "voter": "spoofed-voter",
+                "vote": "yes"
+            }))
+            .reply(&governance_vote_route(Arc::clone(&state)))
+            .await;
+        assert_eq!(vote.status(), warp::http::StatusCode::NOT_IMPLEMENTED);
+    }
+
     #[test]
     fn escrow_proof_input_has_no_placeholder_fallback() {
         assert_eq!(decode_escrow_proof(None), Err("MissingEscrowProof"));
@@ -5403,47 +5462,29 @@ pub fn ceremony_status_route(
 }
 
 // ── GET /rpc/governance/proposals ────────────────────────────────────────────
-// Returns list of all governance proposals with vote tallies.
+// Governance state is not attached to RpcState yet; avoid returning mock data.
 
 pub fn governance_proposals_route(
-    state: Arc<RpcState>,
+    _state: Arc<RpcState>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let _st = Arc::clone(&state);
     warp::path!("rpc" / "governance" / "proposals")
         .and(warp::get())
         .map(move || {
-            let json = serde_json::json!({
-                "proposals": [
-                    {
-                        "id":          1,
-                        "title":       "Reduce fee burn to 20% (proposal-testnet-001)",
-                        "proposer":    "bleep:testnet:foundation",
-                        "state":       "Executed",
-                        "yes_votes":   "49000000000000000",
-                        "no_votes":    "5000000000000000",
-                        "abstain":     "2000000000000000",
-                        "veto":        "0",
-                        "param":       "fee_burn_bps",
-                        "new_value":   2000,
-                        "created_at_block": 100,
-                        "executed_at_block": 1105,
-                        "tx_hash":     "0x9e3779b97f4a7c15000000000000006900000000000000690000000000000069"
-                    }
-                ],
-                "total": 1,
-                "active": 0
-            });
-            warp::reply::json(&json)
+            warp::reply::with_status(
+                warp::reply::json(&ErrResp {
+                    error: "Governance proposals are unavailable until the governance engine is integrated.".into(),
+                }),
+                warp::http::StatusCode::NOT_IMPLEMENTED,
+            )
         })
 }
 
 // ── POST /rpc/governance/propose ─────────────────────────────────────────────
-// Submit a new governance proposal.
+// Proposal submission is unavailable until it is connected to the governance engine.
 
 pub fn governance_propose_route(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let _st = Arc::clone(&state);
     warp::path!("rpc" / "governance" / "propose")
         .and(warp::post())
         .and(limited_json_body())
@@ -5451,45 +5492,22 @@ pub fn governance_propose_route(
             Arc::clone(&state),
             Some(Permission::VoteOnGovernance),
         ))
-        .map(move |body: serde_json::Value, _claims: SessionClaims| {
-            let title = body
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(untitled)");
-            let description = body
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let deposit = body.get("deposit").and_then(|v| v.as_u64()).unwrap_or(0);
-            if deposit < 10_000_000_000_000 {
-                return warp::reply::json(&serde_json::json!({
-                    "error": "insufficient_deposit",
-                    "required": 10_000_000_000_000u64,
-                    "provided": deposit
-                }));
-            }
-            let pid: u64 = (title.len() as u64)
-                .wrapping_mul(0x9e3779b9)
-                .wrapping_add(deposit);
-            warp::reply::json(&serde_json::json!({
-                "proposal_id":       pid,
-                "title":             title,
-                "description":       description,
-                "deposit":           deposit,
-                "state":             "Active",
-                "voting_end_block":  "current_block + 1000",
-                "created":           true
-            }))
+        .map(|_body: serde_json::Value, _claims: SessionClaims| {
+            warp::reply::with_status(
+                warp::reply::json(&ErrResp {
+                    error: "Governance proposal submission is unavailable until the governance engine is integrated.".into(),
+                }),
+                warp::http::StatusCode::NOT_IMPLEMENTED,
+            )
         })
 }
 
 // ── POST /rpc/governance/vote ────────────────────────────────────────────────
-// Cast a vote on an active proposal.
+// Voting is unavailable until it is connected to the governance engine.
 
 pub fn governance_vote_route(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let _st = Arc::clone(&state);
     warp::path!("rpc" / "governance" / "vote")
         .and(warp::post())
         .and(limited_json_body())
@@ -5497,25 +5515,13 @@ pub fn governance_vote_route(
             Arc::clone(&state),
             Some(Permission::VoteOnGovernance),
         ))
-        .map(move |body: serde_json::Value, _claims: SessionClaims| {
-            let proposal_id = body
-                .get("proposal_id")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let voter = body
-                .get("voter")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let vote = body
-                .get("vote")
-                .and_then(|v| v.as_str())
-                .unwrap_or("abstain");
-            warp::reply::json(&serde_json::json!({
-                "proposal_id":  proposal_id,
-                "voter":        voter,
-                "vote":         vote,
-                "recorded":     true
-            }))
+        .map(|_body: serde_json::Value, _claims: SessionClaims| {
+            warp::reply::with_status(
+                warp::reply::json(&ErrResp {
+                    error: "Governance voting is unavailable until the governance engine is integrated.".into(),
+                }),
+                warp::http::StatusCode::NOT_IMPLEMENTED,
+            )
         })
 }
 
