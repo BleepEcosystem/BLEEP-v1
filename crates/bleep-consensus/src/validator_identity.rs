@@ -108,13 +108,7 @@ impl ValidatorIdentity {
         stake: u128,
         joined_epoch: u64,
     ) -> Result<Self, String> {
-        let mut identity = Self::new(
-            id,
-            kyber_public_key,
-            signing_key_id,
-            stake,
-            joined_epoch,
-        )?;
+        let mut identity = Self::new(id, kyber_public_key, signing_key_id, stake, joined_epoch)?;
         schnorrkel::PublicKey::from_bytes(&vrf_public_key)
             .map_err(|error| format!("Invalid proposer VRF public key: {error}"))?;
         identity.vrf_public_key = vrf_public_key;
@@ -304,6 +298,40 @@ impl fmt::Display for ValidatorState {
     }
 }
 
+pub fn validator_identity_from_stake_transaction(
+    transaction: &bleep_core::block::Transaction,
+    joined_epoch: u64,
+) -> Result<Option<ValidatorIdentity>, String> {
+    let Some(action) =
+        bleep_core::transaction::parse_validator_stake_receiver(&transaction.receiver)?
+    else {
+        return Ok(None);
+    };
+    if !transaction.verify_signature() {
+        return Err("Validator stake transaction signature is invalid".into());
+    }
+    let kyber_public_key =
+        bleep_crypto::pq_crypto::KyberPublicKey::from_bytes(action.kyber_public_key)
+            .and_then(|key| {
+                key.validate()?;
+                Ok(key.to_vec())
+            })
+            .map_err(|error| format!("Invalid validator stake Kyber key: {error}"))?;
+    let signing_key = transaction
+        .signature
+        .get(..bleep_core::block::SPHINCS_PK_LEN)
+        .ok_or_else(|| "Validator stake transaction is missing its signing key".to_string())?;
+    let identity = ValidatorIdentity::new_with_vrf_public_key(
+        bleep_core::transaction::validator_id(&action.label, transaction.timestamp),
+        kyber_public_key,
+        hex::encode(signing_key),
+        action.vrf_public_key,
+        u128::from(transaction.amount),
+        joined_epoch,
+    )?;
+    Ok(Some(identity))
+}
+
 /// Registry of all validators on the chain.
 ///
 /// SAFETY: This is the authoritative validator set.
@@ -396,6 +424,20 @@ impl ValidatorRegistry {
 
         self.validators.insert(validator.id.clone(), validator);
         Ok(())
+    }
+
+    pub fn register_stake_transaction(
+        &mut self,
+        transaction: &bleep_core::block::Transaction,
+        joined_epoch: u64,
+    ) -> Result<Option<String>, String> {
+        let Some(identity) = validator_identity_from_stake_transaction(transaction, joined_epoch)?
+        else {
+            return Ok(None);
+        };
+        let id = identity.id.clone();
+        self.register_validator(identity)?;
+        Ok(Some(id))
     }
 
     /// Get a validator by ID (immutable reference).
@@ -680,7 +722,9 @@ mod tests {
     #[test]
     fn validator_registry_snapshot_preserves_active_set_and_decay() {
         let mut registry = ValidatorRegistry::new();
-        registry.register_validator(create_test_identity("v1")).unwrap();
+        registry
+            .register_validator(create_test_identity("v1"))
+            .unwrap();
         registry.activate_validator("v1").unwrap();
         registry
             .apply_reputation_decay(0.5, 0.1)

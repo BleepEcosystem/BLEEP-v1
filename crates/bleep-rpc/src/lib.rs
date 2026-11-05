@@ -419,11 +419,6 @@ struct StakeResp {
     stake: u128,
 }
 #[derive(Serialize)]
-struct UnstakeResp {
-    validator_id: String,
-    status: String,
-}
-#[derive(Serialize)]
 struct EvidenceResp {
     accepted: bool,
     slash_amount: u128,
@@ -469,19 +464,32 @@ fn validator_stake_payload(
     )
 }
 
-fn register_validator_stake(
+fn create_validator_stake_transaction(
     req: StakeRequest,
     signing_public_key: Vec<u8>,
     proof: Vec<u8>,
     kyber_public_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
-    state: &RpcState,
-) -> Result<StakeResp, (warp::http::StatusCode, String)> {
-    let requested = u128::from(req.amount);
-    if requested == 0 {
+    chain_id: &str,
+    nonce: u64,
+) -> Result<bleep_core::transaction::ZKTransaction, (warp::http::StatusCode, String)> {
+    if req.amount == 0 {
         return Err((
             warp::http::StatusCode::BAD_REQUEST,
             "stake amount must be greater than zero".into(),
+        ));
+    }
+    if req.label.trim().is_empty()
+        || req.label.len() > 64
+        || !req
+            .label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || req.timestamp == 0
+    {
+        return Err((
+            warp::http::StatusCode::BAD_REQUEST,
+            "stake label and timestamp are invalid".into(),
         ));
     }
 
@@ -498,34 +506,8 @@ fn register_validator_stake(
         })?;
     let kyber_public_key = kyber_public_key.to_vec();
     let account = bleep_crypto::tx_signer::derive_account_address(&signing_public_key);
-    let validator_id = format!("val-{}-{}", req.label, req.timestamp);
-    let bond_account = format!("bleep:validator-bond:{validator_id}");
-    let (Some(state_manager), Some(registry), Some(blocks_per_epoch)) = (
-        &state.state_mgr,
-        &state.validator_registry,
-        state.blocks_per_epoch.filter(|v| *v > 0),
-    ) else {
-        return Err((
-            warp::http::StatusCode::SERVICE_UNAVAILABLE,
-            "staking state, validator registry, or genesis epoch configuration is unavailable"
-                .into(),
-        ));
-    };
-
-    let mut registry = registry.lock();
-    if registry.get(&validator_id).is_some() {
-        return Err((
-            warp::http::StatusCode::CONFLICT,
-            "validator is already registered".into(),
-        ));
-    }
-
-    let mut state_manager = state_manager.lock();
-    let nonce = state_manager.get_nonce(&account);
-    let chain_id = std::env::var("BLEEP_CHAIN_ID")
-        .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
     let request_hash = validator_stake_payload(
-        &chain_id,
+        chain_id,
         &account,
         bleep_crypto::tx_signer::ValidatorKeyBindings {
             label: &req.label,
@@ -543,43 +525,29 @@ fn register_validator_stake(
         ));
     }
 
-    let current_epoch = state
-        .chain_height
-        .load(std::sync::atomic::Ordering::Relaxed)
-        / blocks_per_epoch;
-    let signing_key_id = hex::encode(&signing_public_key);
-    let identity = ValidatorIdentity::new_with_vrf_public_key(
-        validator_id.clone(),
-        kyber_public_key,
-        signing_key_id,
-        vrf_public_key,
-        requested,
-        current_epoch,
-    )
-    .map_err(|error| (warp::http::StatusCode::BAD_REQUEST, error))?;
-
-    if state_manager.get_balance(&account) < requested {
+    let receiver = bleep_crypto::tx_signer::validator_stake_receiver(
+        &req.label,
+        &kyber_public_key,
+        &vrf_public_key,
+    );
+    let mut signature = signing_public_key;
+    signature.extend_from_slice(&proof);
+    let transaction = bleep_core::transaction::ZKTransaction {
+        chain_id: chain_id.to_string(),
+        sender: account,
+        receiver,
+        amount: req.amount,
+        timestamp: req.timestamp,
+        nonce,
+        signature,
+    };
+    if !transaction.verify_account_authorization() {
         return Err((
-            warp::http::StatusCode::PAYMENT_REQUIRED,
-            "insufficient balance to bond requested stake".into(),
+            warp::http::StatusCode::UNAUTHORIZED,
+            "validator stake transaction signature is invalid".into(),
         ));
     }
-    if !state_manager.apply_transfer(&account, &bond_account, requested, nonce, req.timestamp) {
-        return Err((
-            warp::http::StatusCode::BAD_REQUEST,
-            "stake debit failed (stale timestamp, nonce, or bond-account overflow)".into(),
-        ));
-    }
-
-    registry
-        .register_validator(identity)
-        .map_err(|error| (warp::http::StatusCode::CONFLICT, error))?;
-
-    Ok(StakeResp {
-        validator_id,
-        status: "candidate".into(),
-        stake: requested,
-    })
+    Ok(transaction)
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1075,23 +1043,73 @@ pub fn rpc_routes_with_state(
                     return Ok::<_, warp::Rejection>(resp);
                 }
 
-                match register_validator_stake(
-                    req,
+                let (Some(pool), Some(state_manager)) =
+                    (st.transaction_pool.as_ref(), st.state_mgr.as_ref())
+                else {
+                    let resp = warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "TransactionPool or StateManager unavailable".into(),
+                        }),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                    return Ok::<_, warp::Rejection>(resp);
+                };
+                let nonce = state_manager.lock().get_nonce(
+                    &bleep_crypto::tx_signer::derive_account_address(&signing_public_key),
+                );
+                let chain_id = std::env::var("BLEEP_CHAIN_ID")
+                    .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
+                let transaction = match create_validator_stake_transaction(
+                    req.clone(),
                     signing_public_key,
                     proof,
                     kyber_public_key,
                     vrf_public_key,
-                    &st,
+                    &chain_id,
+                    nonce,
                 ) {
-                    Ok(resp) => Ok::<_, warp::Rejection>(warp::reply::with_status(
-                        warp::reply::json(&resp),
-                        warp::http::StatusCode::CREATED,
-                    )),
-                    Err((status, error)) => Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrResp { error }),
-                        status,
-                    )),
+                    Ok(transaction) => transaction,
+                    Err((status, error)) => {
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&ErrResp { error }),
+                            status,
+                        ));
+                    }
+                };
+                let gossip_payload = match serde_json::to_vec(&transaction) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        log::error!("Failed to serialize validator stake transaction: {error}");
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            warp::reply::json(&ErrResp {
+                                error: "stake transaction serialization failed".into(),
+                            }),
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
+                    }
+                };
+                if !pool.add_transaction(transaction).await {
+                    return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "stake transaction failed pool validation".into(),
+                        }),
+                        warp::http::StatusCode::BAD_REQUEST,
+                    ));
                 }
+                if let Some(node) = st.p2p_node.as_ref() {
+                    node.broadcast(MessageType::Transaction, gossip_payload);
+                }
+                Ok::<_, warp::Rejection>(warp::reply::with_status(
+                    warp::reply::json(&StakeResp {
+                        validator_id: bleep_core::transaction::validator_id(
+                            &req.label,
+                            req.timestamp,
+                        ),
+                        status: "pending".into(),
+                        stake: u128::from(req.amount),
+                    }),
+                    warp::http::StatusCode::ACCEPTED,
+                ))
             },
         );
 
@@ -1136,36 +1154,13 @@ pub fn rpc_routes_with_state(
                     return Ok::<_, warp::Rejection>(resp);
                 }
 
-                match &st.validator_registry {
-                    None => {
-                        let resp = warp::reply::with_status(
-                            warp::reply::json(&ErrResp {
-                                error: "ValidatorRegistry unavailable".into(),
-                            }),
-                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                        );
-                        Ok::<_, warp::Rejection>(resp)
-                    }
-                    Some(reg_arc) => {
-                        let mut reg = reg_arc.lock();
-                        match reg.mark_validator_for_exit(&req.validator_id) {
-                            Ok(_) => Ok::<_, warp::Rejection>(warp::reply::with_status(
-                                warp::reply::json(&UnstakeResp {
-                                    validator_id: req.validator_id,
-                                    status: "pending_exit".into(),
-                                }),
-                                warp::http::StatusCode::OK,
-                            )),
-                            Err(e) => {
-                                let resp = warp::reply::with_status(
-                                    warp::reply::json(&ErrResp { error: e }),
-                                    warp::http::StatusCode::BAD_REQUEST,
-                                );
-                                Ok::<_, warp::Rejection>(resp)
-                            }
-                        }
-                    }
-                }
+                Ok::<_, warp::Rejection>(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "validator exit is unavailable until consensus-based unstaking is supported"
+                            .into(),
+                    }),
+                    warp::http::StatusCode::NOT_IMPLEMENTED,
+                ))
             },
         );
 
@@ -4374,8 +4369,8 @@ mod tests {
         assert_eq!(decode_escrow_proof(Some("a55a")), Ok(vec![0xA5, 0x5A]));
     }
 
-    #[test]
-    fn validator_stake_binds_kyber_key_and_bonds_without_activation() {
+    #[tokio::test]
+    async fn validator_stake_is_queued_as_a_signed_consensus_transaction() {
         use bleep_crypto::pq_crypto::KyberKem;
 
         let (signing_public_key, secret_key) = generate_tx_keypair();
@@ -4419,53 +4414,68 @@ mod tests {
             .lock()
             .set_balance(&account, 10_000)
             .expect("seed account balance");
-        let registry = Arc::new(Mutex::new(ValidatorRegistry::new()));
-        let state = RpcState::new()
-            .with_state_manager(Arc::clone(&state_manager))
-            .with_validator_registry(Arc::clone(&registry))
-            .with_blocks_per_epoch(100);
-        state
-            .chain_height
-            .store(250, std::sync::atomic::Ordering::Relaxed);
-
-        let error = match register_validator_stake(
+        let pool = TransactionPool::new_with_chain_id(10, bleep_crypto::DEFAULT_CHAIN_ID);
+        let error = create_validator_stake_transaction(
             req.clone(),
             signing_public_key.clone(),
             proof.clone(),
             substituted_key,
             vrf_public_key.clone(),
-            &state,
-        ) {
-            Ok(_) => panic!("a mismatched Kyber key must not register"),
-            Err(error) => error,
-        };
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            0,
+        )
+        .expect_err("a mismatched Kyber key must not produce a stake transaction");
         assert_eq!(error.0, warp::http::StatusCode::UNAUTHORIZED);
-        assert_eq!(state_manager.lock().get_balance(&account), 10_000);
-        assert_eq!(state_manager.lock().get_nonce(&account), 0);
-        assert_eq!(registry.lock().active_validator_count(), 0);
 
-        let response = register_validator_stake(
+        let transaction = create_validator_stake_transaction(
             req,
             signing_public_key,
             proof,
-            kyber_public_key,
+            kyber_public_key.clone(),
             vrf_public_key.clone(),
-            &state,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            0,
         )
         .unwrap();
-        let bond_account = format!("bleep:validator-bond:{}", response.validator_id);
-        assert_eq!(response.status, "candidate");
-        assert_eq!(response.stake, u128::from(amount));
-        assert_eq!(state_manager.lock().get_balance(&account), 7_000);
-        assert_eq!(state_manager.lock().get_balance(&bond_account), 3_000);
-        assert_eq!(state_manager.lock().get_nonce(&account), 1);
-
-        let registry = registry.lock();
-        let validator = registry.get(&response.validator_id).unwrap();
-        assert_eq!(validator.state, bleep_consensus::ValidatorState::Inactive);
-        assert_eq!(validator.vrf_public_key, vrf_public_key);
-        assert_eq!(validator.joined_epoch, 2);
-        assert_eq!(registry.active_validator_count(), 0);
+        assert!(transaction.verify_account_authorization());
+        assert_eq!(
+            transaction.receiver,
+            bleep_crypto::tx_signer::validator_stake_receiver(
+                "candidate-a",
+                &kyber_public_key,
+                &vrf_public_key,
+            )
+        );
+        let block_transaction = bleep_core::block::Transaction {
+            chain_id: transaction.chain_id.clone(),
+            sender: transaction.sender.clone(),
+            receiver: transaction.receiver.clone(),
+            amount: transaction.amount,
+            timestamp: transaction.timestamp,
+            nonce: transaction.nonce,
+            signature: transaction.signature.clone(),
+        };
+        assert_eq!(
+            bleep_core::transaction::transaction_execution_receiver(
+                &block_transaction.sender,
+                &block_transaction.receiver,
+                block_transaction.timestamp,
+            )
+            .unwrap(),
+            bleep_core::transaction::validator_bond_account("candidate-a", timestamp)
+        );
+        let identity =
+            bleep_consensus::validator_identity::validator_identity_from_stake_transaction(
+                &block_transaction,
+                0,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.id, format!("val-candidate-a-{timestamp}"));
+        assert!(pool.add_transaction(transaction).await);
+        assert_eq!(pool.peek_for_block(10).await.len(), 1);
+        assert_eq!(state_manager.lock().get_balance(&account), 10_000);
+        assert_eq!(state_manager.lock().get_nonce(&account), 0);
     }
 
     fn sign_pat_request<T: Serialize>(

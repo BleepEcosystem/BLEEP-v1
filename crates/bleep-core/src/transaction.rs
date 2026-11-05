@@ -109,6 +109,87 @@ pub struct ZKTransaction {
     pub signature: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatorStakeAction {
+    pub label: String,
+    pub kyber_public_key: Vec<u8>,
+    pub vrf_public_key: Vec<u8>,
+}
+
+const VALIDATOR_STAKE_RECEIVER_PREFIX: &str = "bleep:validator-stake:v1:";
+
+pub fn parse_validator_stake_receiver(
+    receiver: &str,
+) -> Result<Option<ValidatorStakeAction>, String> {
+    let Some(encoded) = receiver.strip_prefix(VALIDATOR_STAKE_RECEIVER_PREFIX) else {
+        return Ok(None);
+    };
+    let mut fields = encoded.split(':');
+    let label = fields
+        .next()
+        .and_then(|value| hex::decode(value).ok())
+        .and_then(|value| String::from_utf8(value).ok())
+        .filter(|value| {
+            !value.trim().is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        .ok_or_else(|| "invalid validator stake label".to_string())?;
+    let kyber_public_key = fields
+        .next()
+        .and_then(|value| hex::decode(value).ok())
+        .filter(|value| value.len() == 1568)
+        .ok_or_else(|| "invalid validator stake Kyber key".to_string())?;
+    let vrf_public_key = fields
+        .next()
+        .and_then(|value| hex::decode(value).ok())
+        .ok_or_else(|| "invalid validator stake VRF key encoding".to_string())?;
+    if fields.next().is_some() || vrf_public_key.len() != 32 {
+        return Err("invalid validator stake receiver encoding".into());
+    }
+
+    let canonical = bleep_crypto::tx_signer::validator_stake_receiver(
+        &label,
+        &kyber_public_key,
+        &vrf_public_key,
+    );
+    if canonical != receiver {
+        return Err("non-canonical validator stake receiver".into());
+    }
+
+    Ok(Some(ValidatorStakeAction {
+        label,
+        kyber_public_key,
+        vrf_public_key,
+    }))
+}
+
+pub fn validator_bond_account(label: &str, timestamp: u64) -> String {
+    format!("bleep:validator-bond:val-{label}-{timestamp}")
+}
+
+pub fn validator_id(label: &str, timestamp: u64) -> String {
+    format!("val-{label}-{timestamp}")
+}
+
+pub fn transaction_execution_receiver(
+    sender: &str,
+    receiver: &str,
+    timestamp: u64,
+) -> Result<String, String> {
+    match parse_validator_stake_receiver(receiver)? {
+        Some(action) => Ok(validator_bond_account(&action.label, timestamp)),
+        None => {
+            if sender == receiver {
+                return Err(format!("Self-transfer rejected for {sender}"));
+            }
+            Ok(receiver.to_string())
+        }
+    }
+}
+
 impl ZKTransaction {
     /// Creates a new ZKP transaction and signs it with quantum-safe signature (SPHINCS+)
     pub fn new(sender: &str, receiver: &str, amount: u64, quantum_secure: &QuantumSecure) -> Self {
@@ -145,14 +226,29 @@ impl ZKTransaction {
         if !bleep_crypto::account_address_matches_public_key(&self.sender, pk_bytes) {
             return false;
         }
-        let payload = bleep_crypto::tx_payload(
-            &self.chain_id,
-            &self.sender,
-            &self.receiver,
-            self.amount,
-            self.timestamp,
-            self.nonce,
-        );
+        let payload = match parse_validator_stake_receiver(&self.receiver) {
+            Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload(
+                &self.chain_id,
+                &self.sender,
+                bleep_crypto::tx_signer::ValidatorKeyBindings {
+                    label: &action.label,
+                    kyber_public_key: &action.kyber_public_key,
+                    vrf_public_key: &action.vrf_public_key,
+                },
+                self.amount,
+                self.timestamp,
+                self.nonce,
+            ),
+            Ok(None) => bleep_crypto::tx_signer::tx_payload(
+                &self.chain_id,
+                &self.sender,
+                &self.receiver,
+                self.amount,
+                self.timestamp,
+                self.nonce,
+            ),
+            Err(_) => return false,
+        };
         bleep_crypto::verify_tx_signature_for_address(&payload, sig_bytes, pk_bytes, &self.sender)
     }
 }

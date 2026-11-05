@@ -46,8 +46,8 @@ bleep-rpc
 | `GET` | `/rpc/health` | Node status, height, and configured chain ID |
 | `GET` | `/rpc/state/{address}` | Live balance & nonce |
 | `GET` | `/rpc/proof/{address}` | Sparse Merkle inclusion proof |
-| `POST` | `/rpc/validator/stake` | Register / increase stake |
-| `POST` | `/rpc/validator/unstake` | Initiate graceful exit |
+| `POST` | `/rpc/validator/stake` | Queue a signed stake transaction for block inclusion |
+| `POST` | `/rpc/validator/unstake` | Not implemented; returns `501` until consensus-based exits are supported |
 | `GET` | `/rpc/validator/list` | Active validator set |
 | `GET` | `/rpc/validator/status/{id}` | Validator detail + slashing history |
 | `POST` | `/rpc/validator/evidence` | Submit slashing evidence |

@@ -540,6 +540,36 @@ impl BlockProducer {
         // (pending_index, gas, vm_accepted, state_diff)
 
         for (idx, zt) in pending.iter().enumerate() {
+            let block_tx = Transaction {
+                chain_id: zt.chain_id.clone(),
+                sender: zt.sender.clone(),
+                receiver: zt.receiver.clone(),
+                amount: zt.amount,
+                timestamp: zt.timestamp,
+                nonce: zt.nonce,
+                signature: zt.signature.clone(),
+            };
+            match bleep_core::transaction::parse_validator_stake_receiver(&zt.receiver) {
+                Ok(Some(_)) => {
+                    let valid =
+                        crate::validator_identity::validator_identity_from_stake_transaction(
+                            &block_tx,
+                            next_height / self.blocks_per_epoch,
+                        )
+                        .is_ok();
+                    vm_results.push((idx, 0, valid, StateDiff::empty()));
+                    continue;
+                }
+                Err(error) => {
+                    warn!(
+                        "[BlockProducer] Invalid validator stake transaction from {}: {}",
+                        zt.sender, error
+                    );
+                    vm_results.push((idx, 0, false, StateDiff::empty()));
+                    continue;
+                }
+                Ok(None) => {}
+            }
             let from_bytes = vm_account_bytes(&zt.sender);
             let to_bytes = vm_account_bytes(&zt.receiver);
 
@@ -581,6 +611,10 @@ impl BlockProducer {
         let mut block_txs: Vec<Transaction> = Vec::with_capacity(tx_count);
         let mut failed_tx_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut total_gas: u64 = 0;
+        let mut staged_validator_registry = self
+            .validator_registry
+            .as_ref()
+            .map(|registry| registry.lock().clone());
         {
             let mut state = self.state.lock();
             for (idx, gas, vm_ok, diff) in &vm_results {
@@ -599,10 +633,70 @@ impl BlockProducer {
                     continue;
                 }
 
+                let execution_receiver =
+                    match bleep_core::transaction::transaction_execution_receiver(
+                        &zt.sender,
+                        &zt.receiver,
+                        zt.timestamp,
+                    ) {
+                        Ok(receiver) => receiver,
+                        Err(error) => {
+                            warn!("[BlockProducer] Invalid transaction receiver: {error}");
+                            failed_tx_ids.insert(Self::canonical_tx_id(zt));
+                            continue;
+                        }
+                    };
+                let block_tx = Transaction {
+                    chain_id: zt.chain_id.clone(),
+                    sender: zt.sender.clone(),
+                    receiver: zt.receiver.clone(),
+                    amount: zt.amount,
+                    timestamp: zt.timestamp,
+                    nonce: zt.nonce,
+                    signature: zt.signature.clone(),
+                };
+                let is_stake_transaction =
+                    match bleep_core::transaction::parse_validator_stake_receiver(&zt.receiver) {
+                        Ok(action) => action.is_some(),
+                        Err(error) => {
+                            warn!("[BlockProducer] Invalid validator stake action: {error}");
+                            failed_tx_ids.insert(Self::canonical_tx_id(zt));
+                            continue;
+                        }
+                    };
+                if is_stake_transaction && staged_validator_registry.is_none() {
+                    warn!(
+                        "[BlockProducer] Cannot process validator stake transaction without the consensus registry"
+                    );
+                    failed_tx_ids.insert(Self::canonical_tx_id(zt));
+                    continue;
+                }
+                if let Some(registry) = staged_validator_registry.as_ref() {
+                    match crate::validator_identity::validator_identity_from_stake_transaction(
+                        &block_tx,
+                        next_height / self.blocks_per_epoch,
+                    ) {
+                        Ok(Some(identity)) if registry.get(&identity.id).is_some() => {
+                            warn!(
+                                "[BlockProducer] Validator {} is already registered",
+                                identity.id
+                            );
+                            failed_tx_ids.insert(Self::canonical_tx_id(zt));
+                            continue;
+                        }
+                        Err(error) => {
+                            warn!("[BlockProducer] Invalid validator stake: {error}");
+                            failed_tx_ids.insert(Self::canonical_tx_id(zt));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Path 1: native transfer (sender → receiver, exact amount)
                 let ok = state.apply_transfer(
                     &zt.sender,
-                    &zt.receiver,
+                    &execution_receiver,
                     zt.amount as u128,
                     zt.nonce,
                     zt.timestamp,
@@ -615,6 +709,14 @@ impl BlockProducer {
                     // Track this failed tx for removal from pool
                     failed_tx_ids.insert(Self::canonical_tx_id(zt));
                     continue;
+                }
+
+                if let Some(registry) = staged_validator_registry.as_mut() {
+                    if let Err(error) = registry
+                        .register_stake_transaction(&block_tx, next_height / self.blocks_per_epoch)
+                    {
+                        return Err(format!("Validator stake registration failed: {error}"));
+                    }
                 }
 
                 // Path 2: apply any additional VM-produced balance deltas.
@@ -817,6 +919,24 @@ impl BlockProducer {
                     .err()
                     .unwrap_or_else(|| "proposal abandoned".to_string())
             ));
+        }
+
+        if let (Some(registry), Some(staged_registry)) =
+            (self.validator_registry.as_ref(), staged_validator_registry)
+        {
+            let snapshot = staged_registry.to_persistent_bytes().map_err(|error| {
+                format!("Validator registry serialization after block commit failed: {error}")
+            })?;
+            *registry.lock() = staged_registry;
+            if let Err(error) = self.state.lock().put_application_data(
+                crate::validator_identity::VALIDATOR_REGISTRY_STORAGE_KEY,
+                &snapshot,
+            ) {
+                error!(
+                    "[BlockProducer] Validator registry persistence failed after committed staking transaction: {}",
+                    error
+                );
+            }
         }
 
         // Inbound validators require each transaction's full signature. Until

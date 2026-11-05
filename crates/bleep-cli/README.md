@@ -105,8 +105,8 @@ Manage validator staking and monitoring.
 
 | Subcommand | Description |
 |------------|-------------|
-| `validator stake --amount <n>` | Register as a validator / increase stake |
-| `validator unstake --amount <n>` | Initiate stake withdrawal |
+| `validator stake --amount <n>` | Queue a signed validator stake transaction |
+| `validator unstake --amount <n>` | Currently unavailable until consensus-based exits are supported |
 | `validator list` | List all active validators and their stakes |
 | `validator status` | Show own validator status and slashing history |
 

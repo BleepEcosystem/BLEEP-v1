@@ -59,12 +59,14 @@ impl BlockchainState {
         let state_manager = state_manager.lock();
         let mut staged = HashMap::new();
         for tx in &block.transactions {
-            if tx.sender == tx.receiver {
-                return Err(format!("Self-transfer rejected for {}", tx.sender));
-            }
             if tx.amount == 0 {
                 return Err("Zero-amount transaction rejected".to_string());
             }
+            let receiver = crate::transaction::transaction_execution_receiver(
+                &tx.sender,
+                &tx.receiver,
+                tx.timestamp,
+            )?;
             let sender_balance = match staged.get(&tx.sender) {
                 Some(balance) => *balance,
                 None => u64::try_from(state_manager.get_balance(&tx.sender)).map_err(|error| {
@@ -77,19 +79,16 @@ impl BlockchainState {
                     tx.sender, sender_balance, tx.amount
                 )
             })?;
-            let receiver_balance = match staged.get(&tx.receiver) {
+            let receiver_balance = match staged.get(&receiver) {
                 Some(balance) => *balance,
-                None => {
-                    u64::try_from(state_manager.get_balance(&tx.receiver)).map_err(|error| {
-                        format!("balance for {} does not fit u64: {error}", tx.receiver)
-                    })?
-                }
+                None => u64::try_from(state_manager.get_balance(&receiver))
+                    .map_err(|error| format!("balance for {receiver} does not fit u64: {error}"))?,
             };
             let next_receiver = receiver_balance
                 .checked_add(tx.amount)
-                .ok_or_else(|| format!("Balance overflow for {}", tx.receiver))?;
+                .ok_or_else(|| format!("Balance overflow for {receiver}"))?;
             staged.insert(tx.sender.clone(), next_sender);
-            staged.insert(tx.receiver.clone(), next_receiver);
+            staged.insert(receiver, next_receiver);
         }
         log::debug!(
             "Block {} preflighted: {} transactions, {} accounts touched",

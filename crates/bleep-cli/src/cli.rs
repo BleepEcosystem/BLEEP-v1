@@ -1394,10 +1394,7 @@ fn uuid_now() -> String {
 
 // ── Validator / Staking RPC helpers (Sprint 6) ────────────────────────────────
 
-/// POST /rpc/validator/stake — broadcast a stake transaction.
-///
-/// The node's `InboundBlockHandler` receives this, validates the signature,
-/// and registers the validator in `ValidatorRegistry`.
+/// POST /rpc/validator/stake — queue a signed stake transaction for block inclusion.
 async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
     #[derive(serde::Serialize)]
     struct StakeRequest {

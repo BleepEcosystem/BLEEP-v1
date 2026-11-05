@@ -186,8 +186,7 @@ fn verify_pos_vrf_block(
     parent: &Block,
     active_validators: &[ValidatorIdentity],
 ) -> Result<(), String> {
-    if block.index != parent.index.saturating_add(1)
-        || block.previous_hash != parent.compute_hash()
+    if block.index != parent.index.saturating_add(1) || block.previous_hash != parent.compute_hash()
     {
         return Err("Block does not extend the supplied parent".into());
     }
@@ -1017,8 +1016,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         );
 
         for validator in validator_registry.lock().get_all_validators() {
-            rt.register_validator(validator.id.as_bytes().to_vec(), validator.effective_stake())
-                .map_err(|error| format!("Economics validator initialization failed: {error}"))?;
+            rt.register_validator(
+                validator.id.as_bytes().to_vec(),
+                validator.effective_stake(),
+            )
+            .map_err(|error| format!("Economics validator initialization failed: {error}"))?;
         }
 
         info!(
@@ -1768,8 +1770,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 );
                                 continue;
                             };
-                            let Some(parent) =
-                                inbound_blockchain.read().unwrap().latest_block()
+                            let Some(parent) = inbound_blockchain.read().unwrap().latest_block()
                             else {
                                 continue;
                             };
@@ -1820,8 +1821,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 .map(|validator| validator.vrf_public_key.as_slice());
                             if !proposer_vrf_public_key.is_some_and(|public_key| {
                                 bleep_consensus::pos_engine::PoSConsensusEngine::verify_block_vrf(
-                                    block,
-                                    public_key,
+                                    block, public_key,
                                 )
                                 .is_ok()
                             }) {
@@ -1836,8 +1836,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 let Some(tip) = chain.latest_block() else {
                                     continue;
                                 };
+                                let mut staged_registry = inbound_validators.lock().clone();
+                                let stake_transactions_valid =
+                                    block.transactions.iter().all(|tx| {
+                                        staged_registry
+                                            .register_stake_transaction(tx, block.epoch_id)
+                                            .is_ok()
+                                    });
                                 if verify_pos_vrf_block(block, &tip, &active_validators).is_err()
                                     || block.index != tip.index.saturating_add(1)
+                                    || !stake_transactions_valid
                                     || !BlockValidator::validate_full_block_with_validator_set(
                                         &tip,
                                         block,
@@ -1932,9 +1940,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let Some(parent) = parent else {
                         continue;
                     };
-                    if let Err(error) =
-                        verify_pos_vrf_block(&block, &parent, &active_validators)
-                    {
+                    if let Err(error) = verify_pos_vrf_block(&block, &parent, &active_validators) {
                         warn!(
                             "[InboundBlockHandler] Block {} has invalid proposer VRF: {}",
                             block.index, error
@@ -1972,6 +1978,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     if already_have {
                         continue; // already at this height or ahead
                     }
+                    let mut staged_validator_registry = inbound_validators.lock().clone();
+                    let mut stake_registry_valid = true;
+                    for transaction in &block.transactions {
+                        if let Err(error) = staged_validator_registry
+                            .register_stake_transaction(transaction, block.epoch_id)
+                        {
+                            warn!(
+                                "[InboundBlockHandler] Block {} has invalid validator stake: {}",
+                                block.index, error
+                            );
+                            stake_registry_valid = false;
+                            break;
+                        }
+                    }
+                    if !stake_registry_valid {
+                        continue;
+                    }
 
                     // Insert validated block
                     let _canonical_guard = inbound_commit_lock.lock().await;
@@ -1999,17 +2022,36 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 continue;
                             }
                             let mut state = inbound_state.lock();
-                            let transfers: Vec<bleep_state::state_manager::CanonicalTransfer> =
-                                block
-                                    .transactions
-                                    .iter()
-                                    .map(|tx| bleep_state::state_manager::CanonicalTransfer {
+                            let transfers: Result<
+                                Vec<bleep_state::state_manager::CanonicalTransfer>,
+                                String,
+                            > = block
+                                .transactions
+                                .iter()
+                                .map(|tx| {
+                                    Ok(bleep_state::state_manager::CanonicalTransfer {
                                         sender: tx.sender.clone(),
-                                        receiver: tx.receiver.clone(),
+                                        receiver:
+                                            bleep_core::transaction::transaction_execution_receiver(
+                                                &tx.sender,
+                                                &tx.receiver,
+                                                tx.timestamp,
+                                            )?,
                                         amount: tx.amount,
                                         nonce: tx.nonce,
                                     })
-                                    .collect();
+                                })
+                                .collect();
+                            let transfers = match transfers {
+                                Ok(transfers) => transfers,
+                                Err(error) => {
+                                    warn!(
+                                        "[InboundBlockHandler] Block {} has invalid transaction action: {}",
+                                        block.index, error
+                                    );
+                                    continue;
+                                }
+                            };
                             match state.apply_canonical_block(
                                 &block,
                                 bleep_state::state_manager::CanonicalBlockContext {
@@ -2038,10 +2080,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     };
 
                     if accepted {
-                        if let Err(error) = persist_validator_registry(
-                            &inbound_registry_state,
-                            &inbound_validators,
-                        ) {
+                        *inbound_validators.lock() = staged_validator_registry;
+                        if let Err(error) =
+                            persist_validator_registry(&inbound_registry_state, &inbound_validators)
+                        {
                             error!(
                                 "[InboundBlockHandler] Validator registry persistence failed: {}",
                                 error

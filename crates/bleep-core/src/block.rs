@@ -96,14 +96,29 @@ impl Transaction {
         if !bleep_crypto::account_address_matches_public_key(&self.sender, pk_bytes) {
             return false;
         }
-        let payload = tx_payload(
-            &self.chain_id,
-            &self.sender,
-            &self.receiver,
-            self.amount,
-            self.timestamp,
-            self.nonce,
-        );
+        let payload = match crate::transaction::parse_validator_stake_receiver(&self.receiver) {
+            Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload(
+                &self.chain_id,
+                &self.sender,
+                bleep_crypto::tx_signer::ValidatorKeyBindings {
+                    label: &action.label,
+                    kyber_public_key: &action.kyber_public_key,
+                    vrf_public_key: &action.vrf_public_key,
+                },
+                self.amount,
+                self.timestamp,
+                self.nonce,
+            ),
+            Ok(None) => tx_payload(
+                &self.chain_id,
+                &self.sender,
+                &self.receiver,
+                self.amount,
+                self.timestamp,
+                self.nonce,
+            ),
+            Err(_) => return false,
+        };
         verify_tx_signature_for_address(&payload, sig_bytes, pk_bytes, &self.sender)
     }
 }

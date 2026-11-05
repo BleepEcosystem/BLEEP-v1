@@ -183,6 +183,22 @@ pub struct ValidatorKeyBindings<'a> {
     pub vrf_public_key: &'a [u8],
 }
 
+/// Encode validator registration metadata into the transaction receiver field.
+/// The transaction signature commits to the label and hashes of both keys;
+/// embedding the keys lets every block validator reconstruct the registration.
+pub fn validator_stake_receiver(
+    label: &str,
+    kyber_public_key: &[u8],
+    vrf_public_key: &[u8],
+) -> String {
+    format!(
+        "bleep:validator-stake:v1:{}:{}:{}",
+        hex::encode(label.as_bytes()),
+        hex::encode(kyber_public_key),
+        hex::encode(vrf_public_key)
+    )
+}
+
 pub fn validator_stake_payload(
     chain_id: &str,
     sender: &str,

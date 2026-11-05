@@ -178,9 +178,7 @@ impl TransactionPool {
         let max_age_secs = max_age.num_seconds().max(0) as u64;
         let mut pool = self.pool.lock().await;
         let before = pool.len();
-        pool.retain(|tx| {
-            tx.timestamp <= now && now.saturating_sub(tx.timestamp) <= max_age_secs
-        });
+        pool.retain(|tx| tx.timestamp <= now && now.saturating_sub(tx.timestamp) <= max_age_secs);
         before - pool.len()
     }
 
@@ -254,10 +252,7 @@ mod tests {
             transaction(now.saturating_add(60)),
         ]);
 
-        assert_eq!(
-            pool.prune_expired(chrono::Duration::seconds(60)).await,
-            2
-        );
+        assert_eq!(pool.prune_expired(chrono::Duration::seconds(60)).await, 2);
         assert_eq!(pool.pool_size().await, 1);
     }
 
