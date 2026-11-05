@@ -4417,6 +4417,37 @@ mod tests {
         assert_eq!(vote.status(), warp::http::StatusCode::NOT_IMPLEMENTED);
     }
 
+    #[tokio::test]
+    async fn layer3_routes_report_not_implemented_without_a_bridge_backend() {
+        let state = Arc::new(RpcState::new());
+
+        let intents = request()
+            .method("GET")
+            .path("/rpc/layer3/intents")
+            .reply(&layer3_intents_route(Arc::clone(&state)))
+            .await;
+        assert_eq!(intents.status(), warp::http::StatusCode::NOT_IMPLEMENTED);
+
+        let submit = request()
+            .method("POST")
+            .path("/rpc/layer3/intent")
+            .json(&serde_json::json!({
+                "sender": "sender",
+                "recipient": "recipient",
+                "amount": 100
+            }))
+            .reply(&layer3_intent_submit_route(state))
+            .await;
+        assert_eq!(submit.status(), warp::http::StatusCode::NOT_IMPLEMENTED);
+        let submit_body: serde_json::Value =
+            serde_json::from_slice(submit.body()).expect("valid intent error JSON");
+        assert_eq!(
+            submit_body["error"],
+            "Layer 3 bridge intent submission is unavailable until a bridge backend is integrated."
+        );
+        assert!(submit_body.get("intent_id").is_none());
+    }
+
     #[test]
     fn escrow_proof_input_has_no_placeholder_fallback() {
         assert_eq!(decode_escrow_proof(None), Err("MissingEscrowProof"));
@@ -5526,66 +5557,39 @@ pub fn governance_vote_route(
 }
 
 // ── GET /rpc/layer3/intents ──────────────────────────────────────────────────
-// Returns pending and recent Layer 3 ZK bridge intents.
+// Intent state is unavailable until a Layer 3 bridge backend is integrated.
 
 pub fn layer3_intents_route(
-    state: Arc<RpcState>,
+    _state: Arc<RpcState>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let st = Arc::clone(&state);
     warp::path!("rpc" / "layer3" / "intents")
         .and(warp::get())
-        .map(move || {
-            let height = st.chain_height.load(std::sync::atomic::Ordering::Relaxed);
-            let json = serde_json::json!({
-                "chain_height":      height,
-                "srs_id":            "bleep-stark-transparent-v1",
-                "l3_contract":       "0xBLEEPL3Bridge_Sepolia_Testnet",
-                "proof_size_bytes":  192,
-                "batch_size":        32,
-                "avg_prove_ms":      850,
-                "intents": [],
-                "pending":  0,
-                "finalized": 0,
-                "status":    "live"
-            });
-            warp::reply::json(&json)
+        .map(|| {
+            warp::reply::with_status(
+                warp::reply::json(&ErrResp {
+                    error: "Layer 3 bridge intents are unavailable until a bridge backend is integrated.".into(),
+                }),
+                warp::http::StatusCode::NOT_IMPLEMENTED,
+            )
         })
 }
 
 // ── POST /rpc/layer3/intent ──────────────────────────────────────────────────
-// Submit a new Layer 3 ZK bridge intent.
+// Intent submission is unavailable until a Layer 3 bridge backend is integrated.
 
 pub fn layer3_intent_submit_route(
-    state: Arc<RpcState>,
+    _state: Arc<RpcState>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let _st = Arc::clone(&state);
     warp::path!("rpc" / "layer3" / "intent")
         .and(warp::post())
         .and(limited_json_body())
-        .map(move |body: serde_json::Value| {
-            let sender = body
-                .get("sender")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let recipient = body
-                .get("recipient")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let amount = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
-            let seed = sender
-                .bytes()
-                .fold(0u64, |a, b| a.wrapping_add(b as u64))
-                .wrapping_add(amount);
-            let intent_id = format!("{:064x}", seed.wrapping_mul(0x9e3779b97f4a7c15));
-            warp::reply::json(&serde_json::json!({
-                "intent_id":   intent_id,
-                "sender":      sender,
-                "recipient":   recipient,
-                "amount":      amount,
-                "state":       "Initiated",
-                "proof_eta_ms": 850,
-                "srs_id":      "bleep-stark-transparent-v1"
-            }))
+        .map(|_body: serde_json::Value| {
+            warp::reply::with_status(
+                warp::reply::json(&ErrResp {
+                    error: "Layer 3 bridge intent submission is unavailable until a bridge backend is integrated.".into(),
+                }),
+                warp::http::StatusCode::NOT_IMPLEMENTED,
+            )
         })
 }
 
