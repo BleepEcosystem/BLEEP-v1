@@ -6,6 +6,14 @@ use rayon::prelude::*;
 pub struct BlockValidator;
 
 impl BlockValidator {
+    fn validate_transaction_protocol(block: &Block) -> bool {
+        block.protocol_version < crate::block::FEE_TRANSACTION_PROTOCOL_VERSION
+            || block
+                .transactions
+                .iter()
+                .all(|transaction| transaction.version == 2 && transaction.fee > 0)
+    }
+
     /// **Validate block integrity (SPHINCS+ signature + extended STARK)**
     ///
     /// SAFETY: Rejects blocks with invalid signatures or ZK proofs.
@@ -304,6 +312,14 @@ impl BlockValidator {
             log::error!("Block {} has an invalid chain ID", block.index);
             return false;
         }
+        if !Self::validate_transaction_protocol(block) {
+            log::error!(
+                "Block {} contains a legacy or fee-free transaction under protocol {}",
+                block.index,
+                block.protocol_version
+            );
+            return false;
+        }
 
         // Step 1: Verify block signature
         if !Self::validate_block(block, public_key) {
@@ -347,6 +363,14 @@ impl BlockValidator {
             log::error!("Block {} has an invalid chain ID", block.index);
             return false;
         }
+        if !Self::validate_transaction_protocol(block) {
+            log::error!(
+                "Block {} contains a legacy or fee-free transaction under protocol {}",
+                block.index,
+                block.protocol_version
+            );
+            return false;
+        }
 
         if !Self::validate_block_with_validator_set(block, validator_keys) {
             log::error!(
@@ -381,10 +405,12 @@ mod tests {
             timestamp: 1,
             chain_id: "test-chain".to_string(),
             transactions: vec![Transaction {
+                version: 1,
                 chain_id: "test-chain".to_string(),
                 sender: "alice".to_string(),
                 receiver: "bob".to_string(),
                 amount: 5,
+                fee: 0,
                 timestamp: 1,
                 nonce: 0,
                 signature: vec![],
@@ -435,6 +461,28 @@ mod tests {
             &block,
             &[0; crate::block::SPHINCS_PK_LEN]
         ));
+    }
+
+    #[test]
+    fn fee_transaction_fork_rejects_legacy_and_zero_fee_transactions() {
+        let mut block = Block::new(1, vec![], "prev".into());
+        block.protocol_version = crate::block::FEE_TRANSACTION_PROTOCOL_VERSION;
+        block.transactions.push(Transaction {
+            version: 1,
+            chain_id: block.chain_id.clone(),
+            sender: "alice".into(),
+            receiver: "bob".into(),
+            amount: 1,
+            fee: 0,
+            timestamp: 1,
+            nonce: 0,
+            signature: vec![],
+        });
+        assert!(!BlockValidator::validate_transaction_protocol(&block));
+
+        block.transactions[0].version = 2;
+        block.transactions[0].fee = 1;
+        assert!(BlockValidator::validate_transaction_protocol(&block));
     }
 
     #[test]

@@ -1,7 +1,13 @@
 use crate::block::{SPHINCS_PK_LEN, SPHINCS_SIG_LEN};
-use crate::transaction::ZKTransaction;
+use crate::transaction::{
+    compare_fee_priority, pending_admission_allowed, transaction_size, ZKTransaction,
+    MAX_POOL_BYTES, MIN_TRANSACTION_FEE,
+};
+use bleep_state::state_manager::StateManager;
+use parking_lot::Mutex as StateMutex;
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -18,6 +24,8 @@ pub struct Mempool {
     chain_id: String,
     sender_public_key: Arc<SenderPublicKeyResolver>,
     max_entries: usize,
+    state: Option<Arc<StateMutex<StateManager>>>,
+    pool_bytes: AtomicUsize,
 }
 
 impl Mempool {
@@ -26,10 +34,19 @@ impl Mempool {
         chain_id: impl Into<String>,
         sender_public_key: impl Fn(&str, &[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
     ) -> Arc<Self> {
+        Self::new_with_state(chain_id, sender_public_key, None)
+    }
+
+    pub fn new_with_state(
+        chain_id: impl Into<String>,
+        sender_public_key: impl Fn(&str, &[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+        state: Option<Arc<StateMutex<StateManager>>>,
+    ) -> Arc<Self> {
         Self::with_capacity(
             chain_id.into(),
             Arc::new(sender_public_key),
             MAX_MEMPOOL_ENTRIES,
+            state,
         )
     }
 
@@ -37,6 +54,7 @@ impl Mempool {
         chain_id: String,
         sender_public_key: Arc<SenderPublicKeyResolver>,
         max_entries: usize,
+        state: Option<Arc<StateMutex<StateManager>>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             transactions: Mutex::new(HashMap::new()),
@@ -44,6 +62,8 @@ impl Mempool {
             chain_id,
             sender_public_key,
             max_entries,
+            state,
+            pool_bytes: AtomicUsize::new(0),
         })
     }
 
@@ -67,6 +87,10 @@ impl Mempool {
         }
         if transaction.amount == 0 {
             log::error!("Transaction validation failed: zero amount");
+            return false;
+        }
+        if transaction.version != 2 || transaction.fee < MIN_TRANSACTION_FEE {
+            log::warn!("Transaction validation failed: non-fee-bearing transaction version");
             return false;
         }
         if transaction.sender == transaction.receiver {
@@ -101,11 +125,12 @@ impl Mempool {
             return false;
         }
 
-        let payload = bleep_crypto::tx_signer::tx_payload(
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
             &transaction.chain_id,
             &transaction.sender,
             &transaction.receiver,
             transaction.amount,
+            transaction.fee,
             transaction.timestamp,
             transaction.nonce,
         );
@@ -127,14 +152,61 @@ impl Mempool {
             log::warn!("Attempting to add duplicate transaction: {}", tx_id);
             return false;
         }
-        if transactions.len() >= self.max_entries || seen_transactions.len() >= self.max_entries {
-            log::warn!(
-                "Mempool at capacity ({}), rejecting transaction",
-                self.max_entries
-            );
+        let Some(state) = self.state.as_ref() else {
+            log::warn!("Mempool rejected transaction: state-backed admission unavailable");
+            return false;
+        };
+        let state = state.lock();
+        let sender_pending: Vec<_> = transactions
+            .values()
+            .filter(|tx| tx.sender == transaction.sender)
+            .cloned()
+            .collect();
+        if !pending_admission_allowed(&state, &sender_pending, &transaction) {
+            log::warn!("Mempool rejected transaction: balance, nonce, or sender limit failed");
             return false;
         }
 
+        if self.max_entries == 0 {
+            return false;
+        }
+        let transaction_bytes = transaction_size(&transaction);
+        if transaction_bytes > MAX_POOL_BYTES {
+            return false;
+        }
+        let mut projected_count = transactions.len().saturating_add(1);
+        let mut projected_bytes = self
+            .pool_bytes
+            .load(Ordering::Relaxed)
+            .saturating_add(transaction_bytes);
+        let mut lowest_transactions: Vec<_> = transactions.iter().collect();
+        lowest_transactions.sort_by(|(_, left), (_, right)| compare_fee_priority(left, right));
+        let mut evicted_ids = Vec::new();
+        for (lowest_id, lowest) in lowest_transactions {
+            if projected_count <= self.max_entries && projected_bytes <= MAX_POOL_BYTES {
+                break;
+            }
+            if compare_fee_priority(&transaction, lowest) != std::cmp::Ordering::Greater {
+                return false;
+            }
+            evicted_ids.push(lowest_id.clone());
+            projected_count -= 1;
+            projected_bytes = projected_bytes.saturating_sub(transaction_size(lowest));
+        }
+        if projected_count > self.max_entries || projected_bytes > MAX_POOL_BYTES {
+            return false;
+        }
+        for lowest_id in evicted_ids {
+            let evicted = transactions
+                .remove(&lowest_id)
+                .expect("planned transaction eviction");
+            seen_transactions.remove(&evicted.get_hash());
+            self.pool_bytes
+                .fetch_sub(transaction_size(&evicted), Ordering::Relaxed);
+        }
+
+        self.pool_bytes
+            .fetch_add(transaction_bytes, Ordering::Relaxed);
         seen_transactions.insert(tx_id.clone());
         transactions.insert(tx_id, transaction);
         log::debug!(
@@ -148,7 +220,10 @@ impl Mempool {
     pub async fn remove_transaction(&self, tx_id: &str) {
         let mut transactions = self.transactions.lock().await;
         let mut seen_transactions = self.seen_transactions.lock().await;
-        transactions.remove(tx_id);
+        if let Some(transaction) = transactions.remove(tx_id) {
+            self.pool_bytes
+                .fetch_sub(transaction_size(&transaction), Ordering::Relaxed);
+        }
         seen_transactions.remove(tx_id);
     }
 
@@ -169,6 +244,12 @@ impl Mempool {
         let now = chrono::Utc::now().timestamp().max(0) as u64;
         let mut transactions = self.transactions.lock().await;
         transactions.retain(|_, tx| tx.timestamp.saturating_add(600) > now);
+        self.pool_bytes.store(
+            transactions.values().fold(0usize, |total, tx| {
+                total.saturating_add(transaction_size(tx))
+            }),
+            Ordering::Relaxed,
+        );
         let mut seen_transactions = self.seen_transactions.lock().await;
         seen_transactions.retain(|tx_id| transactions.contains_key(tx_id));
     }
@@ -184,14 +265,35 @@ impl ZKTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+    use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload};
+
+    fn test_state() -> StateManager {
+        static NEXT_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "bleep-mempool-test-{}-{}",
+            std::process::id(),
+            NEXT_STATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        StateManager::open(path).expect("open test state")
+    }
 
     fn mempool_with_capacity(max_entries: usize) -> Arc<Mempool> {
         Mempool::with_capacity(
             bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             Arc::new(Mempool::embedded_sender_public_key),
             max_entries,
+            Some(Arc::new(StateMutex::new(test_state()))),
         )
+    }
+
+    fn fund(mempool: &Mempool, transaction: &ZKTransaction) {
+        mempool
+            .state
+            .as_ref()
+            .unwrap()
+            .lock()
+            .set_balance(&transaction.sender, 10_000)
+            .expect("fund test sender");
     }
 
     fn signed_transaction(receiver: &str, amount: u64, nonce: u64) -> ZKTransaction {
@@ -199,15 +301,20 @@ mod tests {
         let sender = bleep_crypto::derive_account_address(&public_key);
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
         let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
-        let payload = tx_payload(&chain_id, &sender, receiver, amount, timestamp, nonce);
+        let fee = MIN_TRANSACTION_FEE;
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
+            &chain_id, &sender, receiver, amount, fee, timestamp, nonce,
+        );
         let signature = sign_tx_payload(&payload, &secret_key).expect("sign transaction");
         let mut signed_bytes = public_key;
         signed_bytes.extend_from_slice(&signature);
         ZKTransaction {
+            version: 2,
             chain_id,
             sender,
             receiver: receiver.to_string(),
             amount,
+            fee,
             timestamp,
             nonce,
             signature: signed_bytes,
@@ -218,6 +325,7 @@ mod tests {
     async fn mempool_rejects_forged_signature() {
         let mempool = mempool_with_capacity(10);
         let mut transaction = signed_transaction("recipient", 10, 0);
+        fund(&mempool, &transaction);
         *transaction.signature.last_mut().unwrap() ^= 1;
         assert!(!mempool.add_transaction(transaction).await);
     }
@@ -226,6 +334,7 @@ mod tests {
     async fn mempool_rejects_wrong_chain_id() {
         let mempool = mempool_with_capacity(10);
         let mut transaction = signed_transaction("recipient", 10, 0);
+        fund(&mempool, &transaction);
         transaction.chain_id = "BLEEP-Mainnet".into();
         assert!(!mempool.add_transaction(transaction).await);
     }
@@ -233,21 +342,15 @@ mod tests {
     #[tokio::test]
     async fn mempool_seen_set_is_bounded() {
         let mempool = mempool_with_capacity(2);
-        assert!(
-            mempool
-                .add_transaction(signed_transaction("recipient", 10, 0))
-                .await
-        );
-        assert!(
-            mempool
-                .add_transaction(signed_transaction("recipient", 11, 1))
-                .await
-        );
-        assert!(
-            !mempool
-                .add_transaction(signed_transaction("recipient", 12, 2))
-                .await
-        );
+        let first = signed_transaction("recipient-a", 10, 0);
+        fund(&mempool, &first);
+        assert!(mempool.add_transaction(first).await);
+        let second = signed_transaction("recipient-b", 11, 0);
+        fund(&mempool, &second);
+        assert!(mempool.add_transaction(second).await);
+        let third = signed_transaction("recipient-c", 12, 0);
+        fund(&mempool, &third);
+        let _ = mempool.add_transaction(third).await;
         assert_eq!(mempool.transactions.lock().await.len(), 2);
         assert_eq!(mempool.seen_transactions.lock().await.len(), 2);
     }

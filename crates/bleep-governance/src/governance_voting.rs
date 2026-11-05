@@ -40,6 +40,12 @@ pub enum VotingError {
 
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    #[error("Voting arithmetic overflow")]
+    ArithmeticOverflow,
+
+    #[error("Vote tally arithmetic overflow")]
+    TallyOverflow,
 }
 
 /// A validator's vote on a proposal
@@ -237,11 +243,17 @@ impl ProposalVotingState {
         // Verify vote signature
         vote.compute_hash()?;
 
-        // Record vote
+        // Check the tally before recording the vote so overflow is atomic.
         if vote.approval {
-            self.stake_for += vote.stake;
+            self.stake_for = self
+                .stake_for
+                .checked_add(vote.stake)
+                .ok_or(VotingError::TallyOverflow)?;
         } else {
-            self.stake_against += vote.stake;
+            self.stake_against = self
+                .stake_against
+                .checked_add(vote.stake)
+                .ok_or(VotingError::TallyOverflow)?;
         }
 
         self.voters.insert(vote.validator.clone());
@@ -253,17 +265,31 @@ impl ProposalVotingState {
     /// Finalize voting and compute result
     ///
     /// SAFETY: Result is deterministic based on stake-weighted votes
-    pub fn finalize(&mut self) -> VotingResult {
-        self.window.close();
-
-        let total_votes = self.stake_for + self.stake_against;
+    pub fn finalize(&mut self) -> Result<VotingResult, VotingError> {
+        let total_votes = self
+            .stake_for
+            .checked_add(self.stake_against)
+            .ok_or(VotingError::TallyOverflow)?;
         let approval_percentage = if total_votes > 0 {
-            (self.stake_for * 100).checked_div(total_votes).unwrap_or(0)
+            self.stake_for
+                .checked_mul(100)
+                .ok_or(VotingError::TallyOverflow)?
+                .checked_div(total_votes)
+                .ok_or(VotingError::TallyOverflow)?
         } else {
             0
         };
 
-        VotingResult {
+        let participation_percentage = if self.total_active_stake > 0 {
+            total_votes
+                .checked_mul(100)
+                .ok_or(VotingError::TallyOverflow)?
+                .checked_div(self.total_active_stake)
+                .ok_or(VotingError::TallyOverflow)?
+        } else {
+            0
+        };
+        let result = VotingResult {
             proposal_id: self.proposal_id.clone(),
             stake_for: self.stake_for,
             stake_against: self.stake_against,
@@ -271,14 +297,10 @@ impl ProposalVotingState {
             total_active_stake: self.total_active_stake,
             approval_percentage,
             voter_count: self.voters.len() as u64,
-            participation_percentage: if self.total_active_stake > 0 {
-                (total_votes * 100)
-                    .checked_div(self.total_active_stake)
-                    .unwrap_or(0)
-            } else {
-                0
-            },
-        }
+            participation_percentage,
+        };
+        self.window.close();
+        Ok(result)
     }
 }
 
@@ -351,8 +373,10 @@ impl GovernanceVotingEngine {
     }
 
     /// Get total active stake
-    fn total_active_stake(&self) -> u64 {
-        self.validators.values().sum()
+    fn total_active_stake(&self) -> Result<u64, VotingError> {
+        self.validators.values().try_fold(0u64, |total, stake| {
+            total.checked_add(*stake).ok_or(VotingError::TallyOverflow)
+        })
     }
 
     /// Initiate governance voting for a proposal
@@ -369,8 +393,10 @@ impl GovernanceVotingEngine {
         }
 
         let start_epoch = current_epoch;
-        let end_epoch = current_epoch + voting_duration;
-        let total_stake = self.total_active_stake();
+        let end_epoch = current_epoch
+            .checked_add(voting_duration)
+            .ok_or(VotingError::ArithmeticOverflow)?;
+        let total_stake = self.total_active_stake()?;
 
         let voting_state =
             ProposalVotingState::new(proposal_id.clone(), start_epoch, end_epoch, total_stake);
@@ -442,7 +468,14 @@ impl GovernanceVotingEngine {
             return Err(VotingError::VotingNotActive);
         }
 
-        let result = voting_state.finalize();
+        let result = match voting_state.finalize() {
+            Ok(result) => result,
+            Err(error) => {
+                self.active_votes
+                    .insert(proposal_id.to_string(), voting_state);
+                return Err(error);
+            }
+        };
 
         info!(
             "Voting finalized for proposal {}: {:.1}% approval, {} voters",
@@ -523,10 +556,54 @@ mod tests {
         let vote_against = ValidatorVote::new("APIP-001".to_string(), vec![4, 5, 6], false, 400, 5);
         state.cast_vote(vote_against, 5).unwrap();
 
-        let result = state.finalize();
+        let result = state.finalize().unwrap();
         assert_eq!(result.approval_percentage, 60);
         assert_eq!(result.voter_count, 2);
         assert!(result.is_approved(50));
+    }
+
+    #[test]
+    fn tally_overflow_is_an_error_and_does_not_close_voting() {
+        let mut state = ProposalVotingState::new("APIP-OVERFLOW".to_string(), 1, 10, u64::MAX);
+        state.stake_for = u64::MAX;
+        state.stake_against = 1;
+
+        assert!(matches!(state.finalize(), Err(VotingError::TallyOverflow)));
+        assert!(state.window.is_active);
+    }
+
+    #[test]
+    fn percentage_multiplication_overflow_is_an_error() {
+        let mut state = ProposalVotingState::new("APIP-PERCENT".to_string(), 1, 10, u64::MAX);
+        state.stake_for = u64::MAX / 2 + 1;
+
+        assert!(matches!(state.finalize(), Err(VotingError::TallyOverflow)));
+        assert!(state.window.is_active);
+    }
+
+    #[test]
+    fn cast_vote_overflow_does_not_record_the_vote() {
+        let mut state = ProposalVotingState::new("APIP-CAST".to_string(), 1, 10, u64::MAX);
+        state.stake_for = u64::MAX;
+        let vote = ValidatorVote::new("APIP-CAST".to_string(), vec![7], true, 1, 5);
+
+        assert!(matches!(
+            state.cast_vote(vote, 5),
+            Err(VotingError::TallyOverflow)
+        ));
+        assert!(state.voters.is_empty());
+        assert!(state.votes.is_empty());
+    }
+
+    #[test]
+    fn validator_stake_sum_overflow_is_an_error() {
+        let mut engine = GovernanceVotingEngine::new();
+        engine.update_validators(HashMap::from([(vec![1], u64::MAX), (vec![2], 1)]));
+
+        assert!(matches!(
+            engine.start_voting("APIP-STAKES".to_string(), 1, 5),
+            Err(VotingError::TallyOverflow)
+        ));
     }
 
     #[test]

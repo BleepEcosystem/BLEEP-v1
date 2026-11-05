@@ -871,8 +871,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let state = Arc::new(Mutex::new(state));
 
     // Transaction pools
-    let tx_pool = TransactionPool::new_with_chain_id(10_000, chain_id.clone());
-    let mempool = Mempool::new(chain_id.clone(), Mempool::embedded_sender_public_key);
+    let tx_pool =
+        TransactionPool::new_with_state(10_000, chain_id.clone(), Some(Arc::clone(&state)));
+    let mempool = Mempool::new_with_state(
+        chain_id.clone(),
+        Mempool::embedded_sender_public_key,
+        Some(Arc::clone(&state)),
+    );
 
     let blockchain = {
         let core_state = CoreBlockchainState::with_state_manager(Arc::clone(&state));
@@ -1854,7 +1859,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 {
                                     false
                                 } else {
-                                    let mut staged_state = chain.state.read().unwrap().clone();
+                                    let staged_state = chain.state.read().unwrap().clone();
                                     staged_state.apply_block(block).is_ok()
                                 }
                             };
@@ -2013,7 +2018,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         {
                             false
                         } else {
-                            let mut staged_core_state = chain.state.read().unwrap().clone();
+                            let staged_core_state = chain.state.read().unwrap().clone();
                             if staged_core_state.apply_block(&block).is_err() {
                                 warn!(
                                     "[InboundBlockHandler] Block {} failed core-state preflight",
@@ -2038,6 +2043,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                                 tx.timestamp,
                                             )?,
                                         amount: tx.amount,
+                                        fee: tx.fee,
                                         nonce: tx.nonce,
                                     })
                                 })

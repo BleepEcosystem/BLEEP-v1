@@ -48,8 +48,9 @@ pub const SPHINCS_SIG_LEN: usize = 49_856;
 /// Total validator_signature length: pk || sig.
 pub const VALIDATOR_SIG_LEN: usize = SPHINCS_PK_LEN + SPHINCS_SIG_LEN;
 /// Current non-genesis block protocol version. Version 5 requires a verifiable
-/// VRF proof envelope in every block's proof payload.
-pub const CURRENT_PROTOCOL_VERSION: u32 = 5;
+/// VRF proof envelope; version 6 activates fee-bearing V2 transactions.
+pub const CURRENT_PROTOCOL_VERSION: u32 = 6;
+pub const FEE_TRANSACTION_PROTOCOL_VERSION: u32 = 6;
 /// Genesis uses a separately pinned version; its chain ID is now committed in
 /// the canonical header hash as part of the network-specific genesis anchor.
 pub const GENESIS_PROTOCOL_VERSION: u32 = 2;
@@ -61,26 +62,46 @@ pub const VRF_STARK_ENVELOPE_HEADER_LEN: usize =
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
+    #[serde(default = "legacy_transaction_version")]
+    pub version: u16,
     pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
+    #[serde(default)]
+    pub fee: u64,
     pub timestamp: u64,
     pub nonce: u64,
     pub signature: Vec<u8>,
 }
 
+fn legacy_transaction_version() -> u16 {
+    1
+}
+
 impl Transaction {
     /// Compute the canonical transaction hash used for compact-block propagation.
     pub fn tx_hash(&self) -> [u8; 32] {
-        tx_payload(
-            &self.chain_id,
-            &self.sender,
-            &self.receiver,
-            self.amount,
-            self.timestamp,
-            self.nonce,
-        )
+        if self.version == 2 && self.fee > 0 {
+            bleep_crypto::tx_signer::tx_payload_v2(
+                &self.chain_id,
+                &self.sender,
+                &self.receiver,
+                self.amount,
+                self.fee,
+                self.timestamp,
+                self.nonce,
+            )
+        } else {
+            tx_payload(
+                &self.chain_id,
+                &self.sender,
+                &self.receiver,
+                self.amount,
+                self.timestamp,
+                self.nonce,
+            )
+        }
     }
 
     /// Verify the SPHINCS+ transaction signature.
@@ -96,28 +117,60 @@ impl Transaction {
         if !bleep_crypto::account_address_matches_public_key(&self.sender, pk_bytes) {
             return false;
         }
-        let payload = match crate::transaction::parse_validator_stake_receiver(&self.receiver) {
-            Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload(
-                &self.chain_id,
-                &self.sender,
-                bleep_crypto::tx_signer::ValidatorKeyBindings {
-                    label: &action.label,
-                    kyber_public_key: &action.kyber_public_key,
-                    vrf_public_key: &action.vrf_public_key,
-                },
-                self.amount,
-                self.timestamp,
-                self.nonce,
-            ),
-            Ok(None) => tx_payload(
-                &self.chain_id,
-                &self.sender,
-                &self.receiver,
-                self.amount,
-                self.timestamp,
-                self.nonce,
-            ),
-            Err(_) => return false,
+        let payload = match self.version {
+            1 if self.fee == 0 => {
+                match crate::transaction::parse_validator_stake_receiver(&self.receiver) {
+                    Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload(
+                        &self.chain_id,
+                        &self.sender,
+                        bleep_crypto::tx_signer::ValidatorKeyBindings {
+                            label: &action.label,
+                            kyber_public_key: &action.kyber_public_key,
+                            vrf_public_key: &action.vrf_public_key,
+                        },
+                        self.amount,
+                        self.timestamp,
+                        self.nonce,
+                    ),
+                    Ok(None) => tx_payload(
+                        &self.chain_id,
+                        &self.sender,
+                        &self.receiver,
+                        self.amount,
+                        self.timestamp,
+                        self.nonce,
+                    ),
+                    Err(_) => return false,
+                }
+            }
+            2 if self.fee > 0 => {
+                match crate::transaction::parse_validator_stake_receiver(&self.receiver) {
+                    Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload_v2(
+                        &self.chain_id,
+                        &self.sender,
+                        bleep_crypto::tx_signer::ValidatorKeyBindings {
+                            label: &action.label,
+                            kyber_public_key: &action.kyber_public_key,
+                            vrf_public_key: &action.vrf_public_key,
+                        },
+                        self.amount,
+                        self.fee,
+                        self.timestamp,
+                        self.nonce,
+                    ),
+                    Ok(None) => bleep_crypto::tx_signer::tx_payload_v2(
+                        &self.chain_id,
+                        &self.sender,
+                        &self.receiver,
+                        self.amount,
+                        self.fee,
+                        self.timestamp,
+                        self.nonce,
+                    ),
+                    Err(_) => return false,
+                }
+            }
+            _ => return false,
         };
         verify_tx_signature_for_address(&payload, sig_bytes, pk_bytes, &self.sender)
     }
@@ -159,10 +212,14 @@ pub struct BlockHeader {
 /// The full signature is available from the Signature Availability Layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactTransaction {
+    #[serde(default = "legacy_transaction_version")]
+    pub version: u16,
     pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
+    #[serde(default)]
+    pub fee: u64,
     pub timestamp: u64,
     pub nonce: u64,
     /// SHA3-256(raw_signature) — matches the corresponding leaf in sig_commitment_root.
@@ -419,10 +476,12 @@ impl Block {
                 .iter()
                 .enumerate()
                 .map(|(i, tx)| CompactTransaction {
+                    version: tx.version,
                     chain_id: tx.chain_id.clone(),
                     sender: tx.sender.clone(),
                     receiver: tx.receiver.clone(),
                     amount: tx.amount,
+                    fee: tx.fee,
                     timestamp: tx.timestamp,
                     nonce: tx.nonce,
                     sig_hash: sig_hashes.get(i).copied().unwrap_or([0u8; 32]),

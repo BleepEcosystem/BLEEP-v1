@@ -96,19 +96,23 @@ mod tests {
             1,
             vec![
                 Transaction {
+                    version: 1,
                     chain_id: "test".into(),
                     sender: "alice".into(),
                     receiver: "bob".into(),
                     amount: 10,
+                    fee: 0,
                     timestamp: 1,
                     nonce: 0,
                     signature: vec![],
                 },
                 Transaction {
+                    version: 1,
                     chain_id: "test".into(),
                     sender: "bob".into(),
                     receiver: "carol".into(),
                     amount: 4,
+                    fee: 0,
                     timestamp: 2,
                     nonce: 0,
                     signature: vec![],

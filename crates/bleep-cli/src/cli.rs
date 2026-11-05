@@ -43,7 +43,7 @@ use bleep_core::transaction::ZKTransaction;
 use bleep_crypto::bip39::{generate_mnemonic, mnemonic_to_bleep_seed, validate_mnemonic};
 use bleep_crypto::derivation::derive_tx_keypair;
 use bleep_crypto::tx_signer::{
-    sign_tx_payload_for_address, tx_payload, validator_stake_payload, ValidatorKeyBindings,
+    sign_tx_payload_for_address, validator_stake_payload_v2, ValidatorKeyBindings,
 };
 use bleep_economics::oracle_bridge::{oracle_signing_message, OracleSource, PriceUpdate};
 use bleep_governance::governance_core::{GovernanceEngine, Proposal, ProposalType, Vote};
@@ -344,7 +344,10 @@ async fn run(cmd: Commands) -> Result<()> {
 
                     match wallet_opt {
                         Some(w) if w.can_sign() => {
-                            let payload = tx_payload(&chain_id, &sender, &to, amount, ts, nonce);
+                            let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+                            let payload = bleep_crypto::tx_signer::tx_payload_v2(
+                                &chain_id, &sender, &to, amount, fee, ts, nonce,
+                            );
                             let sk_plain = unlock_wallet_key(&w)
                                 .map_err(|e| anyhow!("Wallet unlock failed — set BLEEP_WALLET_PASSWORD if encrypted: {}", e))?;
                             let detached_sig =
@@ -375,10 +378,12 @@ async fn run(cmd: Commands) -> Result<()> {
                 };
 
                 let tx = ZKTransaction {
+                    version: 2,
                     chain_id,
                     sender: sender.clone(),
                     receiver: to.clone(),
                     amount,
+                    fee: bleep_core::transaction::MIN_TRANSACTION_FEE,
                     timestamp: ts,
                     nonce,
                     signature: sig.clone(), // Wire format: pk(64) || detached signature
@@ -1465,7 +1470,7 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
         .as_secs();
     let chain_id = std::env::var("BLEEP_CHAIN_ID")
         .unwrap_or_else(|_| bleep_crypto::DEFAULT_CHAIN_ID.to_string());
-    let payload = validator_stake_payload(
+    let payload = validator_stake_payload_v2(
         &chain_id,
         &wallet.address,
         ValidatorKeyBindings {
@@ -1474,6 +1479,7 @@ async fn post_stake_tx(rpc: &str, amount: u64, label: &str) -> Result<String> {
             vrf_public_key: &vrf_public_key,
         },
         amount,
+        bleep_core::transaction::MIN_TRANSACTION_FEE,
         timestamp,
         nonce,
     );

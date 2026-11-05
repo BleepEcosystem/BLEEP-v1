@@ -20,6 +20,7 @@ use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 
 const TX_DOMAIN: &[u8] = b"BLEEP:TRANSACTION:V1\0";
+const TX_DOMAIN_V2: &[u8] = b"BLEEP:TRANSACTION:V2\0";
 const ACCOUNT_DOMAIN: &[u8] = b"BLEEP:ACCOUNT:ADDRESS:V1\0";
 const ACCOUNT_DOMAIN_V2: &[u8] = b"BLEEP:ACCOUNT:ADDRESS:V2\0";
 pub const DEFAULT_CHAIN_ID: &str = "BLEEP-PreTestnet-001";
@@ -173,6 +174,35 @@ pub fn tx_payload(
     h.finalize().into()
 }
 
+/// Build the fee-bearing v2 transaction signing payload.
+///
+/// The V2 domain separates this fork's signature preimage from legacy
+/// transactions, and the fee is committed by the sender's signature.
+pub fn tx_payload_v2(
+    chain_id: &str,
+    sender: &str,
+    receiver: &str,
+    amount: u64,
+    fee: u64,
+    timestamp: u64,
+    nonce: u64,
+) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(TX_DOMAIN_V2);
+    h.update(2u16.to_le_bytes());
+    h.update((chain_id.len() as u64).to_le_bytes());
+    h.update(chain_id.as_bytes());
+    h.update((sender.len() as u64).to_le_bytes());
+    h.update(sender.as_bytes());
+    h.update((receiver.len() as u64).to_le_bytes());
+    h.update(receiver.as_bytes());
+    h.update(amount.to_le_bytes());
+    h.update(fee.to_le_bytes());
+    h.update(timestamp.to_le_bytes());
+    h.update(nonce.to_le_bytes());
+    h.finalize().into()
+}
+
 /// Build the canonical payload for bonding stake to a validator.
 ///
 /// The destination commits to the Kyber and VRF public keys so the signing key
@@ -216,6 +246,24 @@ pub fn validator_stake_payload(
     tx_payload(chain_id, sender, &receiver, amount, timestamp, nonce)
 }
 
+pub fn validator_stake_payload_v2(
+    chain_id: &str,
+    sender: &str,
+    validator: ValidatorKeyBindings<'_>,
+    amount: u64,
+    fee: u64,
+    timestamp: u64,
+    nonce: u64,
+) -> [u8; 32] {
+    let kem_commitment = hex::encode(Sha256::digest(validator.kyber_public_key));
+    let vrf_commitment = hex::encode(Sha256::digest(validator.vrf_public_key));
+    let receiver = format!(
+        "validator:{}:kem:{kem_commitment}:vrf:{vrf_commitment}",
+        validator.label
+    );
+    tx_payload_v2(chain_id, sender, &receiver, amount, fee, timestamp, nonce)
+}
+
 /// Generate a fresh SPHINCS+ keypair.
 ///
 /// Returns `(public_key_bytes, secret_key_bytes)`.
@@ -236,6 +284,15 @@ mod tests {
         let payload = tx_payload("BLEEP-PreTestnet", "alice", "bob", 1000, 12345, 0);
         let sig = sign_tx_payload(&payload, &sk).unwrap();
         assert!(verify_tx_signature(&payload, &sig, &pk));
+    }
+
+    #[test]
+    fn fee_bearing_v2_payload_commits_fee_and_separates_signature_domain() {
+        let v1 = tx_payload("chain", "sender", "receiver", 10, 20, 3);
+        let v2 = tx_payload_v2("chain", "sender", "receiver", 10, 1, 20, 3);
+        let changed_fee = tx_payload_v2("chain", "sender", "receiver", 10, 2, 20, 3);
+        assert_ne!(v1, v2);
+        assert_ne!(v2, changed_fee);
     }
 
     #[test]

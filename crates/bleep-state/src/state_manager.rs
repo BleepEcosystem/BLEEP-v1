@@ -88,6 +88,7 @@ pub struct CanonicalTransfer {
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
+    pub fee: u64,
     pub nonce: u64,
 }
 
@@ -443,10 +444,11 @@ impl StateManager {
         let original_trie = self.trie.clone();
         for transfer in context.transfers {
             if self.get_nonce(&transfer.sender) != transfer.nonce
-                || !self.apply_transfer_with_nonce(
+                || !self.apply_transfer_with_nonce_and_fee(
                     &transfer.sender,
                     &transfer.receiver,
                     transfer.amount as u128,
+                    transfer.fee as u128,
                     transfer.nonce,
                 )
             {
@@ -919,14 +921,39 @@ impl StateManager {
             return false;
         }
 
-        self.apply_transfer_with_nonce(sender, receiver, amount, nonce)
+        self.apply_transfer_with_nonce_and_fee(sender, receiver, amount, 0, nonce)
     }
 
-    fn apply_transfer_with_nonce(
+    pub fn apply_transfer_with_fee(
         &mut self,
         sender: &str,
         receiver: &str,
         amount: u128,
+        fee: u128,
+        nonce: u64,
+        timestamp: u64,
+    ) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.abs_diff(timestamp) > TRANSACTION_REPLAY_WINDOW_SECS {
+            log::warn!(
+                "[StateManager] apply_transfer_with_fee: timestamp outside replay window (tx={}, now={})",
+                timestamp,
+                now
+            );
+            return false;
+        }
+        self.apply_transfer_with_nonce_and_fee(sender, receiver, amount, fee, nonce)
+    }
+
+    fn apply_transfer_with_nonce_and_fee(
+        &mut self,
+        sender: &str,
+        receiver: &str,
+        amount: u128,
+        fee: u128,
         nonce: u64,
     ) -> bool {
         let current_nonce = self.get_nonce(sender);
@@ -959,9 +986,28 @@ impl StateManager {
                 return false;
             }
         };
-        if let Err(error) =
-            self.apply_balance_deltas(&[(sender, -amount_delta), (receiver, amount_delta)], 0)
-        {
+        let fee_delta = match i128::try_from(fee) {
+            Ok(fee) => fee,
+            Err(_) => {
+                log::error!("[StateManager] apply_transfer: fee exceeds signed delta range");
+                return false;
+            }
+        };
+        let Some(sender_delta) = amount_delta.checked_add(fee_delta) else {
+            log::error!("[StateManager] apply_transfer: amount plus fee overflow");
+            return false;
+        };
+        let treasury_delta = [("bleep:treasury:transaction-fees", fee_delta)];
+        let changes = if fee_delta == 0 {
+            vec![(sender, -sender_delta), (receiver, amount_delta)]
+        } else {
+            vec![
+                (sender, -sender_delta),
+                (receiver, amount_delta),
+                treasury_delta[0],
+            ]
+        };
+        if let Err(error) = self.apply_balance_deltas(&changes, 0) {
             log::warn!("[StateManager] apply_transfer: balance update failed: {error}");
             return false;
         }
@@ -1300,6 +1346,17 @@ mod tests {
     }
 
     #[test]
+    fn apply_transfer_charges_fee_to_the_fee_treasury() {
+        let mut m = fresh();
+        m.mint("alice", 500).expect("mint");
+        assert!(m.apply_transfer_with_fee("alice", "bob", 200, 7, 0, now()));
+        assert_eq!(m.get_balance("alice"), 293);
+        assert_eq!(m.get_balance("bob"), 200);
+        assert_eq!(m.get_balance("bleep:treasury:transaction-fees"), 7);
+        assert_eq!(m.get_nonce("alice"), 1);
+    }
+
+    #[test]
     fn apply_transfer_rejects_replayed_or_out_of_order_nonce() {
         let mut m = fresh();
         m.mint("alice", 500).expect("mint");
@@ -1486,6 +1543,7 @@ mod tests {
             sender: "alice".into(),
             receiver: "bob".into(),
             amount: 12,
+            fee: 0,
             nonce: 1,
         };
         assert!(state
@@ -1510,6 +1568,7 @@ mod tests {
             sender: "alice".into(),
             receiver: "bob".into(),
             amount: 12,
+            fee: 0,
             nonce: 0,
         };
         let mut expected_state = SparseMerkleTrie::new();

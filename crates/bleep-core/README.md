@@ -42,21 +42,30 @@ bleep-core
 
 ### `ZKTransaction`
 
-All BLEEP transactions are `ZKTransaction` — SPHINCS+-signed payloads carrying:
+`ZKTransaction` is the network transaction envelope. Protocol version 6 activates
+fee-bearing transaction version 2; v2 signatures bind every field below,
+including the fee, under a separate signing domain.
 
 ```rust
 struct ZKTransaction {
-    from:        [u8; 32],      // sender address (SHA3-256 of SPHINCS+ public key)
-    to:          [u8; 32],      // recipient address
-    amount:      u128,          // microBLEEP
-    nonce:       u64,           // anti-replay counter
-    gas_limit:   u64,
-    signature:   Vec<u8>,       // SPHINCS+-SHAKE-256f-simple — 49,856 bytes
-    zk_aux:      Option<Vec<u8>>, // optional ZK auxiliary data (recovery, privacy)
+    version:     u16,           // v2 after the protocol-6 fork
+    chain_id:    String,
+    sender:      String,
+    receiver:    String,
+    amount:      u64,           // microBLEEP
+    fee:         u64,           // minimum 1 microBLEEP
+    timestamp:   u64,
+    nonce:       u64,
+    signature:   Vec<u8>,       // public key || SPHINCS+ signature
 }
 ```
 
-The name `ZKTransaction` reflects BLEEP's broader ZK capabilities; all transactions carry SPHINCS+ signatures. ZK auxiliary data is used for specific operations such as asset recovery proofs and private governance votes.
+Admission requires sufficient balance for amount plus all pending fees, unique
+sender/nonce pairs, a nonce no more than 64 ahead of committed state, at most 64
+pending transactions per sender, and pool limits of 10,000 entries at the node
+and 256 MiB of transaction data. Full pools retain transactions with the
+highest fee per byte. Fees are credited to `bleep:treasury:transaction-fees`
+on execution.
 
 ### `Block`
 

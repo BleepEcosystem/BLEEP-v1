@@ -1,4 +1,5 @@
 use bleep_crypto::quantum_secure::QuantumSecure;
+use bleep_state::state_manager::StateManager;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -100,13 +101,82 @@ pub enum P2PMessage {
 /// Represents a Zero-Knowledge Proof (ZKP)-based transaction
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ZKTransaction {
+    #[serde(default = "legacy_transaction_version")]
+    pub version: u16,
     pub chain_id: String,
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
+    #[serde(default)]
+    pub fee: u64,
     pub timestamp: u64,
     pub nonce: u64,
     pub signature: Vec<u8>,
+}
+
+fn legacy_transaction_version() -> u16 {
+    1
+}
+
+pub const MAX_PENDING_NONCE_GAP: u64 = 64;
+pub const MAX_PENDING_PER_SENDER: usize = 64;
+pub const MAX_POOL_BYTES: usize = 256 * 1024 * 1024;
+pub const MIN_TRANSACTION_FEE: u64 = 1;
+
+pub fn pending_admission_allowed(
+    state: &StateManager,
+    pending: &[ZKTransaction],
+    candidate: &ZKTransaction,
+) -> bool {
+    let committed_nonce = state.get_nonce(&candidate.sender);
+    if candidate.nonce == u64::MAX
+        || candidate.nonce < committed_nonce
+        || candidate.nonce > committed_nonce.saturating_add(MAX_PENDING_NONCE_GAP)
+        || pending
+            .iter()
+            .any(|tx| tx.sender == candidate.sender && tx.nonce == candidate.nonce)
+        || pending
+            .iter()
+            .filter(|tx| tx.sender == candidate.sender)
+            .count()
+            >= MAX_PENDING_PER_SENDER
+    {
+        return false;
+    }
+
+    let reserved = pending
+        .iter()
+        .filter(|tx| tx.sender == candidate.sender)
+        .try_fold(0u128, |total, tx| {
+            total.checked_add(tx.amount as u128 + tx.fee as u128)
+        });
+    let Some(reserved) = reserved else {
+        return false;
+    };
+    let Some(required) = reserved.checked_add(candidate.amount as u128 + candidate.fee as u128)
+    else {
+        return false;
+    };
+    required <= state.get_balance(&candidate.sender)
+}
+
+pub fn transaction_size(transaction: &ZKTransaction) -> usize {
+    transaction
+        .chain_id
+        .len()
+        .saturating_add(transaction.sender.len())
+        .saturating_add(transaction.receiver.len())
+        .saturating_add(transaction.signature.len())
+        .saturating_add(std::mem::size_of::<u16>())
+        .saturating_add(4 * std::mem::size_of::<u64>())
+}
+
+pub fn compare_fee_priority(left: &ZKTransaction, right: &ZKTransaction) -> std::cmp::Ordering {
+    let left_size = transaction_size(left).max(1) as u128;
+    let right_size = transaction_size(right).max(1) as u128;
+    (left.fee as u128 * right_size)
+        .cmp(&(right.fee as u128 * left_size))
+        .then_with(|| left.get_hash().cmp(&right.get_hash()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,10 +267,12 @@ impl ZKTransaction {
         let data = format!("{}{}{}{}", sender, receiver, amount, timestamp);
         let signature = quantum_secure.sign(data.as_bytes());
         Self {
+            version: 1,
             chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             sender: sender.to_string(),
             receiver: receiver.to_string(),
             amount,
+            fee: 0,
             timestamp,
             nonce: 0,
             signature,
@@ -226,28 +298,56 @@ impl ZKTransaction {
         if !bleep_crypto::account_address_matches_public_key(&self.sender, pk_bytes) {
             return false;
         }
-        let payload = match parse_validator_stake_receiver(&self.receiver) {
-            Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload(
-                &self.chain_id,
-                &self.sender,
-                bleep_crypto::tx_signer::ValidatorKeyBindings {
-                    label: &action.label,
-                    kyber_public_key: &action.kyber_public_key,
-                    vrf_public_key: &action.vrf_public_key,
-                },
-                self.amount,
-                self.timestamp,
-                self.nonce,
-            ),
-            Ok(None) => bleep_crypto::tx_signer::tx_payload(
-                &self.chain_id,
-                &self.sender,
-                &self.receiver,
-                self.amount,
-                self.timestamp,
-                self.nonce,
-            ),
-            Err(_) => return false,
+        let payload = match self.version {
+            1 if self.fee == 0 => match parse_validator_stake_receiver(&self.receiver) {
+                Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload(
+                    &self.chain_id,
+                    &self.sender,
+                    bleep_crypto::tx_signer::ValidatorKeyBindings {
+                        label: &action.label,
+                        kyber_public_key: &action.kyber_public_key,
+                        vrf_public_key: &action.vrf_public_key,
+                    },
+                    self.amount,
+                    self.timestamp,
+                    self.nonce,
+                ),
+                Ok(None) => bleep_crypto::tx_signer::tx_payload(
+                    &self.chain_id,
+                    &self.sender,
+                    &self.receiver,
+                    self.amount,
+                    self.timestamp,
+                    self.nonce,
+                ),
+                Err(_) => return false,
+            },
+            2 if self.fee > 0 => match parse_validator_stake_receiver(&self.receiver) {
+                Ok(Some(action)) => bleep_crypto::tx_signer::validator_stake_payload_v2(
+                    &self.chain_id,
+                    &self.sender,
+                    bleep_crypto::tx_signer::ValidatorKeyBindings {
+                        label: &action.label,
+                        kyber_public_key: &action.kyber_public_key,
+                        vrf_public_key: &action.vrf_public_key,
+                    },
+                    self.amount,
+                    self.fee,
+                    self.timestamp,
+                    self.nonce,
+                ),
+                Ok(None) => bleep_crypto::tx_signer::tx_payload_v2(
+                    &self.chain_id,
+                    &self.sender,
+                    &self.receiver,
+                    self.amount,
+                    self.fee,
+                    self.timestamp,
+                    self.nonce,
+                ),
+                Err(_) => return false,
+            },
+            _ => return false,
         };
         bleep_crypto::verify_tx_signature_for_address(&payload, sig_bytes, pk_bytes, &self.sender)
     }

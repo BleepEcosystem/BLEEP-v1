@@ -4,7 +4,7 @@ use bleep_core::block::Transaction;
 use bleep_core::transaction::ZKTransaction;
 use bleep_core::{Block, Blockchain, Mempool, TransactionPool};
 use bleep_crypto::tx_signer::{
-    derive_account_address, generate_tx_keypair, sign_tx_payload, tx_payload, DEFAULT_CHAIN_ID,
+    derive_account_address, generate_tx_keypair, sign_tx_payload, tx_payload_v2, DEFAULT_CHAIN_ID,
 };
 
 use log::{error, info, warn};
@@ -33,21 +33,35 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
     let (public_key, secret_key) = generate_tx_keypair();
     let sender = derive_account_address(&public_key);
     let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
-    let payload = tx_payload(DEFAULT_CHAIN_ID, &sender, "bob", 42, timestamp, 0);
+    let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+    let payload = tx_payload_v2(DEFAULT_CHAIN_ID, &sender, "bob", 42, fee, timestamp, 0);
     let signature = sign_tx_payload(&payload, &secret_key)?;
     let mut signed_bytes = public_key;
     signed_bytes.extend_from_slice(&signature);
     let pending_tx = ZKTransaction {
+        version: 2,
         chain_id: DEFAULT_CHAIN_ID.to_string(),
-        sender,
+        sender: sender.clone(),
         receiver: "bob".to_string(),
         amount: 42,
+        fee,
         timestamp,
         nonce: 0,
         signature: signed_bytes,
     };
 
-    let mempool = Mempool::new(DEFAULT_CHAIN_ID, Mempool::embedded_sender_public_key);
+    let state = std::sync::Arc::new(parking_lot::Mutex::new(
+        bleep_state::state_manager::StateManager::new(),
+    ));
+    state
+        .lock()
+        .set_balance(&sender, 1_000)
+        .map_err(|error| format!("Failed to fund block demo account: {error}"))?;
+    let mempool = Mempool::new_with_state(
+        DEFAULT_CHAIN_ID,
+        Mempool::embedded_sender_public_key,
+        Some(state),
+    );
     if !mempool.add_transaction(pending_tx.clone()).await {
         warn!("Transaction already existed in mempool");
     }
@@ -63,10 +77,12 @@ async fn run_block_module() -> Result<(), Box<dyn Error>> {
             continue;
         }
         pending_txs.push(Transaction {
+            version: tx.version,
             chain_id: tx.chain_id,
             sender: tx.sender,
             receiver: tx.receiver,
             amount: tx.amount,
+            fee: tx.fee,
             timestamp: tx.timestamp,
             nonce: tx.nonce,
             signature: tx.signature,

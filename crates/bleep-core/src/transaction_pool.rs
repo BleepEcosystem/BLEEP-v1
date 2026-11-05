@@ -1,9 +1,15 @@
 //! # TransactionPool
 //!
-use crate::transaction::ZKTransaction;
+use crate::transaction::{
+    compare_fee_priority, pending_admission_allowed, transaction_size, ZKTransaction,
+    MAX_POOL_BYTES, MIN_TRANSACTION_FEE,
+};
+use bleep_state::state_manager::StateManager;
 use hex;
+use parking_lot::Mutex as StateMutex;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -13,16 +19,37 @@ const SPHINCS_SIG_LEN: usize = 49_856;
 
 // ── TransactionPool ───────────────────────────────────────────────────────────
 
-/// FIFO transaction pool with SPHINCS+ signature verification on admission.
+/// Fee-prioritized transaction pool with SPHINCS+ verification on admission.
 pub struct TransactionPool {
     /// Ordered queue of validated, pending transactions.
-    pool: Mutex<VecDeque<ZKTransaction>>,
-    /// SHA-256 hashes of all transactions ever seen (prevents replay).
+    pool: Mutex<Vec<ZKTransaction>>,
+    /// SHA-256 hashes of pending payloads (committed nonces prevent replay).
     seen_hashes: Mutex<HashSet<[u8; 32]>>,
     /// Chain ID this pool admits transactions for.
     chain_id: String,
     /// Maximum number of pending transactions.
     max_size: usize,
+    state: Option<Arc<StateMutex<StateManager>>>,
+    pool_bytes: AtomicUsize,
+}
+
+fn pool_size_bytes(transactions: &[ZKTransaction]) -> usize {
+    transactions.iter().fold(0usize, |total, tx| {
+        total.saturating_add(transaction_size(tx))
+    })
+}
+
+fn transaction_payload_hash(transaction: &ZKTransaction) -> [u8; 32] {
+    let payload = bleep_crypto::tx_signer::tx_payload_v2(
+        &transaction.chain_id,
+        &transaction.sender,
+        &transaction.receiver,
+        transaction.amount,
+        transaction.fee,
+        transaction.timestamp,
+        transaction.nonce,
+    );
+    Sha256::digest(payload).into()
 }
 
 impl TransactionPool {
@@ -33,11 +60,23 @@ impl TransactionPool {
 
     /// Create a pool pinned to an explicit network chain ID.
     pub fn new_with_chain_id(max_size: usize, chain_id: impl Into<String>) -> Arc<Self> {
+        Self::new_with_state(max_size, chain_id, None)
+    }
+
+    /// Create a pool with the live ledger required for balance and nonce checks.
+    /// Pools created without state fail closed on admission.
+    pub fn new_with_state(
+        max_size: usize,
+        chain_id: impl Into<String>,
+        state: Option<Arc<StateMutex<StateManager>>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            pool: Mutex::new(VecDeque::with_capacity(max_size.min(65_536))),
+            pool: Mutex::new(Vec::with_capacity(max_size.min(65_536))),
             seen_hashes: Mutex::new(HashSet::new()),
             chain_id: chain_id.into(),
             max_size,
+            state,
+            pool_bytes: AtomicUsize::new(0),
         })
     }
 
@@ -48,19 +87,6 @@ impl TransactionPool {
     ///
     /// Returns `true` if the transaction was admitted, `false` otherwise.
     pub async fn add_transaction(&self, transaction: ZKTransaction) -> bool {
-        {
-            let pool = self.pool.lock().await;
-            if pool.len() >= self.max_size {
-                log::warn!(
-                    "[TxPool] At capacity ({}/{}), rejecting tx from {}",
-                    pool.len(),
-                    self.max_size,
-                    transaction.sender
-                );
-                return false;
-            }
-        }
-
         if transaction.sender.is_empty() {
             log::error!("[TxPool] Rejected: sender is empty");
             return false;
@@ -89,6 +115,10 @@ impl TransactionPool {
                 "[TxPool] Rejected: zero-amount tx from {}",
                 transaction.sender
             );
+            return false;
+        }
+        if transaction.version != 2 || transaction.fee < MIN_TRANSACTION_FEE {
+            log::warn!("[TxPool] Rejected: transaction is not fee-bearing V2");
             return false;
         }
         if transaction.timestamp == 0 {
@@ -127,30 +157,76 @@ impl TransactionPool {
         //
         // Hash the canonical payload (same bytes that were signed).
         // This catches exact replays (same sender/receiver/amount/timestamp).
-        let payload = bleep_crypto::tx_signer::tx_payload(
-            &transaction.chain_id,
-            &transaction.sender,
-            &transaction.receiver,
-            transaction.amount,
-            transaction.timestamp,
-            transaction.nonce,
-        );
-        let tx_hash: [u8; 32] = Sha256::digest(payload).into();
-        {
-            let mut seen = self.seen_hashes.lock().await;
-            if seen.contains(&tx_hash) {
-                log::warn!(
-                    "[TxPool] S-09: Duplicate tx rejected (hash={}…) from {}",
-                    hex::encode(&tx_hash[..4]),
-                    transaction.sender
-                );
-                return false;
-            }
-            seen.insert(tx_hash);
+        let tx_hash = transaction_payload_hash(&transaction);
+        let mut pool = self.pool.lock().await;
+        let mut seen = self.seen_hashes.lock().await;
+        if seen.contains(&tx_hash) {
+            log::warn!(
+                "[TxPool] S-09: Duplicate tx rejected (hash={}…) from {}",
+                hex::encode(&tx_hash[..4]),
+                transaction.sender
+            );
+            return false;
         }
 
-        let mut pool = self.pool.lock().await;
-        pool.push_back(transaction);
+        let Some(state) = self.state.as_ref() else {
+            log::warn!("[TxPool] Rejected transaction: state-backed admission unavailable");
+            return false;
+        };
+        let state = state.lock();
+        let sender_pending: Vec<_> = pool
+            .iter()
+            .filter(|tx| tx.sender == transaction.sender)
+            .cloned()
+            .collect();
+        if !pending_admission_allowed(&state, &sender_pending, &transaction) {
+            log::warn!(
+                "[TxPool] Rejected transaction: balance, nonce, or sender limit failed for {}",
+                transaction.sender
+            );
+            return false;
+        }
+
+        if self.max_size == 0 {
+            return false;
+        }
+        let transaction_bytes = transaction_size(&transaction);
+        if transaction_bytes > MAX_POOL_BYTES {
+            return false;
+        }
+        let mut projected_count = pool.len().saturating_add(1);
+        let mut projected_bytes = self
+            .pool_bytes
+            .load(Ordering::Relaxed)
+            .saturating_add(transaction_bytes);
+        let mut evict_count = 0;
+        while projected_count > self.max_size || projected_bytes > MAX_POOL_BYTES {
+            let Some(lowest_index) = pool.len().checked_sub(evict_count + 1) else {
+                return false;
+            };
+            let Some(lowest) = pool.get(lowest_index) else {
+                return false;
+            };
+            if compare_fee_priority(&transaction, lowest) != std::cmp::Ordering::Greater {
+                return false;
+            }
+            evict_count += 1;
+            projected_count -= 1;
+            projected_bytes = projected_bytes.saturating_sub(transaction_size(lowest));
+        }
+        for _ in 0..evict_count {
+            let evicted = pool.pop().expect("planned transaction eviction");
+            self.pool_bytes
+                .fetch_sub(transaction_size(&evicted), Ordering::Relaxed);
+            seen.remove(&transaction_payload_hash(&evicted));
+        }
+        let insert_at = pool
+            .binary_search_by(|existing| compare_fee_priority(existing, &transaction).reverse())
+            .unwrap_or_else(|index| index);
+        pool.insert(insert_at, transaction);
+        self.pool_bytes
+            .fetch_add(transaction_bytes, Ordering::Relaxed);
+        seen.insert(tx_hash);
         log::debug!(
             "[TxPool] Admitted tx — pool {}/{}",
             pool.len(),
@@ -169,7 +245,8 @@ impl TransactionPool {
     pub async fn clear_pool(&self) {
         let mut pool = self.pool.lock().await;
         pool.clear();
-        // Seen hashes remain to prevent cross-block replay attacks.
+        self.pool_bytes.store(0, Ordering::Relaxed);
+        self.seen_hashes.lock().await.clear();
     }
 
     /// Remove transactions older than the supplied age.
@@ -179,6 +256,13 @@ impl TransactionPool {
         let mut pool = self.pool.lock().await;
         let before = pool.len();
         pool.retain(|tx| tx.timestamp <= now && now.saturating_sub(tx.timestamp) <= max_age_secs);
+        self.pool_bytes
+            .store(pool_size_bytes(&pool), Ordering::Relaxed);
+        let active_hashes: HashSet<_> = pool.iter().map(transaction_payload_hash).collect();
+        self.seen_hashes
+            .lock()
+            .await
+            .retain(|hash| active_hashes.contains(hash));
         before - pool.len()
     }
 
@@ -207,12 +291,14 @@ impl TransactionPool {
     pub async fn remove_confirmed(&self, tx_id: &str) {
         let mut pool = self.pool.lock().await;
         let before = pool.len();
-        pool.retain(|tx| {
-            format!(
-                "{}:{}:{}:{}",
-                tx.sender, tx.receiver, tx.amount, tx.timestamp
-            ) != tx_id
-        });
+        pool.retain(|tx| tx.get_hash() != tx_id);
+        self.pool_bytes
+            .store(pool_size_bytes(&pool), Ordering::Relaxed);
+        let active_hashes: HashSet<_> = pool.iter().map(transaction_payload_hash).collect();
+        self.seen_hashes
+            .lock()
+            .await
+            .retain(|hash| active_hashes.contains(hash));
         log::debug!(
             "[TxPool] remove_confirmed '{}': {} → {} pending",
             tx_id,
@@ -224,24 +310,70 @@ impl TransactionPool {
     /// Peek at up to `limit` transactions for block production.
     pub async fn peek_for_block(&self, limit: usize) -> Vec<ZKTransaction> {
         let pool = self.pool.lock().await;
-        pool.iter().take(limit).cloned().collect()
+        let Some(state) = self.state.as_ref() else {
+            return pool.iter().take(limit).cloned().collect();
+        };
+        let mut next_nonce = HashMap::<String, u64>::new();
+        let mut selected = Vec::with_capacity(limit.min(pool.len()));
+        let mut included = HashSet::new();
+        while selected.len() < limit {
+            let candidate = pool.iter().find(|tx| {
+                if included.contains(&tx.get_hash()) {
+                    return false;
+                }
+                let expected = *next_nonce
+                    .entry(tx.sender.clone())
+                    .or_insert_with(|| state.lock().get_nonce(&tx.sender));
+                tx.nonce == expected
+            });
+            let Some(candidate) = candidate else {
+                break;
+            };
+            let tx = candidate.clone();
+            included.insert(tx.get_hash());
+            next_nonce.insert(tx.sender.clone(), tx.nonce.saturating_add(1));
+            selected.push(tx);
+        }
+        selected
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+    use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload};
+    use proptest::prelude::*;
+
+    fn test_state() -> StateManager {
+        static NEXT_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "bleep-txpool-test-{}-{}",
+            std::process::id(),
+            NEXT_STATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        StateManager::open(path).expect("open test state")
+    }
+
+    fn funded_pool(max_size: usize, sender: &str, balance: u128) -> Arc<TransactionPool> {
+        let state = Arc::new(StateMutex::new(test_state()));
+        state
+            .lock()
+            .set_balance(sender, balance)
+            .expect("fund test sender");
+        TransactionPool::new_with_state(max_size, bleep_crypto::DEFAULT_CHAIN_ID, Some(state))
+    }
 
     #[tokio::test]
     async fn prune_expired_removes_stale_and_future_transactions() {
         let pool = TransactionPool::new(4);
         let now = chrono::Utc::now().timestamp() as u64;
         let transaction = |timestamp| ZKTransaction {
+            version: 2,
             chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             sender: "sender".into(),
             receiver: "receiver".into(),
             amount: 1,
+            fee: 1,
             timestamp,
             nonce: timestamp,
             signature: vec![],
@@ -263,18 +395,34 @@ mod tests {
         } else {
             bleep_crypto::derive_account_address(&pk)
         };
+        make_signed_tx_with_key(&pk, &sk, &sender, receiver, amount, 1, timestamp, 0)
+    }
+
+    fn make_signed_tx_with_key(
+        pk: &[u8],
+        sk: &[u8],
+        sender: &str,
+        receiver: &str,
+        amount: u64,
+        fee: u64,
+        timestamp: u64,
+        nonce: u64,
+    ) -> ZKTransaction {
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
-        let nonce = 0;
-        let payload = tx_payload(&chain_id, &sender, receiver, amount, timestamp, nonce);
-        let sig = sign_tx_payload(&payload, &sk).expect("sign");
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
+            &chain_id, &sender, receiver, amount, fee, timestamp, nonce,
+        );
+        let sig = sign_tx_payload(&payload, sk).expect("sign");
         let mut signature = Vec::with_capacity(pk.len() + sig.len());
-        signature.extend_from_slice(&pk);
+        signature.extend_from_slice(pk);
         signature.extend_from_slice(&sig);
         ZKTransaction {
+            version: 2,
             chain_id,
-            sender,
+            sender: sender.to_string(),
             receiver: receiver.to_string(),
             amount,
+            fee,
             timestamp,
             nonce,
             signature,
@@ -283,8 +431,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_valid_tx_admitted() {
-        let pool = TransactionPool::new(100);
         let tx = make_signed_tx("alice", "bob", 500, 1_700_000_000);
+        let pool = funded_pool(100, &tx.sender, 10_000);
         assert!(pool.add_transaction(tx).await);
         assert_eq!(pool.pool_size().await, 1);
     }
@@ -293,10 +441,12 @@ mod tests {
     async fn test_s07_empty_signature_rejected() {
         let pool = TransactionPool::new(100);
         let tx = ZKTransaction {
+            version: 2,
             sender: "alice".into(),
             receiver: "bob".into(),
             chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 100,
+            fee: 1,
             timestamp: 1_700_000_001,
             nonce: 0,
             signature: vec![],
@@ -308,10 +458,12 @@ mod tests {
     async fn test_s07_short_signature_rejected() {
         let pool = TransactionPool::new(100);
         let tx = ZKTransaction {
+            version: 2,
             sender: "alice".into(),
             receiver: "bob".into(),
             chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 100,
+            fee: 1,
             timestamp: 1_700_000_002,
             nonce: 0,
             signature: vec![0u8; 10], // too short
@@ -323,10 +475,12 @@ mod tests {
     async fn test_s07_invalid_sphincs_signature_rejected() {
         let pool = TransactionPool::new(100);
         let tx = ZKTransaction {
+            version: 2,
             sender: "alice".into(),
             receiver: "bob".into(),
             chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 100,
+            fee: 1,
             timestamp: 1_700_000_003,
             nonce: 0,
             signature: vec![0u8; SPHINCS_PK_LEN + SPHINCS_SIG_LEN],
@@ -370,8 +524,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_s09_exact_duplicate_rejected() {
-        let pool = TransactionPool::new(100);
         let tx1 = make_signed_tx("alice", "bob", 300, 1_700_000_010);
+        let pool = funded_pool(100, &tx1.sender, 10_000);
         // Build an identical tx with the same payload (same sender/receiver/amount/timestamp)
         // by re-signing with a different key — same payload hash, so should be caught
         let tx2 = tx1.clone();
@@ -384,12 +538,181 @@ mod tests {
 
     #[tokio::test]
     async fn test_s09_different_timestamp_admitted() {
-        let pool = TransactionPool::new(100);
         let tx1 = make_signed_tx("alice", "bob", 300, 1_700_000_020);
         let tx2 = make_signed_tx("alice", "bob", 300, 1_700_000_021);
+        let state = Arc::new(StateMutex::new(test_state()));
+        state
+            .lock()
+            .set_balance(&tx1.sender, 10_000)
+            .expect("fund first sender");
+        state
+            .lock()
+            .set_balance(&tx2.sender, 10_000)
+            .expect("fund second sender");
+        let pool =
+            TransactionPool::new_with_state(100, bleep_crypto::DEFAULT_CHAIN_ID, Some(state));
         assert!(pool.add_transaction(tx1).await);
         assert!(pool.add_transaction(tx2).await);
         assert_eq!(pool.pool_size().await, 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_nonce_even_with_different_signed_payload() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&public_key);
+        let first = make_signed_tx_with_key(
+            &public_key,
+            &secret_key,
+            &sender,
+            "recipient-a",
+            100,
+            1,
+            1_700_000_025,
+            0,
+        );
+        let second = make_signed_tx_with_key(
+            &public_key,
+            &secret_key,
+            &sender,
+            "recipient-b",
+            100,
+            1,
+            1_700_000_026,
+            0,
+        );
+        let state = Arc::new(StateMutex::new(test_state()));
+        state
+            .lock()
+            .set_balance(&first.sender, 10_000)
+            .expect("fund sender");
+        let pool = TransactionPool::new_with_state(10, bleep_crypto::DEFAULT_CHAIN_ID, Some(state));
+        assert!(pool.add_transaction(first).await);
+        assert!(!pool.add_transaction(second).await);
+        assert_eq!(pool.pool_size().await, 1);
+    }
+
+    proptest! {
+        #[test]
+        fn random_pending_nonces_are_unique_and_bounded(nonces in prop::collection::vec(any::<u64>(), 0..160)) {
+            let mut state = test_state();
+            state.set_balance("sender", 10_000).expect("fund sender");
+            let mut pending = Vec::new();
+            for nonce in nonces {
+                let candidate = ZKTransaction {
+                    version: 2,
+                    chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+                    sender: "sender".into(),
+                    receiver: format!("recipient-{nonce}"),
+                    amount: 1,
+                    fee: 1,
+                    timestamp: 1,
+                    nonce,
+                    signature: Vec::new(),
+                };
+                if pending_admission_allowed(&state, &pending, &candidate) {
+                    pending.push(candidate);
+                }
+            }
+
+            let accepted_nonces: BTreeSet<_> = pending.iter().map(|tx| tx.nonce).collect();
+            prop_assert_eq!(accepted_nonces.len(), pending.len());
+            prop_assert!(pending.len() <= crate::transaction::MAX_PENDING_PER_SENDER);
+            prop_assert!(pending.iter().all(|tx| tx.nonce <= crate::transaction::MAX_PENDING_NONCE_GAP));
+        }
+    }
+
+    #[tokio::test]
+    async fn evicts_lowest_fee_transaction_when_pool_is_full() {
+        let (low_pk, low_sk) = generate_tx_keypair();
+        let low_sender = bleep_crypto::derive_account_address(&low_pk);
+        let low_fee = make_signed_tx_with_key(
+            &low_pk,
+            &low_sk,
+            &low_sender,
+            "recipient",
+            1,
+            1,
+            1_700_000_040,
+            0,
+        );
+        let (high_pk, high_sk) = generate_tx_keypair();
+        let high_sender = bleep_crypto::derive_account_address(&high_pk);
+        let high_fee = make_signed_tx_with_key(
+            &high_pk,
+            &high_sk,
+            &high_sender,
+            "recipient",
+            1,
+            10,
+            1_700_000_041,
+            0,
+        );
+        let state = Arc::new(StateMutex::new(test_state()));
+        state
+            .lock()
+            .set_balance(&low_fee.sender, 100)
+            .expect("fund low-fee sender");
+        state
+            .lock()
+            .set_balance(&high_fee.sender, 100)
+            .expect("fund high-fee sender");
+        let pool = TransactionPool::new_with_state(1, bleep_crypto::DEFAULT_CHAIN_ID, Some(state));
+        assert!(pool.add_transaction(low_fee.clone()).await);
+        assert!(pool.add_transaction(high_fee.clone()).await);
+        let retained = pool.get_transactions().await;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].sender, high_fee.sender);
+        assert_ne!(retained[0].sender, low_fee.sender);
+    }
+
+    #[tokio::test]
+    async fn tenfold_capacity_load_retains_highest_fee_transactions() {
+        let state = Arc::new(StateMutex::new(test_state()));
+        let pool = TransactionPool::new_with_state(
+            2,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&state)),
+        );
+        let free_transaction = ZKTransaction {
+            version: 2,
+            chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
+            sender: "unfunded".into(),
+            receiver: "recipient".into(),
+            amount: 1,
+            fee: 0,
+            timestamp: 1_700_000_039,
+            nonce: 0,
+            signature: vec![],
+        };
+        assert!(!pool.add_transaction(free_transaction).await);
+
+        for fee in 1..=20 {
+            let (public_key, secret_key) = generate_tx_keypair();
+            let sender = bleep_crypto::derive_account_address(&public_key);
+            state
+                .lock()
+                .set_balance(&sender, 100)
+                .expect("fund load-test sender");
+            let transaction = make_signed_tx_with_key(
+                &public_key,
+                &secret_key,
+                &sender,
+                "load-test-recipient",
+                1,
+                fee,
+                1_700_000_040 + fee,
+                0,
+            );
+            assert!(pool.add_transaction(transaction).await);
+        }
+
+        let retained = pool.get_transactions().await;
+        assert_eq!(retained.len(), 2);
+        assert_eq!(
+            retained.iter().map(|tx| tx.fee).collect::<BTreeSet<_>>(),
+            [19, 20].into_iter().collect()
+        );
+        assert!(pool.pool_size().await <= 2);
     }
 
     #[tokio::test]
@@ -406,10 +729,12 @@ mod tests {
     async fn test_zero_amount_rejected() {
         let pool = TransactionPool::new(100);
         let tx = ZKTransaction {
+            version: 2,
             sender: "alice".into(),
             receiver: "bob".into(),
             chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             amount: 0,
+            fee: 1,
             timestamp: 1_700_000_031,
             nonce: 0,
             signature: vec![1u8; SPHINCS_PK_LEN + SPHINCS_SIG_LEN],
@@ -427,30 +752,79 @@ mod tests {
 
     #[tokio::test]
     async fn test_capacity_limit() {
-        let pool = TransactionPool::new(2);
-        assert!(
-            pool.add_transaction(make_signed_tx("a", "b", 1, 1_700_100_001))
-                .await
+        let (first_pk, first_sk) = generate_tx_keypair();
+        let first_sender = bleep_crypto::derive_account_address(&first_pk);
+        let first = make_signed_tx_with_key(
+            &first_pk,
+            &first_sk,
+            &first_sender,
+            "b",
+            1,
+            3,
+            1_700_100_001,
+            0,
         );
-        assert!(
-            pool.add_transaction(make_signed_tx("a", "b", 2, 1_700_100_002))
-                .await
+        let (second_pk, second_sk) = generate_tx_keypair();
+        let second_sender = bleep_crypto::derive_account_address(&second_pk);
+        let second = make_signed_tx_with_key(
+            &second_pk,
+            &second_sk,
+            &second_sender,
+            "d",
+            1,
+            2,
+            1_700_100_002,
+            0,
         );
-        assert!(
-            !pool
-                .add_transaction(make_signed_tx("a", "b", 3, 1_700_100_003))
-                .await
+        let (third_pk, third_sk) = generate_tx_keypair();
+        let third_sender = bleep_crypto::derive_account_address(&third_pk);
+        let third = make_signed_tx_with_key(
+            &third_pk,
+            &third_sk,
+            &third_sender,
+            "f",
+            1,
+            1,
+            1_700_100_003,
+            0,
         );
+        let state = Arc::new(StateMutex::new(test_state()));
+        state
+            .lock()
+            .set_balance(&first.sender, 100)
+            .expect("fund first sender");
+        state
+            .lock()
+            .set_balance(&second.sender, 100)
+            .expect("fund second sender");
+        state
+            .lock()
+            .set_balance(&third.sender, 100)
+            .expect("fund third sender");
+        let pool = TransactionPool::new_with_state(2, bleep_crypto::DEFAULT_CHAIN_ID, Some(state));
+        assert!(pool.add_transaction(first).await);
+        assert!(pool.add_transaction(second).await);
+        assert_eq!(pool.pool_size().await, 2);
+        assert!(!pool.add_transaction(third).await);
     }
 
     #[tokio::test]
     async fn test_peek_for_block() {
-        let pool = TransactionPool::new(100);
-        for (amount, timestamp) in [(1, 1_700_200_001), (2, 1_700_200_002), (3, 1_700_200_003)] {
-            assert!(
-                pool.add_transaction(make_signed_tx("a", "b", amount, timestamp))
-                    .await
-            );
+        let transactions: Vec<_> = [(1, 1_700_200_001), (2, 1_700_200_002), (3, 1_700_200_003)]
+            .into_iter()
+            .map(|(amount, timestamp)| make_signed_tx("a", "b", amount, timestamp))
+            .collect();
+        let state = Arc::new(StateMutex::new(test_state()));
+        for transaction in &transactions {
+            state
+                .lock()
+                .set_balance(&transaction.sender, 10_000)
+                .expect("fund sender");
+        }
+        let pool =
+            TransactionPool::new_with_state(100, bleep_crypto::DEFAULT_CHAIN_ID, Some(state));
+        for transaction in transactions {
+            assert!(pool.add_transaction(transaction).await);
         }
         assert_eq!(pool.peek_for_block(2).await.len(), 2);
         assert_eq!(pool.pool_size().await, 3);

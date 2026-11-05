@@ -11,6 +11,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const GOVERNANCE_VOTE_DOMAIN: &[u8] = b"BLEEP:GOVERNANCE:VOTE:V1\0";
+
 // ── Protocol parameters that governance can change ────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,7 +116,6 @@ pub struct Proposal {
     pub title: String,
     pub description: String,
     pub param_change: Option<GovernableParam>,
-    pub deposit: u128, // BLEEP deposited by proposer
     pub state: ProposalState,
     pub yes_votes: u128, // staked BLEEP voting yes
     pub no_votes: u128,
@@ -134,6 +135,67 @@ pub enum Vote {
     Veto,
 }
 
+/// A voter whose account ownership and specific vote have been verified.
+///
+/// The fields are private so callers can only obtain this value through
+/// `verify_vote`.
+#[derive(Debug, Clone)]
+pub struct VerifiedVoter {
+    address: String,
+    proposal_id: u64,
+    vote: Vote,
+}
+
+impl VerifiedVoter {
+    pub fn verify_vote(
+        proposal_id: u64,
+        address: &str,
+        vote: Vote,
+        public_key: &[u8],
+        signature: &[u8],
+    ) -> Result<Self, GovernanceError> {
+        if !bleep_crypto::account_address_matches_public_key(address, public_key) {
+            return Err(GovernanceError::InvalidVoterSignature);
+        }
+
+        let payload = governance_vote_signing_payload(proposal_id, address, &vote);
+        if !bleep_crypto::verify_tx_signature_for_address(&payload, signature, public_key, address)
+        {
+            return Err(GovernanceError::InvalidVoterSignature);
+        }
+
+        Ok(Self {
+            address: address.to_owned(),
+            proposal_id,
+            vote,
+        })
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn authorizes(&self, proposal_id: u64, vote: &Vote) -> bool {
+        self.proposal_id == proposal_id && &self.vote == vote
+    }
+}
+
+/// Build the domain-separated message that a voter must sign.
+pub fn governance_vote_signing_payload(proposal_id: u64, address: &str, vote: &Vote) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(GOVERNANCE_VOTE_DOMAIN.len() + 17 + address.len());
+    payload.extend_from_slice(GOVERNANCE_VOTE_DOMAIN);
+    payload.extend_from_slice(&proposal_id.to_le_bytes());
+    payload.extend_from_slice(&(address.len() as u64).to_le_bytes());
+    payload.extend_from_slice(address.as_bytes());
+    payload.push(match vote {
+        Vote::Yes => 0,
+        Vote::No => 1,
+        Vote::Abstain => 2,
+        Vote::Veto => 3,
+    });
+    payload
+}
+
 // ── GovernanceConfig ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,7 +204,6 @@ pub struct GovernanceConfig {
     pub quorum_bps: u32,         // minimum participation (e.g., 1000 = 10%)
     pub threshold_bps: u32,      // yes votes required to pass (e.g., 6667 = 66.67%)
     pub veto_threshold_bps: u32, // veto proportion to block (e.g., 3333 = 33.33%)
-    pub min_deposit: u128,       // minimum proposal deposit in microBLEEP
     pub total_staked: u128,      // current total staked BLEEP (denominator for quorum)
 }
 
@@ -153,7 +214,6 @@ impl Default for GovernanceConfig {
             quorum_bps: 1_000,                    // 10% participation required
             threshold_bps: 6_667,                 // >66.67% yes to pass
             veto_threshold_bps: 3_333,            // >33.33% veto to block
-            min_deposit: 1_000_000_000_000,       // 10,000 BLEEP
             total_staked: 70_000_000_000_000_000, // 70M BLEEP staked
         }
     }
@@ -164,6 +224,7 @@ impl Default for GovernanceConfig {
 pub struct LiveGovernanceEngine {
     pub config: GovernanceConfig,
     proposals: HashMap<u64, Proposal>,
+    stake_snapshots: HashMap<u64, HashMap<String, u128>>,
     event_log: Vec<GovernanceEvent>,
     next_id: u64,
     current_block: u64,
@@ -183,10 +244,43 @@ impl LiveGovernanceEngine {
         Self {
             config,
             proposals: HashMap::new(),
+            stake_snapshots: HashMap::new(),
             event_log: Vec::new(),
             next_id: 1,
             current_block,
         }
+    }
+
+    /// Record the consensus stake state at a block. Snapshots are immutable.
+    pub fn record_stake_snapshot(
+        &mut self,
+        block: u64,
+        stakes: HashMap<String, u128>,
+    ) -> Result<(), GovernanceError> {
+        if block > self.current_block {
+            return Err(GovernanceError::InvalidStakeSnapshot(block));
+        }
+        if self.stake_snapshots.contains_key(&block)
+            || self
+                .proposals
+                .values()
+                .any(|proposal| proposal.created_at_block == block)
+        {
+            return Err(GovernanceError::StakeSnapshotAlreadyRecorded(block));
+        }
+        let total_snapshot_stake = stakes.values().try_fold(0u128, |total, stake| {
+            total
+                .checked_add(*stake)
+                .ok_or(GovernanceError::TallyOverflow)
+        })?;
+        if total_snapshot_stake > self.config.total_staked {
+            return Err(GovernanceError::StakeSnapshotExceedsTotalStake {
+                snapshot_stake: total_snapshot_stake,
+                total_staked: self.config.total_staked,
+            });
+        }
+        self.stake_snapshots.insert(block, stakes);
+        Ok(())
     }
 
     /// Submit a new governance proposal.
@@ -196,13 +290,11 @@ impl LiveGovernanceEngine {
         title: &str,
         description: &str,
         param_change: Option<GovernableParam>,
-        deposit: u128,
     ) -> Result<u64, GovernanceError> {
-        if deposit < self.config.min_deposit {
-            return Err(GovernanceError::InsufficientDeposit {
-                required: self.config.min_deposit,
-                provided: deposit,
-            });
+        if !self.stake_snapshots.contains_key(&self.current_block) {
+            return Err(GovernanceError::StakeSnapshotUnavailable(
+                self.current_block,
+            ));
         }
 
         // Pre-validate constitutional constraints
@@ -212,8 +304,14 @@ impl LiveGovernanceEngine {
         }
 
         let id = self.next_id;
-        self.next_id += 1;
-        let voting_end = self.current_block + self.config.voting_period_blocks;
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(GovernanceError::ArithmeticOverflow)?;
+        let voting_end = self
+            .current_block
+            .checked_add(self.config.voting_period_blocks)
+            .ok_or(GovernanceError::ArithmeticOverflow)?;
 
         let proposal = Proposal {
             id,
@@ -221,7 +319,6 @@ impl LiveGovernanceEngine {
             title: title.into(),
             description: description.into(),
             param_change,
-            deposit,
             state: ProposalState::Active,
             yes_votes: 0,
             no_votes: 0,
@@ -238,10 +335,11 @@ impl LiveGovernanceEngine {
             kind: "proposal_submitted".into(),
             proposal: id,
             actor: proposer.into(),
-            detail: format!("title='{}' deposit={}", title, deposit),
+            detail: format!("title='{}'", title),
         });
 
         self.proposals.insert(id, proposal);
+        self.next_id = next_id;
         Ok(id)
     }
 
@@ -249,13 +347,16 @@ impl LiveGovernanceEngine {
     pub fn vote(
         &mut self,
         proposal_id: u64,
-        voter: &str,
+        voter: &VerifiedVoter,
         vote: Vote,
-        voting_power: u128, // staked BLEEP of this voter
     ) -> Result<(), GovernanceError> {
+        if !voter.authorizes(proposal_id, &vote) {
+            return Err(GovernanceError::InvalidVoterSignature);
+        }
+
         let proposal = self
             .proposals
-            .get_mut(&proposal_id)
+            .get(&proposal_id)
             .ok_or(GovernanceError::ProposalNotFound(proposal_id))?;
 
         if proposal.state != ProposalState::Active {
@@ -264,29 +365,79 @@ impl LiveGovernanceEngine {
         if self.current_block > proposal.voting_end_block {
             return Err(GovernanceError::VotingClosed);
         }
-        if proposal.voters.contains_key(voter) {
+        if proposal.voters.contains_key(voter.address()) {
             return Err(GovernanceError::AlreadyVoted);
         }
 
-        match vote {
-            Vote::Yes => proposal.yes_votes += voting_power,
-            Vote::No => proposal.no_votes += voting_power,
-            Vote::Abstain => proposal.abstain_votes += voting_power,
-            Vote::Veto => {
-                proposal.veto_votes += voting_power;
-                proposal.no_votes += voting_power;
-            }
-        }
-        proposal.voters.insert(voter.into(), vote.clone());
+        let voting_power = self
+            .stake_at(voter.address(), proposal.created_at_block)
+            .filter(|power| *power > 0)
+            .ok_or(GovernanceError::NoVotingPower)?;
+        let (yes_votes, no_votes, abstain_votes, veto_votes) = match &vote {
+            Vote::Yes => (
+                proposal
+                    .yes_votes
+                    .checked_add(voting_power)
+                    .ok_or(GovernanceError::TallyOverflow)?,
+                proposal.no_votes,
+                proposal.abstain_votes,
+                proposal.veto_votes,
+            ),
+            Vote::No => (
+                proposal.yes_votes,
+                proposal
+                    .no_votes
+                    .checked_add(voting_power)
+                    .ok_or(GovernanceError::TallyOverflow)?,
+                proposal.abstain_votes,
+                proposal.veto_votes,
+            ),
+            Vote::Abstain => (
+                proposal.yes_votes,
+                proposal.no_votes,
+                proposal
+                    .abstain_votes
+                    .checked_add(voting_power)
+                    .ok_or(GovernanceError::TallyOverflow)?,
+                proposal.veto_votes,
+            ),
+            Vote::Veto => (
+                proposal.yes_votes,
+                proposal.no_votes,
+                proposal.abstain_votes,
+                proposal
+                    .veto_votes
+                    .checked_add(voting_power)
+                    .ok_or(GovernanceError::TallyOverflow)?,
+            ),
+        };
+        let proposal = self
+            .proposals
+            .get_mut(&proposal_id)
+            .ok_or(GovernanceError::ProposalNotFound(proposal_id))?;
+        proposal.yes_votes = yes_votes;
+        proposal.no_votes = no_votes;
+        proposal.abstain_votes = abstain_votes;
+        proposal.veto_votes = veto_votes;
+        proposal
+            .voters
+            .insert(voter.address().to_owned(), vote.clone());
 
         self.event_log.push(GovernanceEvent {
             block: self.current_block,
             kind: "vote_cast".into(),
             proposal: proposal_id,
-            actor: voter.into(),
+            actor: voter.address().into(),
             detail: format!("vote={:?} power={}", vote, voting_power),
         });
         Ok(())
+    }
+
+    fn stake_at(&self, address: &str, block: u64) -> Option<u128> {
+        self.stake_snapshots
+            .get(&block)
+            .and_then(|snapshot| snapshot.get(address))
+            .copied()
     }
 
     /// Tally and finalise a proposal at or after its voting end block.
@@ -300,9 +451,26 @@ impl LiveGovernanceEngine {
             return Ok(proposal.state.clone());
         }
 
-        let total_votes = proposal.yes_votes + proposal.no_votes + proposal.abstain_votes;
-        let quorum_required = self.config.total_staked * self.config.quorum_bps as u128 / 10_000;
-        let veto_threshold = total_votes * self.config.veto_threshold_bps as u128 / 10_000;
+        let total_votes = proposal
+            .yes_votes
+            .checked_add(proposal.no_votes)
+            .and_then(|total| total.checked_add(proposal.abstain_votes))
+            .and_then(|total| total.checked_add(proposal.veto_votes))
+            .ok_or(GovernanceError::TallyOverflow)?;
+        let quorum_required = self
+            .config
+            .total_staked
+            .checked_mul(self.config.quorum_bps as u128)
+            .ok_or(GovernanceError::TallyOverflow)?
+            / 10_000;
+        let veto_threshold = total_votes
+            .checked_mul(self.config.veto_threshold_bps as u128)
+            .ok_or(GovernanceError::TallyOverflow)?
+            / 10_000;
+        let pass_threshold = total_votes
+            .checked_mul(self.config.threshold_bps as u128)
+            .ok_or(GovernanceError::TallyOverflow)?
+            / 10_000;
 
         if total_votes < quorum_required {
             proposal.state = ProposalState::Rejected;
@@ -331,7 +499,6 @@ impl LiveGovernanceEngine {
             return Ok(ProposalState::Vetoed);
         }
 
-        let pass_threshold = total_votes * self.config.threshold_bps as u128 / 10_000;
         if proposal.yes_votes > pass_threshold {
             proposal.state = ProposalState::Passed;
             self.event_log.push(GovernanceEvent {
@@ -366,11 +533,7 @@ impl LiveGovernanceEngine {
             return Err(GovernanceError::NotPassed);
         }
 
-        // Build deterministic execution tx hash
-        let tx_hash = format!(
-            "0x{:064x}",
-            proposal_id.wrapping_mul(0x9e3779b97f4a7c15) ^ (self.current_block << 32)
-        );
+        let tx_hash = format!("0x{:032x}{:032x}", proposal_id, self.current_block);
         proposal.execution_tx = Some(tx_hash.clone());
         proposal.state = ProposalState::Executed;
 
@@ -392,11 +555,18 @@ impl LiveGovernanceEngine {
         })
     }
 
-    pub fn advance_block(&mut self, blocks: u64) {
-        self.current_block += blocks;
+    pub fn advance_block(&mut self, blocks: u64) -> Result<(), GovernanceError> {
+        self.current_block = self
+            .current_block
+            .checked_add(blocks)
+            .ok_or(GovernanceError::ArithmeticOverflow)?;
+        Ok(())
     }
     pub fn proposal(&self, id: u64) -> Option<&Proposal> {
         self.proposals.get(&id)
+    }
+    pub fn current_block(&self) -> u64 {
+        self.current_block
     }
     pub fn event_log(&self) -> &[GovernanceEvent] {
         &self.event_log
@@ -408,12 +578,13 @@ impl LiveGovernanceEngine {
             .collect()
     }
 
-    /// Export engine state as JSON (proposals, events, current block, next id)
+    /// Export engine state as JSON (proposals, stake snapshots, events, block and next id).
     pub fn export_state(&self) -> Result<String, serde_json::Error> {
         #[derive(Serialize)]
         struct Export<'a> {
             config: &'a GovernanceConfig,
             proposals: &'a HashMap<u64, Proposal>,
+            stake_snapshots: &'a HashMap<u64, HashMap<String, u128>>,
             event_log: &'a Vec<GovernanceEvent>,
             next_id: u64,
             current_block: u64,
@@ -421,6 +592,7 @@ impl LiveGovernanceEngine {
         let e = Export {
             config: &self.config,
             proposals: &self.proposals,
+            stake_snapshots: &self.stake_snapshots,
             event_log: &self.event_log,
             next_id: self.next_id,
             current_block: self.current_block,
@@ -434,6 +606,8 @@ impl LiveGovernanceEngine {
         struct Import {
             config: GovernanceConfig,
             proposals: HashMap<u64, Proposal>,
+            #[serde(default)]
+            stake_snapshots: HashMap<u64, HashMap<String, u128>>,
             event_log: Vec<GovernanceEvent>,
             next_id: u64,
             current_block: u64,
@@ -441,6 +615,7 @@ impl LiveGovernanceEngine {
         let imp: Import = serde_json::from_str(json)?;
         self.config = imp.config;
         self.proposals = imp.proposals;
+        self.stake_snapshots = imp.stake_snapshots;
         self.event_log = imp.event_log;
         self.next_id = imp.next_id;
         self.current_block = imp.current_block;
@@ -459,7 +634,17 @@ pub struct ExecutionResult {
 #[derive(Debug, Clone)]
 pub enum GovernanceError {
     ProposalNotFound(u64),
-    InsufficientDeposit { required: u128, provided: u128 },
+    NoVotingPower,
+    InvalidVoterSignature,
+    TallyOverflow,
+    ArithmeticOverflow,
+    StakeSnapshotUnavailable(u64),
+    StakeSnapshotAlreadyRecorded(u64),
+    StakeSnapshotExceedsTotalStake {
+        snapshot_stake: u128,
+        total_staked: u128,
+    },
+    InvalidStakeSnapshot(u64),
     ConstitutionalViolation(String),
     VotingClosed,
     AlreadyVoted,
@@ -471,32 +656,72 @@ pub enum GovernanceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bleep_crypto::{derive_account_address, generate_tx_keypair, sign_tx_payload};
 
     fn engine() -> LiveGovernanceEngine {
-        LiveGovernanceEngine::new(GovernanceConfig::default(), 1_000)
+        let mut engine = LiveGovernanceEngine::new(GovernanceConfig::default(), 1_000);
+        engine.record_stake_snapshot(1_000, HashMap::new()).unwrap();
+        engine
+    }
+
+    struct TestVoter {
+        address: String,
+        public_key: Vec<u8>,
+        secret_key: Vec<u8>,
+    }
+
+    impl TestVoter {
+        fn new() -> Self {
+            let (public_key, secret_key) = generate_tx_keypair();
+            Self {
+                address: derive_account_address(&public_key),
+                public_key,
+                secret_key,
+            }
+        }
+
+        fn verified(&self, proposal_id: u64, vote: Vote) -> VerifiedVoter {
+            let payload = governance_vote_signing_payload(proposal_id, &self.address, &vote);
+            let signature = sign_tx_payload(&payload, &self.secret_key).unwrap();
+            VerifiedVoter::verify_vote(
+                proposal_id,
+                &self.address,
+                vote,
+                &self.public_key,
+                &signature,
+            )
+            .unwrap()
+        }
+    }
+
+    fn engine_with_stakes(stakes: &[(&TestVoter, u128)]) -> LiveGovernanceEngine {
+        let mut engine = LiveGovernanceEngine::new(GovernanceConfig::default(), 1_000);
+        let snapshot = stakes
+            .iter()
+            .map(|(voter, stake)| (voter.address.clone(), *stake))
+            .collect();
+        engine.record_stake_snapshot(1_000, snapshot).unwrap();
+        engine
     }
 
     #[test]
     fn full_governance_lifecycle() {
-        let mut gov = engine();
+        let voter = TestVoter::new();
+        let mut gov = engine_with_stakes(&[(&voter, 60_000_000_000_000_000)]);
         let pid = gov
             .submit(
                 "bleep:testnet:proposer",
                 "Reduce fee burn to 20%",
                 "Lower the base fee burn from 25% to 20% to increase validator rewards.",
                 Some(GovernableParam::FeeBurnBps(2_000)),
-                gov.config.min_deposit,
             )
             .unwrap();
 
-        // Validators vote yes with large stake
-        let stake_per = gov.config.total_staked / 10; // 10% each
-        for i in 0..7 {
-            gov.vote(pid, &format!("validator-{}", i), Vote::Yes, stake_per)
-                .unwrap();
-        }
+        let verified = voter.verified(pid, Vote::Yes);
+        gov.vote(pid, &verified, Vote::Yes).unwrap();
 
-        gov.advance_block(gov.config.voting_period_blocks + 1);
+        gov.advance_block(gov.config.voting_period_blocks + 1)
+            .unwrap();
         let state = gov.tally(pid).unwrap();
         assert_eq!(state, ProposalState::Passed);
 
@@ -515,7 +740,6 @@ mod tests {
                 "Infinite inflation",
                 "Set max inflation to 100% per epoch",
                 Some(GovernableParam::MaxInflationBps(10_000)),
-                gov.config.min_deposit,
             )
             .unwrap_err();
         assert!(matches!(err, GovernanceError::ConstitutionalViolation(_)));
@@ -523,76 +747,139 @@ mod tests {
 
     #[test]
     fn proposal_vetoed_when_veto_threshold_reached() {
-        let mut gov = engine();
-        let pid = gov
-            .submit(
-                "alice",
-                "Controversial",
-                "...",
-                None,
-                gov.config.min_deposit,
-            )
+        let voter = TestVoter::new();
+        let mut gov = engine_with_stakes(&[(&voter, 40_000_000_000_000_000)]);
+        let pid = gov.submit("alice", "Controversial", "...", None).unwrap();
+
+        let verified = voter.verified(pid, Vote::Veto);
+        gov.vote(pid, &verified, Vote::Veto).unwrap();
+
+        gov.advance_block(gov.config.voting_period_blocks + 1)
             .unwrap();
-
-        let stake = gov.config.total_staked / 5; // 20% each
-        gov.vote(pid, "v0", Vote::Yes, stake).unwrap();
-        gov.vote(pid, "v1", Vote::Veto, stake * 2).unwrap(); // >33% veto
-
-        gov.advance_block(gov.config.voting_period_blocks + 1);
         let state = gov.tally(pid).unwrap();
         assert_eq!(state, ProposalState::Vetoed);
     }
 
     #[test]
-    fn insufficient_deposit_rejected() {
+    fn proposal_submission_does_not_claim_to_escrow_a_deposit() {
         let mut gov = engine();
-        let err = gov
-            .submit("poor-proposer", "Test", "...", None, 1)
-            .unwrap_err();
-        assert!(matches!(err, GovernanceError::InsufficientDeposit { .. }));
+        let id = gov
+            .submit("proposer", "Test", "No escrow is performed", None)
+            .unwrap();
+        assert_eq!(gov.proposal(id).unwrap().title, "Test");
     }
 
     #[test]
     fn quorum_failure_rejects_proposal() {
-        let mut gov = engine();
-        let pid = gov
-            .submit("alice", "Low turnout", "...", None, gov.config.min_deposit)
+        let voter = TestVoter::new();
+        let mut gov = engine_with_stakes(&[(&voter, 700_000_000_000_000)]);
+        let pid = gov.submit("alice", "Low turnout", "...", None).unwrap();
+        let verified = voter.verified(pid, Vote::Yes);
+        gov.vote(pid, &verified, Vote::Yes).unwrap();
+        gov.advance_block(gov.config.voting_period_blocks + 1)
             .unwrap();
-        // Only 1% of stake votes
-        gov.vote(pid, "v0", Vote::Yes, gov.config.total_staked / 100)
-            .unwrap();
-        gov.advance_block(gov.config.voting_period_blocks + 1);
         let state = gov.tally(pid).unwrap();
         assert_eq!(state, ProposalState::Rejected);
     }
 
     #[test]
     fn double_vote_rejected() {
-        let mut gov = engine();
-        let pid = gov
-            .submit("alice", "T", "...", None, gov.config.min_deposit)
-            .unwrap();
-        gov.vote(pid, "v0", Vote::Yes, 1_000_000).unwrap();
-        let err = gov.vote(pid, "v0", Vote::No, 1_000_000).unwrap_err();
+        let voter = TestVoter::new();
+        let mut gov = engine_with_stakes(&[(&voter, 1_000_000)]);
+        let pid = gov.submit("alice", "T", "...", None).unwrap();
+        let yes = voter.verified(pid, Vote::Yes);
+        gov.vote(pid, &yes, Vote::Yes).unwrap();
+        let no = voter.verified(pid, Vote::No);
+        let err = gov.vote(pid, &no, Vote::No).unwrap_err();
         assert!(matches!(err, GovernanceError::AlreadyVoted));
     }
 
     #[test]
     fn governance_event_log_records_full_lifecycle() {
-        let mut gov = engine();
-        let pid = gov
-            .submit("alice", "T", "...", None, gov.config.min_deposit)
+        let voter = TestVoter::new();
+        let mut gov = engine_with_stakes(&[(&voter, 60_000_000_000_000_000)]);
+        let pid = gov.submit("alice", "T", "...", None).unwrap();
+        let verified = voter.verified(pid, Vote::Yes);
+        gov.vote(pid, &verified, Vote::Yes).unwrap();
+        gov.advance_block(gov.config.voting_period_blocks + 1)
             .unwrap();
-        let stake = gov.config.total_staked / 5;
-        for i in 0..7 {
-            gov.vote(pid, &format!("v{}", i), Vote::Yes, stake).unwrap();
-        }
-        gov.advance_block(gov.config.voting_period_blocks + 1);
         gov.tally(pid).unwrap();
         gov.execute(pid).unwrap();
         let events: Vec<&str> = gov.event_log().iter().map(|e| e.kind.as_str()).collect();
         assert!(events.contains(&"proposal_submitted"));
         assert!(events.contains(&"proposal_passed"));
         assert!(events.contains(&"proposal_executed"));
+    }
+
+    #[test]
+    fn poc_gov_c_06a_unfunded_voter_fails_with_no_voting_power() {
+        let voter = TestVoter::new();
+        let mut gov = engine();
+        let pid = gov.submit("alice", "T", "...", None).unwrap();
+        let verified = voter.verified(pid, Vote::Yes);
+        assert!(matches!(
+            gov.vote(pid, &verified, Vote::Yes),
+            Err(GovernanceError::NoVotingPower)
+        ));
+    }
+
+    #[test]
+    fn poc_gov_c_06b_tally_overflow_returns_error_without_a_verdict() {
+        let mut gov = engine();
+        let pid = gov.submit("alice", "T", "...", None).unwrap();
+        let proposal = gov.proposals.get_mut(&pid).unwrap();
+        proposal.yes_votes = u128::MAX;
+        proposal.no_votes = 1;
+        gov.advance_block(gov.config.voting_period_blocks + 1)
+            .unwrap();
+
+        assert!(matches!(
+            gov.tally(pid),
+            Err(GovernanceError::TallyOverflow)
+        ));
+        assert_eq!(gov.proposal(pid).unwrap().state, ProposalState::Active);
+    }
+
+    #[test]
+    fn poc_gov_c_06c_veto_vote_updates_only_its_own_accumulator() {
+        let voter = TestVoter::new();
+        let stake = 30_000_000_000_000_000;
+        let mut gov = engine_with_stakes(&[(&voter, stake)]);
+        let pid = gov.submit("alice", "T", "...", None).unwrap();
+        let verified = voter.verified(pid, Vote::Veto);
+        gov.vote(pid, &verified, Vote::Veto).unwrap();
+
+        let proposal = gov.proposal(pid).unwrap();
+        assert_eq!(proposal.veto_votes, stake);
+        assert_eq!(proposal.no_votes, 0);
+        assert_eq!(proposal.yes_votes, 0);
+        assert_eq!(proposal.abstain_votes, 0);
+    }
+
+    #[test]
+    fn stake_snapshot_cannot_exceed_configured_network_stake() {
+        let mut gov = LiveGovernanceEngine::new(GovernanceConfig::default(), 1_000);
+        let total = gov.config.total_staked;
+        assert!(matches!(
+            gov.record_stake_snapshot(1_000, HashMap::from([("voter".into(), total + 1)])),
+            Err(GovernanceError::StakeSnapshotExceedsTotalStake { .. })
+        ));
+    }
+
+    #[test]
+    fn voter_signature_is_bound_to_address_proposal_and_vote() {
+        let voter = TestVoter::new();
+        let mut gov = engine_with_stakes(&[(&voter, 1_000_000)]);
+        let pid = gov.submit("alice", "T", "...", None).unwrap();
+        let verified = voter.verified(pid, Vote::Yes);
+
+        assert!(matches!(
+            gov.vote(pid, &verified, Vote::No),
+            Err(GovernanceError::InvalidVoterSignature)
+        ));
+        assert!(matches!(
+            gov.vote(pid + 1, &verified, Vote::Yes),
+            Err(GovernanceError::InvalidVoterSignature)
+        ));
     }
 }

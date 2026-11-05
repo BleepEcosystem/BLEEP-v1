@@ -541,10 +541,12 @@ impl BlockProducer {
 
         for (idx, zt) in pending.iter().enumerate() {
             let block_tx = Transaction {
+                version: zt.version,
                 chain_id: zt.chain_id.clone(),
                 sender: zt.sender.clone(),
                 receiver: zt.receiver.clone(),
                 amount: zt.amount,
+                fee: zt.fee,
                 timestamp: zt.timestamp,
                 nonce: zt.nonce,
                 signature: zt.signature.clone(),
@@ -647,10 +649,12 @@ impl BlockProducer {
                         }
                     };
                 let block_tx = Transaction {
+                    version: zt.version,
                     chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
+                    fee: zt.fee,
                     timestamp: zt.timestamp,
                     nonce: zt.nonce,
                     signature: zt.signature.clone(),
@@ -694,10 +698,11 @@ impl BlockProducer {
                 }
 
                 // Path 1: native transfer (sender → receiver, exact amount)
-                let ok = state.apply_transfer(
+                let ok = state.apply_transfer_with_fee(
                     &zt.sender,
                     &execution_receiver,
                     zt.amount as u128,
+                    zt.fee as u128,
                     zt.nonce,
                     zt.timestamp,
                 );
@@ -759,10 +764,12 @@ impl BlockProducer {
 
                 total_gas += gas;
                 block_txs.push(Transaction {
+                    version: zt.version,
                     chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
+                    fee: zt.fee,
                     timestamp: zt.timestamp,
                     nonce: zt.nonce,
                     signature: zt.signature.clone(),
@@ -978,15 +985,18 @@ impl BlockProducer {
 
         // ── 11: Drain committed txs from pool ─────────────────────────────────
         for tx in &block_txs {
-            let tx_id = Self::canonical_tx_id(&ZKTransaction {
+            let tx_id = ZKTransaction {
+                version: tx.version,
                 chain_id: tx.chain_id.clone(),
                 sender: tx.sender.clone(),
                 receiver: tx.receiver.clone(),
                 amount: tx.amount,
+                fee: tx.fee,
                 timestamp: tx.timestamp,
                 nonce: tx.nonce,
                 signature: tx.signature.clone(),
-            });
+            }
+            .get_hash();
             self.tx_pool.remove_confirmed(&tx_id).await;
         }
 
@@ -1009,10 +1019,7 @@ impl BlockProducer {
     }
 
     fn canonical_tx_id(zt: &ZKTransaction) -> String {
-        format!(
-            "{}:{}:{}:{}",
-            zt.sender, zt.receiver, zt.amount, zt.timestamp
-        )
+        zt.get_hash()
     }
 
     /// Generate an extended 68-column STARK proof that commits to `sig_commitment_root`.
@@ -1171,10 +1178,12 @@ pub fn start_block_producer(
             let txs: Vec<Transaction> = pending
                 .iter()
                 .map(|zt| Transaction {
+                    version: zt.version,
                     chain_id: zt.chain_id.clone(),
                     sender: zt.sender.clone(),
                     receiver: zt.receiver.clone(),
                     amount: zt.amount,
+                    fee: zt.fee,
                     timestamp: zt.timestamp,
                     nonce: zt.nonce,
                     signature: zt.signature.clone(),
@@ -1214,12 +1223,19 @@ pub fn start_block_producer(
                 continue;
             }
             for tx in &txs {
-                tx_pool
-                    .remove_confirmed(&format!(
-                        "{}:{}:{}:{}",
-                        tx.sender, tx.receiver, tx.amount, tx.timestamp
-                    ))
-                    .await;
+                let tx_id = ZKTransaction {
+                    version: tx.version,
+                    chain_id: tx.chain_id.clone(),
+                    sender: tx.sender.clone(),
+                    receiver: tx.receiver.clone(),
+                    amount: tx.amount,
+                    fee: tx.fee,
+                    timestamp: tx.timestamp,
+                    nonce: tx.nonce,
+                    signature: tx.signature.clone(),
+                }
+                .get_hash();
+                tx_pool.remove_confirmed(&tx_id).await;
             }
         }
     })
@@ -1272,33 +1288,43 @@ mod real_transaction_benchmark {
         const TRANSACTION_COUNT: usize = 1_000;
         let total_start = Instant::now();
 
-        let (sender_pk, sender_sk) = generate_tx_keypair();
+        let sender_keys: Vec<_> = (0..16)
+            .map(|_| {
+                let (public_key, secret_key) = generate_tx_keypair();
+                let sender = bleep_crypto::derive_account_address(&public_key);
+                (public_key, secret_key, sender)
+            })
+            .collect();
         let (validator_pk, validator_sk) = generate_tx_keypair();
-        let sender = bleep_crypto::derive_account_address(&sender_pk);
         let receiver = "bleep1realbenchmarkreceiver";
 
         let signing_start = Instant::now();
         let mut transactions = Vec::with_capacity(TRANSACTION_COUNT);
         for index in 0..TRANSACTION_COUNT {
+            let (sender_pk, sender_sk, sender) = &sender_keys[index % sender_keys.len()];
             let timestamp = 1_700_000_000 + index as u64;
-            let nonce = index as u64;
-            let payload = tx_payload(
+            let nonce = (index / sender_keys.len()) as u64;
+            let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+            let payload = bleep_crypto::tx_signer::tx_payload_v2(
                 bleep_crypto::DEFAULT_CHAIN_ID,
-                &sender,
+                sender,
                 receiver,
                 1,
+                fee,
                 timestamp,
                 nonce,
             );
-            let detached = sign_tx_payload(&payload, &sender_sk).expect("transaction signing");
+            let detached = sign_tx_payload(&payload, sender_sk).expect("transaction signing");
             let mut signature = Vec::with_capacity(sender_pk.len() + detached.len());
-            signature.extend_from_slice(&sender_pk);
+            signature.extend_from_slice(sender_pk);
             signature.extend_from_slice(&detached);
             transactions.push(ZKTransaction {
+                version: 2,
                 chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
                 sender: sender.clone(),
                 receiver: receiver.to_string(),
                 amount: 1,
+                fee,
                 timestamp,
                 nonce,
                 signature,
@@ -1306,7 +1332,18 @@ mod real_transaction_benchmark {
         }
         let signing_ms = signing_start.elapsed().as_secs_f64() * 1_000.0;
 
-        let tx_pool = TransactionPool::new(TRANSACTION_COUNT);
+        let state = Arc::new(parking_lot::Mutex::new(StateManager::new()));
+        for (_, _, sender) in &sender_keys {
+            state
+                .lock()
+                .set_balance(sender, 1_000_000)
+                .expect("fund benchmark account");
+        }
+        let tx_pool = TransactionPool::new_with_state(
+            TRANSACTION_COUNT,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(state),
+        );
         let admission_start = Instant::now();
         let mut admitted = 0usize;
         for transaction in transactions {

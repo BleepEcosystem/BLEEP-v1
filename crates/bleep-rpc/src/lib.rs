@@ -284,10 +284,14 @@ struct JsonReply {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxReq {
+    #[serde(default)]
+    version: u16,
     chain_id: String,
     sender: String,
     receiver: String,
     amount: u64,
+    #[serde(default)]
+    fee: u64,
     timestamp: u64,
     nonce: u64,
     signature: Vec<u8>,
@@ -451,19 +455,6 @@ impl StakeRequest {
     }
 }
 
-fn validator_stake_payload(
-    chain_id: &str,
-    account: &str,
-    validator: bleep_crypto::tx_signer::ValidatorKeyBindings<'_>,
-    amount: u64,
-    timestamp: u64,
-    nonce: u64,
-) -> [u8; 32] {
-    bleep_crypto::tx_signer::validator_stake_payload(
-        chain_id, account, validator, amount, timestamp, nonce,
-    )
-}
-
 fn create_validator_stake_transaction(
     req: StakeRequest,
     signing_public_key: Vec<u8>,
@@ -506,7 +497,8 @@ fn create_validator_stake_transaction(
         })?;
     let kyber_public_key = kyber_public_key.to_vec();
     let account = bleep_crypto::tx_signer::derive_account_address(&signing_public_key);
-    let request_hash = validator_stake_payload(
+    let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+    let request_hash = bleep_crypto::tx_signer::validator_stake_payload_v2(
         chain_id,
         &account,
         bleep_crypto::tx_signer::ValidatorKeyBindings {
@@ -515,6 +507,7 @@ fn create_validator_stake_transaction(
             vrf_public_key: &vrf_public_key,
         },
         req.amount,
+        fee,
         req.timestamp,
         nonce,
     );
@@ -533,10 +526,12 @@ fn create_validator_stake_transaction(
     let mut signature = signing_public_key;
     signature.extend_from_slice(&proof);
     let transaction = bleep_core::transaction::ZKTransaction {
+        version: 2,
         chain_id: chain_id.to_string(),
         sender: account,
         receiver,
         amount: req.amount,
+        fee,
         timestamp: req.timestamp,
         nonce,
         signature,
@@ -660,10 +655,12 @@ pub fn rpc_routes_with_state(
 
                 // Create ZKTransaction from request
                 let tx = bleep_core::transaction::ZKTransaction {
+                    version: req.version,
                     chain_id: req.chain_id.clone(),
                     sender: req.sender.clone(),
                     receiver: req.receiver.clone(),
                     amount: req.amount,
+                    fee: req.fee,
                     timestamp: req.timestamp,
                     nonce: req.nonce,
                     signature: req.signature,
@@ -682,10 +679,7 @@ pub fn rpc_routes_with_state(
                         ));
                     }
                 };
-                let tx_id = format!(
-                    "{}:{}:{}:{}",
-                    tx.sender, tx.receiver, tx.amount, tx.timestamp
-                );
+                let tx_id = tx.get_hash();
 
                 // Try to add transaction to pool
                 let admitted = pool.add_transaction(tx).await;
@@ -814,15 +808,7 @@ pub fn rpc_routes_with_state(
         .and_then(|st: RpcState| async move {
             if let Some(pool) = st.transaction_pool {
                 let txs = pool.get_transactions().await;
-                let tx_ids: Vec<String> = txs
-                    .into_iter()
-                    .map(|tx| {
-                        format!(
-                            "{}:{}:{}:{}",
-                            tx.sender, tx.receiver, tx.amount, tx.timestamp
-                        )
-                    })
-                    .collect();
+                let tx_ids: Vec<String> = txs.into_iter().map(|tx| tx.get_hash()).collect();
                 Ok::<_, warp::Rejection>(warp::reply::json(&tx_ids))
             } else {
                 Ok::<_, warp::Rejection>(warp::reply::json(&Vec::<String>::new()))
@@ -4475,7 +4461,8 @@ mod tests {
                 .unwrap();
         let amount = 3_000;
         let timestamp = now_secs();
-        let payload = validator_stake_payload(
+        let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+        let payload = bleep_crypto::tx_signer::validator_stake_payload_v2(
             bleep_crypto::DEFAULT_CHAIN_ID,
             &account,
             bleep_crypto::tx_signer::ValidatorKeyBindings {
@@ -4484,6 +4471,7 @@ mod tests {
                 vrf_public_key: &vrf_public_key,
             },
             amount,
+            fee,
             timestamp,
             0,
         );
@@ -4504,7 +4492,11 @@ mod tests {
             .lock()
             .set_balance(&account, 10_000)
             .expect("seed account balance");
-        let pool = TransactionPool::new_with_chain_id(10, bleep_crypto::DEFAULT_CHAIN_ID);
+        let pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&state_manager)),
+        );
         let error = create_validator_stake_transaction(
             req.clone(),
             signing_public_key.clone(),
@@ -4537,10 +4529,12 @@ mod tests {
             )
         );
         let block_transaction = bleep_core::block::Transaction {
+            version: transaction.version,
             chain_id: transaction.chain_id.clone(),
             sender: transaction.sender.clone(),
             receiver: transaction.receiver.clone(),
             amount: transaction.amount,
+            fee: transaction.fee,
             timestamp: transaction.timestamp,
             nonce: transaction.nonce,
             signature: transaction.signature.clone(),
@@ -4702,27 +4696,38 @@ mod tests {
 
     #[tokio::test]
     async fn rpc_tx_history_returns_pending_transactions() {
-        let pool = TransactionPool::new(10);
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&state_mgr)),
+        );
 
         let (public_key, secret_key) = generate_tx_keypair();
         let sender = bleep_crypto::derive_account_address(&public_key);
+        state_mgr.lock().set_balance(&sender, 10_000).unwrap();
         let receiver = "BLEEP1receiver".to_string();
         let amount = 123u64;
         let timestamp = 1_700_000_000u64;
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
         let nonce = 0;
 
-        let payload = tx_payload(&chain_id, &sender, &receiver, amount, timestamp, nonce);
+        let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
+            &chain_id, &sender, &receiver, amount, fee, timestamp, nonce,
+        );
         let detached_sig = sign_tx_payload(&payload, &secret_key).expect("sign payload");
 
         let mut signature = public_key.clone();
         signature.extend_from_slice(&detached_sig);
 
         let tx = ZKTransaction {
+            version: 2,
             chain_id,
             sender: sender.clone(),
             receiver: receiver.clone(),
             amount,
+            fee,
             timestamp,
             nonce,
             signature,
@@ -4742,36 +4747,43 @@ mod tests {
 
         let tx_ids: Vec<String> = serde_json::from_slice(resp.body()).expect("valid JSON");
         assert_eq!(tx_ids.len(), 1);
-        assert_eq!(
-            tx_ids[0],
-            format!("{}:{}:{}:{}", sender, receiver, amount, timestamp)
-        );
+        assert_eq!(tx_ids[0], tx.get_hash());
     }
 
     #[tokio::test]
     async fn rpc_tx_nonce_includes_contiguous_pending_transactions() {
-        let pool = TransactionPool::new(10);
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&state_mgr)),
+        );
         let (public_key, secret_key) = generate_tx_keypair();
         let sender = bleep_crypto::derive_account_address(&public_key);
         let receiver = "BLEEP1nonce-recipient".to_string();
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
         let timestamp = 1_700_000_000;
         let nonce = 0;
-        let payload = tx_payload(&chain_id, &sender, &receiver, 1, timestamp, nonce);
+        state_mgr.lock().set_balance(&sender, 10_000).unwrap();
+        let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
+            &chain_id, &sender, &receiver, 1, fee, timestamp, nonce,
+        );
         let mut signature = public_key.clone();
         signature.extend_from_slice(&sign_tx_payload(&payload, &secret_key).expect("sign payload"));
         let tx = ZKTransaction {
+            version: 2,
             chain_id,
             sender: sender.clone(),
             receiver,
             amount: 1,
+            fee,
             timestamp,
             nonce,
             signature,
         };
         assert!(pool.add_transaction(tx).await);
 
-        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
         let routes = rpc_routes_with_state(
             RpcState::new()
                 .with_state_manager(state_mgr)
@@ -5013,10 +5025,12 @@ mod tests {
     async fn explorer_routes_read_live_canonical_chain_data() {
         let address = "BLEEP1explorer-address".to_string();
         let tx = bleep_core::block::Transaction {
+            version: 1,
             chain_id: bleep_crypto::DEFAULT_CHAIN_ID.to_string(),
             sender: address.clone(),
             receiver: "BLEEP1recipient".to_string(),
             amount: 123,
+            fee: 0,
             timestamp: 1_700_000_000,
             nonce: 4,
             signature: vec![],
@@ -5219,10 +5233,17 @@ mod tests_sprint8 {
             Err(AuthError::AlreadyBootstrapped)
         ));
         let auth_service = Arc::new(auth_service);
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let tx_pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&state_mgr)),
+        );
         let routes = rpc_routes_with_state(
             RpcState::new()
                 .with_auth_service(Arc::clone(&auth_service))
-                .with_transaction_pool(TransactionPool::new(10)),
+                .with_state_manager(Arc::clone(&state_mgr))
+                .with_transaction_pool(tx_pool),
         );
 
         let challenge_response = warp::test::request()
@@ -5279,7 +5300,11 @@ mod tests_sprint8 {
         let amount = 1;
         let timestamp = 1_700_000_000;
         let nonce = 0;
-        let payload = tx_payload(chain_id, &sender, receiver, amount, timestamp, nonce);
+        state_mgr.lock().set_balance(&sender, 10_000).unwrap();
+        let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
+            chain_id, &sender, receiver, amount, fee, timestamp, nonce,
+        );
         let mut transaction_signature = sender_public_key;
         transaction_signature.extend(sign_tx_payload(&payload, &sender_secret_key).unwrap());
         let transaction_response = warp::test::request()
@@ -5291,9 +5316,11 @@ mod tests_sprint8 {
             )
             .json(&serde_json::json!({
                 "chain_id": chain_id,
+                "version": 2,
                 "sender": sender,
                 "receiver": receiver,
                 "amount": amount,
+                "fee": fee,
                 "timestamp": timestamp,
                 "nonce": nonce,
                 "signature": transaction_signature,

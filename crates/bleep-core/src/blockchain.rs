@@ -73,10 +73,14 @@ impl BlockchainState {
                     format!("balance for {} does not fit u64: {error}", tx.sender)
                 })?,
             };
-            let next_sender = sender_balance.checked_sub(tx.amount).ok_or_else(|| {
+            let total_debit = tx
+                .amount
+                .checked_add(tx.fee)
+                .ok_or_else(|| "Transaction amount plus fee overflow".to_string())?;
+            let next_sender = sender_balance.checked_sub(total_debit).ok_or_else(|| {
                 format!(
                     "Insufficient balance for {}: has {}, needs {}",
-                    tx.sender, sender_balance, tx.amount
+                    tx.sender, sender_balance, total_debit
                 )
             })?;
             let receiver_balance = match staged.get(&receiver) {
@@ -87,8 +91,20 @@ impl BlockchainState {
             let next_receiver = receiver_balance
                 .checked_add(tx.amount)
                 .ok_or_else(|| format!("Balance overflow for {receiver}"))?;
+            let treasury = "bleep:treasury:transaction-fees";
+            let treasury_balance = match staged.get(treasury) {
+                Some(balance) => *balance,
+                None => u64::try_from(state_manager.get_balance(treasury))
+                    .map_err(|error| format!("fee treasury balance does not fit u64: {error}"))?,
+            };
+            let next_treasury = treasury_balance
+                .checked_add(tx.fee)
+                .ok_or_else(|| "Transaction fee treasury balance overflow".to_string())?;
             staged.insert(tx.sender.clone(), next_sender);
             staged.insert(receiver, next_receiver);
+            if tx.fee > 0 {
+                staged.insert(treasury.to_string(), next_treasury);
+            }
         }
         log::debug!(
             "Block {} preflighted: {} transactions, {} accounts touched",

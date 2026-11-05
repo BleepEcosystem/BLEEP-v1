@@ -1,17 +1,21 @@
 mod keystore;
 
+use bleep_crypto::sign_tx_payload_for_address;
 use bleep_governance::live_governance::{
-    GovernableParam, GovernanceConfig, LiveGovernanceEngine, Vote,
+    governance_vote_signing_payload, GovernableParam, GovernanceConfig, LiveGovernanceEngine,
+    VerifiedVoter, Vote,
 };
 use rpassword::prompt_password;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
 fn print_help() {
     println!("Governance Demo REPL commands:");
-    println!("  propose <proposer> <title> <description> [param=value] [deposit]");
-    println!("  vote <proposal_id> <voter> <yes|no|abstain|veto> <voting_power>");
+    println!("  snapshot <address> <stake> [<address> <stake> ...]");
+    println!("  propose <proposer> <title> <description> [param=value]");
+    println!("  vote <proposal_id> <address> <yes|no|abstain|veto> <public_key_hex>");
     println!("  list");
     println!("  status <proposal_id>");
     println!("  tally <proposal_id>");
@@ -66,7 +70,10 @@ mod helper {
 
 fn main() {
     let mut engine = LiveGovernanceEngine::new(GovernanceConfig::default(), 1_000);
-    println!("BLEEP Governance Demo (in-memory). Type 'help' for commands.");
+    println!(
+        "BLEEP Governance Demo (in-memory). Record the current stake snapshot before proposing."
+    );
+    println!("Type 'help' for commands.");
     let mut unlocked: Option<(String, String)> = None; // (name, privhex)
 
     // Attempt to load persisted state if present
@@ -152,48 +159,90 @@ fn main() {
                 continue;
             }
             "exit" | "quit" => break,
-            "propose" => {
-                if parts.len() < 3 {
-                    println!(
-                        "usage: propose <proposer> <title> <description> [param=value] [deposit]"
-                    );
+            "snapshot" => {
+                if parts.is_empty() || parts.len() % 2 != 0 {
+                    println!("usage: snapshot <address> <stake> [<address> <stake> ...]");
                     continue;
                 }
-                let mut proposer = parts.remove(0);
+                let mut stakes = HashMap::new();
+                let mut valid = true;
+                for pair in parts.chunks_exact(2) {
+                    let stake = match pair[1].parse::<u128>() {
+                        Ok(stake) => stake,
+                        Err(_) => {
+                            println!("invalid stake amount for {}", pair[0]);
+                            valid = false;
+                            break;
+                        }
+                    };
+                    if stakes.insert(pair[0].clone(), stake).is_some() {
+                        println!("duplicate address in stake snapshot: {}", pair[0]);
+                        valid = false;
+                        break;
+                    }
+                }
+                if !valid {
+                    continue;
+                }
+                match engine.record_stake_snapshot(engine.current_block(), stakes) {
+                    Ok(()) => {
+                        println!(
+                            "stake snapshot recorded at block {}",
+                            engine.current_block()
+                        );
+                        if let Ok(json) = engine.export_state() {
+                            if let Err(error) = fs::write("state.json", json) {
+                                println!("failed to save state.json: {}", error);
+                            }
+                        }
+                    }
+                    Err(error) => println!("snapshot error: {:?}", error),
+                }
+            }
+            "propose" => {
+                if parts.len() < 3 {
+                    println!("usage: propose <proposer> <title> <description> [param=value]");
+                    continue;
+                }
+                let proposer = parts.remove(0);
                 let title = parts.remove(0);
                 let description = parts.remove(0);
                 let mut param: Option<GovernableParam> = None;
-                let mut deposit = engine.config.min_deposit;
-                if !parts.is_empty() {
-                    for p in parts.iter() {
-                        if p.contains('=') {
-                            if let Some(pp) = parse_param(p) {
+                let mut invalid_param = false;
+                for p in parts.iter() {
+                    if let Some(pp) = parse_param(p) {
+                        param = Some(pp);
+                    } else {
+                        let kv: Vec<&str> = p.splitn(2, '=').collect();
+                        if kv.len() == 2 {
+                            if let Some(pp) = helper::parse_param(kv[0], kv[1]) {
                                 param = Some(pp);
                             } else {
-                                // try helper for float
-                                let kv: Vec<&str> = p.splitn(2, '=').collect();
-                                if kv.len() == 2 {
-                                    if let Some(pp) = helper::parse_param(kv[0], kv[1]) {
-                                        param = Some(pp);
-                                    }
-                                }
+                                println!("unknown proposal parameter: {}", p);
+                                invalid_param = true;
+                                break;
                             }
-                        } else if let Ok(d) = p.parse::<u128>() {
-                            deposit = d;
+                        } else {
+                            println!("invalid proposal parameter: {}", p);
+                            invalid_param = true;
+                            break;
                         }
                     }
                 }
-                // if proposer is "use:key" and unlocked present, substitute
-                if proposer == "use:key" {
-                    if let Some((ref name, _)) = unlocked {
-                        proposer = format!("bleep:demo:{}", name);
+                if invalid_param {
+                    continue;
+                }
+                let proposer = if proposer == "use:key" {
+                    if let Some((name, _)) = &unlocked {
+                        format!("bleep:demo:{}", name)
                     } else {
                         println!("no unlocked key; use keystore unlock <name>");
                         continue;
                     }
-                }
-
-                match engine.submit(&proposer, &title, &description, param, deposit) {
+                } else {
+                    proposer
+                };
+                match engine.submit(&proposer, &title, &description, param) {
                     Ok(id) => println!("proposal submitted id={}", id),
                     Err(e) => println!("submit error: {:?}", e),
                 }
@@ -203,9 +252,9 @@ fn main() {
                 }
             }
             "vote" => {
-                if parts.len() < 4 {
+                if parts.len() != 4 {
                     println!(
-                        "usage: vote <proposal_id> <voter> <yes|no|abstain|veto> <voting_power>"
+                        "usage: vote <proposal_id> <address> <yes|no|abstain|veto> <public_key_hex>"
                     );
                     continue;
                 }
@@ -216,12 +265,12 @@ fn main() {
                         continue;
                     }
                 };
-                let voter = parts.remove(0);
+                let address = parts.remove(0);
                 let vt = parts.remove(0).to_lowercase();
-                let voting_power: u128 = match parts.remove(0).parse() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        println!("invalid voting power");
+                let public_key = match hex::decode(parts.remove(0)) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        println!("invalid public key hex: {}", error);
                         continue;
                     }
                 };
@@ -235,9 +284,37 @@ fn main() {
                         continue;
                     }
                 };
-                match engine.vote(pid, &voter, vote, voting_power) {
-                    Ok(_) => println!("vote recorded"),
-                    Err(e) => println!("vote error: {:?}", e),
+                let Some((_, secret_key_hex)) = &unlocked else {
+                    println!("unlock the voter's private key with keystore unlock <name>");
+                    continue;
+                };
+                let secret_key = match hex::decode(secret_key_hex) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        println!("invalid unlocked private key: {}", error);
+                        continue;
+                    }
+                };
+                let payload = governance_vote_signing_payload(pid, &address, &vote);
+                let signature = match sign_tx_payload_for_address(&payload, &secret_key, &address) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        println!("vote signing failed: {}", error);
+                        continue;
+                    }
+                };
+                match VerifiedVoter::verify_vote(
+                    pid,
+                    &address,
+                    vote.clone(),
+                    &public_key,
+                    &signature,
+                ) {
+                    Ok(verified_voter) => match engine.vote(pid, &verified_voter, vote) {
+                        Ok(()) => println!("vote recorded"),
+                        Err(error) => println!("vote error: {:?}", error),
+                    },
+                    Err(error) => println!("voter verification failed: {:?}", error),
                 }
             }
             "list" => {
@@ -336,21 +413,14 @@ fn main() {
                         continue;
                     }
                 };
-                engine.advance_block(blocks);
-                println!(
-                    "advanced {} blocks, current_block={}",
-                    blocks,
-                    engine
-                        .event_log()
-                        .last()
-                        .map(|_| engine.event_log().last().unwrap().block)
-                        .unwrap_or(
-                            engine
-                                .proposal(0)
-                                .map(|p| p.created_at_block)
-                                .unwrap_or(engine.event_log().len() as u64)
-                        )
-                );
+                match engine.advance_block(blocks) {
+                    Ok(()) => println!(
+                        "advanced {} blocks, current_block={}",
+                        blocks,
+                        engine.current_block()
+                    ),
+                    Err(error) => println!("advance error: {:?}", error),
+                }
             }
             "events" => {
                 for e in engine.event_log() {

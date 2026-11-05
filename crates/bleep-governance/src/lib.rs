@@ -114,4 +114,6 @@ pub fn init_governance() -> Result<ProtocolEvolutionOrchestrator, Box<dyn std::e
 // ── Sprint 9 modules ──────────────────────────────────────────────────────────
 pub mod live_governance;
 
-pub use live_governance::{GovernanceConfig, LiveGovernanceEngine};
+pub use live_governance::{
+    governance_vote_signing_payload, GovernanceConfig, LiveGovernanceEngine, VerifiedVoter,
+};

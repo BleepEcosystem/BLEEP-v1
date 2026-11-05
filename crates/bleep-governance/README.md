@@ -26,6 +26,8 @@ The following parameters cannot be modified by any governance vote, software upg
 
 A proposal that would set `MaxInflationBps` above 500 is rejected by `AIConstraintValidator` at pre-flight and never reaches a vote.
 
+The `LiveGovernanceEngine` requires an immutable stake snapshot for a proposal's creation block. Voting power is read from that snapshot; vote callers cannot supply weight. A `VerifiedVoter` is created only after validating the account key and a signature over the proposal ID, account address, and vote. This module does not collect or escrow proposal deposits.
+
 ---
 
 ## Architecture
@@ -56,7 +58,7 @@ bleep-governance
 ## Proposal Lifecycle
 
 ```
-Proposer deposits 10,000 BLEEP
+Proposal submitted (deposits are not escrowed by this module)
       ↓
 submit_proposal() → governance queue
       ↓
@@ -138,7 +140,6 @@ let engine = GovernanceEngine::new(config);
 let proposal_id = engine.submit_proposal(
     ProposalType::ProtocolUpgrade(payload),
     submitter_address,
-    deposit_amount,
 )?;
 
 // Cast a vote
@@ -158,7 +159,7 @@ engine.try_execute(proposal_id)?;
 | Quorum | 1,000 bps (10% stake participation) |
 | Pass threshold | 6,667 bps (66.67% of participating stake) |
 | Veto threshold | 3,333 bps (33.33%) |
-| Minimum deposit | 10,000 BLEEP |
+| Proposal deposit | Not collected or escrowed by this module |
 
 ---
 

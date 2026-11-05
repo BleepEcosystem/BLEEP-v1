@@ -319,7 +319,7 @@ impl Wallet {
 
     /// Sign `tx` using the scheme encoded by this wallet's address.
     ///
-    /// The canonical payload binds chain ID, account, amount, timestamp, and nonce.
+    /// The V2 payload binds chain ID, account, amount, fee, timestamp, and nonce.
     /// — a SHA3-256 digest over the transaction fields.  The returned bytes are
     /// the raw detached signature.
     ///
@@ -329,11 +329,13 @@ impl Wallet {
     pub fn sign_transaction(&self, tx: &Transaction) -> Result<Vec<u8>, WalletError> {
         // Convert float amount to u64 microBLEEP (8 decimals).
         let amount_micro = (tx.amount * 1e8) as u64;
-        let payload = tx_signer::tx_payload(
+        let fee_micro = (tx.fee * 1e8) as u64;
+        let payload = tx_signer::tx_payload_v2(
             &tx.chain_id,
             &tx.from,
             &tx.to,
             amount_micro,
+            fee_micro,
             tx.timestamp,
             tx.nonce,
         );
@@ -355,11 +357,13 @@ impl Wallet {
     /// Returns `true` if the versioned signature is valid for this wallet.
     pub fn verify_transaction_signature(&self, tx: &Transaction, sig: &[u8]) -> bool {
         let amount_micro = (tx.amount * 1e8) as u64;
-        let payload = tx_signer::tx_payload(
+        let fee_micro = (tx.fee * 1e8) as u64;
+        let payload = tx_signer::tx_payload_v2(
             &tx.chain_id,
             &tx.from,
             &tx.to,
             amount_micro,
+            fee_micro,
             tx.timestamp,
             tx.nonce,
         );

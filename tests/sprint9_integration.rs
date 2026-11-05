@@ -175,51 +175,79 @@ mod layer3_bridge_integration {
 
 #[cfg(test)]
 mod governance_live_integration {
+    use bleep_crypto::{derive_account_address, generate_tx_keypair, sign_tx_payload};
     use bleep_governance::live_governance::{
-        GovernableParam, GovernanceConfig, LiveGovernanceEngine, ProposalState, Vote,
+        governance_vote_signing_payload, GovernableParam, GovernanceConfig, LiveGovernanceEngine,
+        ProposalState, VerifiedVoter, Vote,
     };
+    use std::collections::HashMap;
+
+    struct TestVoter {
+        address: String,
+        public_key: Vec<u8>,
+        secret_key: Vec<u8>,
+    }
+
+    impl TestVoter {
+        fn new() -> Self {
+            let (public_key, secret_key) = generate_tx_keypair();
+            Self {
+                address: derive_account_address(&public_key),
+                public_key,
+                secret_key,
+            }
+        }
+
+        fn vote(&self, proposal_id: u64, vote: Vote) -> VerifiedVoter {
+            let payload = governance_vote_signing_payload(proposal_id, &self.address, &vote);
+            let signature = sign_tx_payload(&payload, &self.secret_key).unwrap();
+            VerifiedVoter::verify_vote(
+                proposal_id,
+                &self.address,
+                vote,
+                &self.public_key,
+                &signature,
+            )
+            .unwrap()
+        }
+    }
+
+    fn engine_with_stakes(stakes: &[(&TestVoter, u128)]) -> LiveGovernanceEngine {
+        let mut engine = LiveGovernanceEngine::new(GovernanceConfig::default(), 1_000);
+        let snapshot = stakes
+            .iter()
+            .map(|(voter, stake)| (voter.address.clone(), *stake))
+            .collect();
+        engine.record_stake_snapshot(1_000, snapshot).unwrap();
+        engine
+    }
 
     fn engine() -> LiveGovernanceEngine {
-        LiveGovernanceEngine::new(GovernanceConfig::default(), 1_000)
+        engine_with_stakes(&[])
     }
 
     #[test]
     fn governance_parameter_change_full_lifecycle() {
-        let mut gov = engine();
-        let min_deposit = gov.config.min_deposit;
-        let total_staked = gov.config.total_staked;
-        let voting_period = gov.config.voting_period_blocks;
-
-        // Submit: reduce max inflation from 5% to 4%
+        let voter = TestVoter::new();
+        let stake = 49_000_000_000_000_000;
+        let mut gov = engine_with_stakes(&[(&voter, stake)]);
         let pid = gov
             .submit(
                 "bleep:pretestnet:foundation",
                 "Reduce max inflation to 4% (400 bps)",
                 "Proposal to lower the epoch inflation cap from 500 to 400 bps.",
                 Some(GovernableParam::MaxInflationBps(400)),
-                min_deposit,
             )
             .unwrap();
-
-        // Participating validators each with 10% of total stake vote YES
-        let stake_per_validator = total_staked / 10;
-        for i in 0..7 {
-            gov.vote(
-                pid,
-                &format!("validator-{}", i),
-                Vote::Yes,
-                stake_per_validator,
-            )
+        let verified_vote = voter.vote(pid, Vote::Yes);
+        gov.vote(pid, &verified_vote, Vote::Yes).unwrap();
+        gov.advance_block(gov.config.voting_period_blocks + 1)
             .unwrap();
-        }
-
-        gov.advance_block(voting_period + 1);
-
         let state = gov.tally(pid).unwrap();
         assert_eq!(
             state,
             ProposalState::Passed,
-            "Participating validators with 70% stake must pass proposal"
+            "a 70% stake vote must pass proposal"
         );
 
         let result = gov.execute(pid).unwrap();
@@ -230,7 +258,7 @@ mod governance_live_integration {
         // Verify event log completeness
         let kinds: Vec<&str> = gov.event_log().iter().map(|e| e.kind.as_str()).collect();
         assert!(kinds.contains(&"proposal_submitted"));
-        assert!(kinds.iter().filter(|&&k| k == "vote_cast").count() == 7);
+        assert_eq!(kinds.iter().filter(|&&k| k == "vote_cast").count(), 1);
         assert!(kinds.contains(&"proposal_passed"));
         assert!(kinds.contains(&"proposal_executed"));
     }
@@ -244,7 +272,6 @@ mod governance_live_integration {
             "Break the inflation cap",
             "Set max inflation to 6%",
             Some(GovernableParam::MaxInflationBps(600)),
-            gov.config.min_deposit,
         );
         assert!(
             err.is_err(),
@@ -254,46 +281,45 @@ mod governance_live_integration {
 
     #[test]
     fn veto_mechanism_blocks_controversial_proposals() {
-        let mut gov = engine();
-        let total = gov.config.total_staked;
+        let yes_voter = TestVoter::new();
+        let veto_voter = TestVoter::new();
+        let mut gov = engine_with_stakes(&[
+            (&yes_voter, 14_000_000_000_000_000),
+            (&veto_voter, 28_000_000_000_000_000),
+        ]);
         let pid = gov
-            .submit(
-                "alice",
-                "Controversial change",
-                "...",
-                None,
-                gov.config.min_deposit,
-            )
+            .submit("alice", "Controversial change", "...", None)
             .unwrap();
 
-        // 40% of stake veto — exceeds 33.33% veto threshold
-        gov.vote(pid, "v0", Vote::Yes, total / 5).unwrap(); // 20% yes
-        gov.vote(pid, "v1", Vote::Veto, total * 2 / 5).unwrap(); // 40% veto
+        let yes = yes_voter.vote(pid, Vote::Yes);
+        let veto = veto_voter.vote(pid, Vote::Veto);
+        gov.vote(pid, &yes, Vote::Yes).unwrap();
+        gov.vote(pid, &veto, Vote::Veto).unwrap();
 
-        gov.advance_block(gov.config.voting_period_blocks + 1);
+        gov.advance_block(gov.config.voting_period_blocks + 1)
+            .unwrap();
         assert_eq!(gov.tally(pid).unwrap(), ProposalState::Vetoed);
     }
 
     #[test]
     fn first_pretestnet_proposal_executes_fee_burn_change() {
         // Mirror the production Sprint 9 pretestnet proposal-001
-        let mut gov = engine();
+        let voter = TestVoter::new();
+        let stake = 49_000_000_000_000_000;
+        let mut gov = engine_with_stakes(&[(&voter, stake)]);
         let pid = gov
             .submit(
                 "bleep:pretestnet:foundation",
                 "Reduce fee burn to 20% (proposal-pretestnet-001)",
                 "Lower the base fee burn from 25% to 20% to increase validator rewards.",
                 Some(GovernableParam::FeeBurnBps(2_000)),
-                gov.config.min_deposit,
             )
             .unwrap();
 
-        let stake = gov.config.total_staked / 10;
-        for i in 0..7 {
-            gov.vote(pid, &format!("validator-{}", i), Vote::Yes, stake)
-                .unwrap();
-        }
-        gov.advance_block(gov.config.voting_period_blocks + 1);
+        let verified = voter.vote(pid, Vote::Yes);
+        gov.vote(pid, &verified, Vote::Yes).unwrap();
+        gov.advance_block(gov.config.voting_period_blocks + 1)
+            .unwrap();
         assert_eq!(gov.tally(pid).unwrap(), ProposalState::Passed);
         let r = gov.execute(pid).unwrap();
         assert_eq!(r.param_applied.as_deref(), Some("fee_burn_bps"));

@@ -206,23 +206,27 @@ impl VoteTally {
         stake_reject: u128,
         total_network_stake: u128,
         approval_threshold: u64, // percentage, 0-100
-    ) -> Result<Self, String> {
-        let stake_total = stake_approve.saturating_add(stake_reject);
+    ) -> Result<Self, GovernanceError> {
+        let stake_total = stake_approve
+            .checked_add(stake_reject)
+            .ok_or(GovernanceError::TallyOverflow)?;
 
         if stake_total == 0 {
-            return Err("No votes cast".to_string());
+            return Err(GovernanceError::NoVotesCast);
         }
 
         // Quorum: >33% of network stake must participate
-        let quorum_threshold = (total_network_stake / 3) + 1;
+        let quorum_threshold = (total_network_stake / 3)
+            .checked_add(1)
+            .ok_or(GovernanceError::TallyOverflow)?;
         let quorum_met = stake_total > quorum_threshold;
 
         // Approval percentage
-        let approval_percentage = if stake_total == 0 {
-            0
-        } else {
-            (stake_approve * 100).checked_div(stake_total).unwrap_or(0) as u64
-        };
+        let approval_percentage = stake_approve
+            .checked_mul(100)
+            .ok_or(GovernanceError::TallyOverflow)?
+            .checked_div(stake_total)
+            .ok_or(GovernanceError::TallyOverflow)? as u64;
 
         // Approved if quorum met AND approval >= threshold
         let approved = quorum_met && approval_percentage >= approval_threshold;
@@ -275,6 +279,12 @@ pub enum GovernanceError {
 
     #[error("Invalid proposal: {0}")]
     InvalidProposal(String),
+
+    #[error("Vote tally arithmetic overflow")]
+    TallyOverflow,
+
+    #[error("No votes cast")]
+    NoVotesCast,
 }
 
 /// On-chain governance proposal
@@ -424,9 +434,13 @@ impl Proposal {
 
         for vote in self.votes.values() {
             if vote.approval {
-                stake_approve = stake_approve.saturating_add(vote.stake);
+                stake_approve = stake_approve
+                    .checked_add(vote.stake)
+                    .ok_or(GovernanceError::TallyOverflow)?;
             } else {
-                stake_reject = stake_reject.saturating_add(vote.stake);
+                stake_reject = stake_reject
+                    .checked_add(vote.stake)
+                    .ok_or(GovernanceError::TallyOverflow)?;
             }
         }
 
@@ -435,8 +449,7 @@ impl Proposal {
             stake_reject,
             total_network_stake,
             self.approval_threshold,
-        )
-        .map_err(GovernanceError::InternalError)?;
+        )?;
 
         self.tally = Some(tally.clone());
 
@@ -913,5 +926,55 @@ mod tests {
         assert_eq!(tally.approval_percentage, 67);
         assert!(tally.quorum_met); // 6700 + 3300 = 10000 > 10000/3
         assert!(tally.approved); // 67% >= 67% threshold
+    }
+
+    #[test]
+    fn tally_addition_overflow_is_not_saturated() {
+        assert!(matches!(
+            VoteTally::compute(u128::MAX, 1, u128::MAX, 50),
+            Err(GovernanceError::TallyOverflow)
+        ));
+    }
+
+    #[test]
+    fn tally_percentage_multiplication_overflow_is_an_error() {
+        assert!(matches!(
+            VoteTally::compute(u128::MAX / 2 + 1, 0, u128::MAX, 50),
+            Err(GovernanceError::TallyOverflow)
+        ));
+    }
+
+    #[test]
+    fn close_voting_stake_accumulation_overflow_is_an_error() {
+        let window = VotingWindow::new(0, 2).unwrap();
+        let mut proposal = Proposal::new(
+            "overflow".to_string(),
+            ProposalType::ProtocolParameter,
+            "Overflow".to_string(),
+            "Test checked vote accumulation".to_string(),
+            window,
+            3,
+            50,
+            GovernancePayload::ProtocolParameterChange {
+                rule_name: "BLOCK_TIME".to_string(),
+                new_value: 6000,
+            },
+            0,
+        );
+        proposal.state = ProposalState::Voting;
+        proposal.votes.insert(
+            "v1".to_string(),
+            Vote::new("v1".to_string(), true, u128::MAX, 1, vec![]),
+        );
+        proposal.votes.insert(
+            "v2".to_string(),
+            Vote::new("v2".to_string(), true, 1, 1, vec![]),
+        );
+
+        assert!(matches!(
+            proposal.close_voting(2, u128::MAX),
+            Err(GovernanceError::TallyOverflow)
+        ));
+        assert_eq!(proposal.state, ProposalState::Voting);
     }
 }
