@@ -72,4 +72,14 @@ The unit restarts the validator after failures and survives terminal closure. Th
 
 ## Configuration
 
-The generated TOML is the source of truth for restarts. Change it deliberately, then run `doctor` before restarting. Do not commit the state directory, `validator.key`, or the generated operator password.
+The generated TOML is the source of truth for restarts. Change it deliberately, then run `doctor` before restarting. The node also supports these environment settings:
+
+- `BLEEP_SNAPSHOT_INTERVAL` — snapshot every N committed blocks (default `1000`).
+- `BLEEP_SNAPSHOT_RETAIN` — number of newest snapshots to keep (default `3`; must be positive). Old snapshots are pruned only after a new snapshot completes.
+- `BLEEP_TX_REPLAY_WINDOW_SECS` — maximum accepted client timestamp skew in either direction (default `30`; must be positive).
+
+Snapshots require at least the estimated database size plus 64 MiB free before writing. `/metrics` exposes `bleep_disk_free_bytes`, `bleep_disk_total_bytes`, and `bleep_disk_usage_percent`; the node logs an alert at 85% filesystem usage.
+
+Transactions accepted by `/rpc/tx` are durably stored in RocksDB before the node responds with `accepted_durable`. Pending transactions are replayed on startup. If recovery rejects an expired or invalid entry, it is removed and logged as an explicit drop.
+
+Do not commit the state directory, `validator.key`, or the generated operator password.

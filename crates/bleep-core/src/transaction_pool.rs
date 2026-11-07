@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 /// Expected SPHINCS+ public key length for sphincsshake256fsimple: 64 bytes
 const SPHINCS_PK_LEN: usize = 64;
 const SPHINCS_SIG_LEN: usize = 49_856;
+const DURABLE_MEMPOOL_PREFIX: &str = "mempool/pending/";
 
 // ── TransactionPool ───────────────────────────────────────────────────────────
 
@@ -50,6 +51,10 @@ fn transaction_payload_hash(transaction: &ZKTransaction) -> [u8; 32] {
         transaction.nonce,
     );
     Sha256::digest(payload).into()
+}
+
+fn durable_transaction_key(transaction_id: &str) -> String {
+    format!("{DURABLE_MEMPOOL_PREFIX}{transaction_id}")
 }
 
 impl TransactionPool {
@@ -173,7 +178,11 @@ impl TransactionPool {
             log::warn!("[TxPool] Rejected transaction: state-backed admission unavailable");
             return false;
         };
-        let state = state.lock();
+        let mut state = state.lock();
+        if let Err(error) = state.validate_transaction_timestamp(transaction.timestamp) {
+            log::warn!("[TxPool] Rejected transaction: {error}");
+            return false;
+        }
         let sender_pending: Vec<_> = pool
             .iter()
             .filter(|tx| tx.sender == transaction.sender)
@@ -214,6 +223,29 @@ impl TransactionPool {
             projected_count -= 1;
             projected_bytes = projected_bytes.saturating_sub(transaction_size(lowest));
         }
+        let mut changes = pool
+            .iter()
+            .rev()
+            .take(evict_count)
+            .map(|evicted| (durable_transaction_key(&evicted.get_hash()), None))
+            .collect::<Vec<_>>();
+        let serialized = match serde_json::to_vec(&transaction) {
+            Ok(serialized) => serialized,
+            Err(error) => {
+                log::error!(
+                    "[TxPool] Could not serialize transaction for durable admission: {error}"
+                );
+                return false;
+            }
+        };
+        changes.push((
+            durable_transaction_key(&transaction.get_hash()),
+            Some(serialized),
+        ));
+        if let Err(error) = state.update_application_data(&changes) {
+            log::error!("[TxPool] Durable transaction admission failed: {error}");
+            return false;
+        }
         for _ in 0..evict_count {
             let evicted = pool.pop().expect("planned transaction eviction");
             self.pool_bytes
@@ -235,6 +267,61 @@ impl TransactionPool {
         true
     }
 
+    pub async fn restore_pending_transactions(&self) -> Result<(usize, usize), String> {
+        let Some(state) = self.state.as_ref() else {
+            return Err("Cannot restore pending transactions without state storage".into());
+        };
+        let records = state
+            .lock()
+            .application_data_with_prefix(DURABLE_MEMPOOL_PREFIX)
+            .map_err(|error| format!("Failed to read durable mempool: {error}"))?;
+        let mut restored = 0usize;
+        let mut dropped = 0usize;
+        let mut pending = Vec::with_capacity(records.len());
+        for (key, bytes) in records {
+            let transaction = match serde_json::from_slice::<ZKTransaction>(&bytes) {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    log::error!(
+                        "[TxPool] Dropping corrupt durable pending transaction {}: {error}",
+                        key
+                    );
+                    state
+                        .lock()
+                        .update_application_data(&[(key, None)])
+                        .map_err(|error| {
+                            format!("Failed to remove corrupt mempool record: {error}")
+                        })?;
+                    dropped += 1;
+                    continue;
+                }
+            };
+            pending.push((key, transaction));
+        }
+        pending.sort_by(|left, right| {
+            left.1
+                .sender
+                .cmp(&right.1.sender)
+                .then_with(|| left.1.nonce.cmp(&right.1.nonce))
+        });
+        for (key, transaction) in pending {
+            if self.add_transaction(transaction.clone()).await {
+                restored += 1;
+            } else {
+                log::warn!(
+                    "[TxPool] Explicitly dropped invalid or expired durable pending transaction {}",
+                    transaction.get_hash()
+                );
+                state
+                    .lock()
+                    .update_application_data(&[(key, None)])
+                    .map_err(|error| format!("Failed to remove invalid mempool record: {error}"))?;
+                dropped += 1;
+            }
+        }
+        Ok((restored, dropped))
+    }
+
     /// Retrieve all pending transactions (read-only snapshot).
     pub async fn get_transactions(&self) -> Vec<ZKTransaction> {
         let pool = self.pool.lock().await;
@@ -244,6 +331,16 @@ impl TransactionPool {
     /// Remove all pending transactions (called after a block is committed).
     pub async fn clear_pool(&self) {
         let mut pool = self.pool.lock().await;
+        if let Some(state) = self.state.as_ref() {
+            let changes = pool
+                .iter()
+                .map(|transaction| (durable_transaction_key(&transaction.get_hash()), None))
+                .collect::<Vec<_>>();
+            if let Err(error) = state.lock().update_application_data(&changes) {
+                log::error!("[TxPool] Failed to clear durable mempool: {error}");
+                return;
+            }
+        }
         pool.clear();
         self.pool_bytes.store(0, Ordering::Relaxed);
         self.seen_hashes.lock().await.clear();
@@ -255,6 +352,17 @@ impl TransactionPool {
         let max_age_secs = max_age.num_seconds().max(0) as u64;
         let mut pool = self.pool.lock().await;
         let before = pool.len();
+        let expired = pool
+            .iter()
+            .filter(|tx| tx.timestamp > now || now.saturating_sub(tx.timestamp) > max_age_secs)
+            .map(|transaction| (durable_transaction_key(&transaction.get_hash()), None))
+            .collect::<Vec<_>>();
+        if let Some(state) = self.state.as_ref() {
+            if let Err(error) = state.lock().update_application_data(&expired) {
+                log::error!("[TxPool] Failed to prune durable mempool: {error}");
+                return 0;
+            }
+        }
         pool.retain(|tx| tx.timestamp <= now && now.saturating_sub(tx.timestamp) <= max_age_secs);
         self.pool_bytes
             .store(pool_size_bytes(&pool), Ordering::Relaxed);
@@ -291,6 +399,18 @@ impl TransactionPool {
     pub async fn remove_confirmed(&self, tx_id: &str) {
         let mut pool = self.pool.lock().await;
         let before = pool.len();
+        let removed = pool
+            .iter()
+            .filter(|transaction| transaction.get_hash() == tx_id)
+            .map(|_| (durable_transaction_key(tx_id), None))
+            .collect::<Vec<_>>();
+        if let Some(state) = self.state.as_ref() {
+            if let Err(error) = state.lock().update_application_data(&removed) {
+                log::error!(
+                    "[TxPool] Failed to remove confirmed transaction from durable mempool: {error}"
+                );
+            }
+        }
         pool.retain(|tx| tx.get_hash() != tx_id);
         self.pool_bytes
             .store(pool_size_bytes(&pool), Ordering::Relaxed);
@@ -408,6 +528,15 @@ mod tests {
         timestamp: u64,
         nonce: u64,
     ) -> ZKTransaction {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let timestamp = if current_time.abs_diff(timestamp) > 30 {
+            current_time.saturating_add(timestamp % 20)
+        } else {
+            timestamp
+        };
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
         let payload = bleep_crypto::tx_signer::tx_payload_v2(
             &chain_id, &sender, receiver, amount, fee, timestamp, nonce,
@@ -828,5 +957,86 @@ mod tests {
         }
         assert_eq!(pool.peek_for_block(2).await.len(), 2);
         assert_eq!(pool.pool_size().await, 3);
+    }
+
+    #[tokio::test]
+    async fn pending_transactions_are_restored_and_removed_durably() {
+        let path = std::env::temp_dir().join(format!(
+            "bleep-txpool-restart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut initial_state = test_state_at(&path);
+        let (public_key, secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&public_key);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let transaction =
+            make_signed_tx_with_key(&public_key, &secret_key, &sender, "bob", 1, 1, timestamp, 0);
+        let next_transaction = make_signed_tx_with_key(
+            &public_key,
+            &secret_key,
+            &sender,
+            "carol",
+            1,
+            1,
+            timestamp + 1,
+            1,
+        );
+        initial_state.set_balance(&sender, 10).expect("fund sender");
+        initial_state
+            .commit_block()
+            .expect("persist sender balance");
+        let initial_state = Arc::new(StateMutex::new(initial_state));
+        let initial_pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&initial_state)),
+        );
+        assert!(initial_pool.add_transaction(transaction.clone()).await);
+        assert!(initial_pool.add_transaction(next_transaction.clone()).await);
+        drop(initial_pool);
+        drop(initial_state);
+
+        let reopened = Arc::new(StateMutex::new(
+            StateManager::open(&path).expect("reopen persisted state"),
+        ));
+        let restored_pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&reopened)),
+        );
+        assert_eq!(
+            restored_pool.restore_pending_transactions().await.unwrap(),
+            (2, 0)
+        );
+        let restored = restored_pool.get_transactions().await;
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored_pool.peek_for_block(2).await.len(), 2);
+        assert_eq!(restored_pool.next_nonce(&sender, 0).await, Some(2));
+
+        restored_pool
+            .remove_confirmed(&transaction.get_hash())
+            .await;
+        restored_pool
+            .remove_confirmed(&next_transaction.get_hash())
+            .await;
+        assert!(reopened
+            .lock()
+            .application_data_with_prefix(DURABLE_MEMPOOL_PREFIX)
+            .unwrap()
+            .is_empty());
+        drop(restored_pool);
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    fn test_state_at(path: &std::path::Path) -> StateManager {
+        StateManager::open(path).expect("open explicit test state")
     }
 }

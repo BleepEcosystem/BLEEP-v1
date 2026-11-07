@@ -79,6 +79,8 @@ pub struct RpcState {
     pub txs_processed: Arc<std::sync::atomic::AtomicU64>,
     pub peer_count: Arc<std::sync::atomic::AtomicUsize>,
     pub chain_height: Arc<std::sync::atomic::AtomicU64>,
+    pub disk_free_bytes: Arc<std::sync::atomic::AtomicU64>,
+    pub disk_total_bytes: Arc<std::sync::atomic::AtomicU64>,
     pub blocks_per_epoch: Option<u64>,
     /// Live `StateManager` for `/rpc/state` and `/rpc/proof`.
     pub state_mgr: Option<Arc<Mutex<StateManager>>>,
@@ -129,6 +131,8 @@ impl RpcState {
             txs_processed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             chain_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            disk_free_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            disk_total_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             blocks_per_epoch: None,
             state_mgr: None,
             validator_registry: None,
@@ -202,6 +206,16 @@ impl RpcState {
     /// Attach the live `TransactionPool` so POST /rpc/tx can enqueue transactions.
     pub fn with_transaction_pool(mut self, pool: Arc<TransactionPool>) -> Self {
         self.transaction_pool = Some(pool);
+        self
+    }
+
+    pub fn with_disk_metrics(
+        mut self,
+        free_bytes: Arc<std::sync::atomic::AtomicU64>,
+        total_bytes: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.disk_free_bytes = free_bytes;
+        self.disk_total_bytes = total_bytes;
         self
     }
 
@@ -666,6 +680,23 @@ pub fn rpc_routes_with_state(
                     signature: req.signature,
                 };
 
+                if let Some(state_mgr) = st.state_mgr.as_ref() {
+                    if let Err(error) = state_mgr
+                        .lock()
+                        .validate_transaction_timestamp(tx.timestamp)
+                    {
+                        let resp = warp::reply::json(&TxResp {
+                            tx_id: "rejected".to_string(),
+                            status: "timestamp_outside_configured_replay_window",
+                        });
+                        log::warn!("RPC transaction rejected: {error}");
+                        return Ok::<_, warp::Rejection>(warp::reply::with_status(
+                            resp,
+                            warp::http::StatusCode::BAD_REQUEST,
+                        ));
+                    }
+                }
+
                 let gossip_payload = match serde_json::to_vec(&tx) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -690,7 +721,7 @@ pub fn rpc_routes_with_state(
                     }
                     let resp = warp::reply::json(&TxResp {
                         tx_id,
-                        status: "accepted",
+                        status: "accepted_durable",
                     });
                     Ok(warp::reply::with_status(
                         resp,
@@ -4260,6 +4291,20 @@ fn metrics_prometheus(
                 .as_ref()
                 .map(|svc| svc.sessions.rotation_count())
                 .unwrap_or(0);
+            let disk_free_bytes = st
+                .disk_free_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let disk_total_bytes = st
+                .disk_total_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let disk_usage_percent = if disk_total_bytes == 0 {
+                0
+            } else {
+                disk_total_bytes
+                    .saturating_sub(disk_free_bytes.min(disk_total_bytes))
+                    .saturating_mul(100)
+                    / disk_total_bytes
+            };
 
             let body = format!(
                 r#"# HELP bleep_chain_height Current canonical chain height (block number).
@@ -4293,6 +4338,18 @@ bleep_faucet_balance_micro {faucet_bal}
 # HELP bleep_jwt_rotations_total Total JWT secret rotations performed.
 # TYPE bleep_jwt_rotations_total counter
 bleep_jwt_rotations_total {jwt_rot}
+
+# HELP bleep_disk_free_bytes Available filesystem bytes for the node state directory.
+# TYPE bleep_disk_free_bytes gauge
+bleep_disk_free_bytes {disk_free_bytes}
+
+# HELP bleep_disk_total_bytes Total filesystem bytes for the node state directory.
+# TYPE bleep_disk_total_bytes gauge
+bleep_disk_total_bytes {disk_total_bytes}
+
+# HELP bleep_disk_usage_percent Filesystem usage percentage for the node state directory.
+# TYPE bleep_disk_usage_percent gauge
+bleep_disk_usage_percent {disk_usage_percent}
 "#
             );
 
@@ -5082,6 +5139,26 @@ mod tests {
         assert_eq!(account.status(), 200);
         let account: serde_json::Value = serde_json::from_slice(account.body()).unwrap();
         assert_eq!(account["balance"], "123");
+    }
+
+    #[tokio::test]
+    async fn metrics_exports_state_filesystem_space_gauges() {
+        let rpc = RpcState::new();
+        rpc.disk_free_bytes
+            .store(150, std::sync::atomic::Ordering::Relaxed);
+        rpc.disk_total_bytes
+            .store(1_000, std::sync::atomic::Ordering::Relaxed);
+        let routes = rpc_routes_with_state(rpc);
+        let response = request()
+            .method("GET")
+            .path("/metrics")
+            .reply(&routes)
+            .await;
+        assert_eq!(response.status(), 200);
+        let body = std::str::from_utf8(response.body()).expect("metrics body");
+        assert!(body.contains("bleep_disk_free_bytes 150"));
+        assert!(body.contains("bleep_disk_total_bytes 1000"));
+        assert!(body.contains("bleep_disk_usage_percent 85"));
     }
 }
 

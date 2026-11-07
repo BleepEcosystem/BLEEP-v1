@@ -61,7 +61,9 @@ use bleep_core::transaction_pool::TransactionPool;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 use bleep_state::cross_shard_2pc::CoordinatorManager;
-use bleep_state::state_manager::StateManager;
+use bleep_state::state_manager::{
+    filesystem_space, snapshot_interval_from_env, snapshot_retain_from_env, StateManager,
+};
 
 // ── Consensus ─────────────────────────────────────────────────────────────────
 use bleep_consensus::block_producer::FinalizedBlock;
@@ -151,6 +153,20 @@ struct CommittedBlockEffects {
 fn critical_storage_failure(context: &str, error: impl std::fmt::Display) -> ! {
     tracing::error!(target: "bleep::critical", "CRITICAL: {context}: {error}");
     std::process::exit(1);
+}
+
+fn disk_usage_percent(free_bytes: u64, total_bytes: u64) -> u64 {
+    if total_bytes == 0 {
+        return 0;
+    }
+    total_bytes
+        .saturating_sub(free_bytes.min(total_bytes))
+        .saturating_mul(100)
+        / total_bytes
+}
+
+fn disk_usage_alert_needed(free_bytes: u64, total_bytes: u64) -> bool {
+    disk_usage_percent(free_bytes, total_bytes) >= 85
 }
 
 fn accumulate_epoch_fee_revenue(
@@ -882,6 +898,13 @@ mod committed_block_tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn disk_alert_starts_at_eighty_five_percent_usage() {
+        assert!(!disk_usage_alert_needed(160, 1_000));
+        assert!(disk_usage_alert_needed(150, 1_000));
+        assert!(!disk_usage_alert_needed(0, 0));
+    }
+
+    #[test]
     fn epoch_fee_revenue_is_captured_at_the_committed_boundary() {
         let fees = Mutex::new(0);
         assert_eq!(accumulate_epoch_fee_revenue(&fees, 1, 3, 5), None);
@@ -1069,6 +1092,18 @@ mod committed_block_tests {
                     expected_root,
                     "state root mismatch for validator {index} at height {height}"
                 );
+                assert_eq!(
+                    effects[index]
+                        .rpc_height
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    height
+                );
+                assert_eq!(
+                    effects[index]
+                        .rpc_txs_processed
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    height
+                );
             }
             let expected_registry = effects[0]
                 .registry
@@ -1118,6 +1153,8 @@ mod committed_block_tests {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let network_config = load_network_config()?;
+    let snapshot_interval = snapshot_interval_from_env()?;
+    let snapshot_retain = snapshot_retain_from_env()?;
     let network_mode = std::env::var("BLEEP_NETWORK_MODE").ok();
     let single_node_dev_mode = single_node_dev_mode_enabled(
         network_mode.as_deref(),
@@ -1300,6 +1337,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Transaction pools
     let tx_pool =
         TransactionPool::new_with_state(10_000, chain_id.clone(), Some(Arc::clone(&state)));
+    let (restored_transactions, dropped_transactions) =
+        tx_pool.restore_pending_transactions().await?;
+    info!(
+        "  ✅ Durable mempool recovery: restored={} explicitly_dropped={}",
+        restored_transactions, dropped_transactions
+    );
     let mempool = Mempool::new_with_state(
         chain_id.clone(),
         Mempool::embedded_sender_public_key,
@@ -1671,6 +1714,68 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let scheduler = Arc::new(Scheduler::new());
     scheduler.register_built_in_tasks();
     let epoch_fee_revenue = Arc::new(Mutex::new(0u128));
+    let disk_free_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let disk_total_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let disk_alert_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let initial_disk_space = filesystem_space(Path::new(&state_dir))?;
+    disk_free_bytes.store(
+        initial_disk_space.free_bytes,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    disk_total_bytes.store(
+        initial_disk_space.total_bytes,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    if disk_usage_alert_needed(
+        initial_disk_space.free_bytes,
+        initial_disk_space.total_bytes,
+    ) {
+        warn!(
+            target: "bleep::critical",
+            "ALERT: state filesystem usage is {}% (threshold 85%)",
+            disk_usage_percent(
+                initial_disk_space.free_bytes,
+                initial_disk_space.total_bytes
+            )
+        );
+        disk_alert_active.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let monitor_path = Path::new(&state_dir).to_path_buf();
+    let monitor_free_bytes = Arc::clone(&disk_free_bytes);
+    let monitor_total_bytes = Arc::clone(&disk_total_bytes);
+    let monitor_alert_active = Arc::clone(&disk_alert_active);
+    scheduler.registry.register(RegisteredTask::interval(
+        "disk_space_monitor",
+        TaskKind::Maintenance,
+        "Monitor state filesystem capacity and alert at 85 percent usage",
+        30,
+        10,
+        move |_| {
+            let path = monitor_path.clone();
+            let free_bytes = Arc::clone(&monitor_free_bytes);
+            let total_bytes = Arc::clone(&monitor_total_bytes);
+            let alert_active = Arc::clone(&monitor_alert_active);
+            async move {
+                let space = filesystem_space(&path)
+                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
+                free_bytes.store(space.free_bytes, std::sync::atomic::Ordering::Relaxed);
+                total_bytes.store(space.total_bytes, std::sync::atomic::Ordering::Relaxed);
+                let alert = disk_usage_alert_needed(space.free_bytes, space.total_bytes);
+                let previous = alert_active.swap(alert, std::sync::atomic::Ordering::Relaxed);
+                if alert && !previous {
+                    warn!(
+                        target: "bleep::critical",
+                        "ALERT: state filesystem usage is {}% (threshold 85%)",
+                        disk_usage_percent(space.free_bytes, space.total_bytes)
+                    );
+                } else if !alert && previous {
+                    info!("State filesystem usage alert cleared");
+                }
+                Ok(())
+            }
+        },
+    ));
 
     let epoch_governance = Arc::clone(&governance);
     scheduler.registry.register(RegisteredTask::epoch_boundary(
@@ -1860,18 +1965,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
     ));
 
     let checkpoint_state = Arc::clone(&state);
+    let checkpoint_retain = snapshot_retain;
     scheduler.registry.register(RegisteredTask::every_n_blocks(
         "indexer_checkpoint",
         TaskKind::Maintenance,
         "Persist a state snapshot at the current chain height",
-        100,
+        snapshot_interval,
         30,
         move |ctx| {
             let state = Arc::clone(&checkpoint_state);
             async move {
-                let snapshot = state.lock().create_snapshot().unwrap_or_else(|error| {
-                    critical_storage_failure("scheduled state snapshot persistence failed", error)
-                });
+                let snapshot = state
+                    .lock()
+                    .create_snapshot_with_retention(checkpoint_retain)
+                    .unwrap_or_else(|error| {
+                        critical_storage_failure(
+                            "scheduled state snapshot persistence failed",
+                            error,
+                        )
+                    });
                 info!(
                     "[State] Checkpoint saved at height={} path={}",
                     ctx.block_height,
@@ -1927,6 +2039,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Build live RpcState — wires the live StateManager for /rpc/state and
     // /rpc/proof, and shares the same atomic counters with the relay task so
     // block/tx counts are up-to-date in /rpc/health and /rpc/telemetry.
+    let initial_height = state.lock().block_height();
     let rpc_state = RpcState::new()
         .with_state_manager(Arc::clone(&state))
         .with_validator_registry(Arc::clone(&validator_registry))
@@ -1935,10 +2048,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_connect_orchestrator(Arc::clone(&connect_orchestrator))
         .with_pat_registry(Arc::clone(&pat_registry))
         .with_transaction_pool(Arc::clone(&tx_pool))
+        .with_disk_metrics(Arc::clone(&disk_free_bytes), Arc::clone(&disk_total_bytes))
         .with_p2p_node(Arc::clone(&p2p_node))
         .with_blockchain(Arc::clone(&blockchain))
         .with_blocks_per_epoch(blocks_per_epoch)
         .with_auth_service(Arc::clone(&auth_service));
+    rpc_state
+        .chain_height
+        .store(initial_height, std::sync::atomic::Ordering::Relaxed);
 
     let committed_block_effects = Arc::new(CommittedBlockEffects {
         state: Arc::clone(&state),

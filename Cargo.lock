@@ -1682,6 +1682,7 @@ dependencies = [
  "bleep-crypto",
  "dashmap 5.5.3",
  "hex",
+ "libc",
  "log",
  "parking_lot",
  "pqcrypto",

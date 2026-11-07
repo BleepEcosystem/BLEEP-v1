@@ -10,6 +10,8 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -25,6 +27,12 @@ pub enum StateError {
     StorageWrite(String),
     #[error("Invalid state configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("Transaction timestamp {timestamp} is outside the configured ±{window_secs}s replay window (current time {now})")]
+    ReplayWindow {
+        timestamp: u64,
+        now: u64,
+        window_secs: u64,
+    },
     #[error("Serialisation error: {0}")]
     Serialisation(String),
     #[error("Snapshot error: {0}")]
@@ -56,8 +64,102 @@ const KEY_CHAIN_ID: &[u8] = b"chain:id";
 const KEY_TIP_HASH: &[u8] = b"chain:tip_hash";
 const SNAPSHOT_MANIFEST: &str = "bleep-snapshot-manifest.json";
 const SNAPSHOT_TRIE: &str = "bleep-state-trie.bin";
-const TRANSACTION_REPLAY_WINDOW_SECS: u64 = 30;
+const DEFAULT_SNAPSHOT_INTERVAL: u64 = 1_000;
+const DEFAULT_SNAPSHOT_RETAIN: usize = 3;
+const DEFAULT_TRANSACTION_REPLAY_WINDOW_SECS: u64 = 30;
+const MIN_SNAPSHOT_FREE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_SUPPLY: u128 = 200_000_000 * 100_000_000u128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskSpace {
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+}
+
+pub fn filesystem_space(path: &Path) -> StateResult<DiskSpace> {
+    #[cfg(unix)]
+    {
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|error| StateError::Storage(error.to_string()))?;
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+        if result != 0 {
+            return Err(StateError::Storage(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        let stats = unsafe { stats.assume_init() };
+        let fragment_size = stats.f_frsize as u64;
+        Ok(DiskSpace {
+            free_bytes: (stats.f_bavail as u64).saturating_mul(fragment_size),
+            total_bytes: (stats.f_blocks as u64).saturating_mul(fragment_size),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(StateError::Storage(
+            "filesystem space reporting is unsupported on this platform".into(),
+        ))
+    }
+}
+
+pub fn snapshot_interval_from_env() -> StateResult<u64> {
+    parse_positive_env("BLEEP_SNAPSHOT_INTERVAL", DEFAULT_SNAPSHOT_INTERVAL)
+}
+
+pub fn snapshot_retain_from_env() -> StateResult<usize> {
+    usize::try_from(parse_positive_env(
+        "BLEEP_SNAPSHOT_RETAIN",
+        DEFAULT_SNAPSHOT_RETAIN as u64,
+    )?)
+    .map_err(|error| StateError::InvalidConfiguration(error.to_string()))
+}
+
+pub fn transaction_replay_window_from_env() -> StateResult<u64> {
+    parse_positive_env(
+        "BLEEP_TX_REPLAY_WINDOW_SECS",
+        DEFAULT_TRANSACTION_REPLAY_WINDOW_SECS,
+    )
+}
+
+pub fn validate_replay_timestamp(timestamp: u64, now: u64, window_secs: u64) -> StateResult<()> {
+    if now.abs_diff(timestamp) > window_secs {
+        return Err(StateError::ReplayWindow {
+            timestamp,
+            now,
+            window_secs,
+        });
+    }
+    Ok(())
+}
+
+fn unix_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn parse_positive_env(name: &str, default: u64) -> StateResult<u64> {
+    let value = match std::env::var(name) {
+        Ok(value) => value.parse::<u64>().map_err(|error| {
+            StateError::InvalidConfiguration(format!("{name} must be a positive integer: {error}"))
+        })?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => {
+            return Err(StateError::InvalidConfiguration(format!(
+                "Could not read {name}: {error}"
+            )))
+        }
+    };
+    if value == 0 {
+        return Err(StateError::InvalidConfiguration(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(value)
+}
 
 /// Persisted account record.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -141,6 +243,7 @@ pub struct StateManager {
     block_height: u64,
     issued_supply: u128,
     blocks_per_epoch: u64,
+    transaction_replay_window_secs: u64,
     /// Sprint 3: Sparse Merkle Trie for O(1)-amortised cryptographic state root.
     trie: SparseMerkleTrie,
 }
@@ -190,6 +293,7 @@ impl StateManager {
             block_height,
             issued_supply: persisted_issued_supply.unwrap_or(0),
             blocks_per_epoch: 1_000,
+            transaction_replay_window_secs: transaction_replay_window_from_env()?,
             trie: SparseMerkleTrie::new(),
         };
         if persisted_issued_supply.is_none() {
@@ -367,6 +471,58 @@ impl StateManager {
         self.db
             .put(db_key, value)
             .map_err(|error| StateError::StorageWrite(error.to_string()))
+    }
+
+    pub fn update_application_data(
+        &mut self,
+        changes: &[(String, Option<Vec<u8>>)],
+    ) -> StateResult<()> {
+        let mut batch = rocksdb::WriteBatch::default();
+        for (key, value) in changes {
+            let db_key = [PREFIX_APPLICATION, key.as_bytes()].concat();
+            if let Some(value) = value {
+                batch.put(db_key, value);
+            } else {
+                batch.delete(db_key);
+            }
+        }
+        self.db
+            .write(batch)
+            .map_err(|error| StateError::StorageWrite(error.to_string()))
+    }
+
+    pub fn application_data_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> StateResult<Vec<(String, Vec<u8>)>> {
+        let key_prefix = [PREFIX_APPLICATION, prefix.as_bytes()].concat();
+        let mut records = Vec::new();
+        for item in self.db.prefix_iterator(PREFIX_APPLICATION) {
+            let (key, value) = item.map_err(|error| StateError::Storage(error.to_string()))?;
+            if !key.starts_with(&key_prefix) {
+                if key.as_ref() > key_prefix.as_slice() {
+                    break;
+                }
+                continue;
+            }
+            let key = std::str::from_utf8(&key[PREFIX_APPLICATION.len()..])
+                .map_err(|error| StateError::Serialisation(error.to_string()))?
+                .to_owned();
+            records.push((key, value.to_vec()));
+        }
+        Ok(records)
+    }
+
+    pub fn replay_window_secs(&self) -> u64 {
+        self.transaction_replay_window_secs
+    }
+
+    pub fn validate_transaction_timestamp(&self, timestamp: u64) -> StateResult<()> {
+        validate_replay_timestamp(
+            timestamp,
+            unix_time_secs(),
+            self.transaction_replay_window_secs,
+        )
     }
 
     /// Capture in-memory state so an uncommitted block proposal can be undone.
@@ -708,6 +864,31 @@ impl StateManager {
     /// Flushes state and writes a RocksDB checkpoint, serialized trie, and
     /// integrity manifest to a unique sibling directory.
     pub fn create_snapshot(&mut self) -> StateResult<PathBuf> {
+        self.create_snapshot_with_retention(snapshot_retain_from_env()?)
+    }
+
+    pub fn create_snapshot_with_retention(&mut self, retain: usize) -> StateResult<PathBuf> {
+        if retain == 0 {
+            return Err(StateError::InvalidConfiguration(
+                "snapshot retention must be at least one".into(),
+            ));
+        }
+        let parent = self
+            .db_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let db_bytes = directory_size(&self.db_path)?;
+        let disk = filesystem_space(&parent)?;
+        let required_bytes = db_bytes.saturating_add(MIN_SNAPSHOT_FREE_BYTES);
+        if disk.free_bytes < required_bytes {
+            return Err(StateError::Snapshot(format!(
+                "insufficient free disk space for snapshot: available={} bytes, required at least {} bytes",
+                disk.free_bytes, required_bytes
+            )));
+        }
+
         self.sync_trie();
         self.flush_internal()?;
         self.db
@@ -743,11 +924,6 @@ impl StateManager {
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("bleep-state"))
             .to_string_lossy();
-        let parent = self
-            .db_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
         let snapshot_path = parent.join(format!(
             "{db_name}.snapshot-{}-{timestamp}",
             self.block_height
@@ -762,6 +938,9 @@ impl StateManager {
         let checkpoint = rocksdb::checkpoint::Checkpoint::new(&self.db)
             .map_err(|e| StateError::Snapshot(e.to_string()))?;
         if let Err(error) = checkpoint.create_checkpoint(&snapshot_path) {
+            if snapshot_path.exists() {
+                let _ = fs::remove_dir_all(&snapshot_path);
+            }
             return Err(StateError::Snapshot(error.to_string()));
         }
 
@@ -801,6 +980,7 @@ impl StateManager {
             let _ = fs::remove_dir_all(&snapshot_path);
             return Err(error);
         }
+        prune_snapshots(&self.db_path, &snapshot_path, retain)?;
         Ok(snapshot_path)
     }
 
@@ -891,7 +1071,7 @@ impl StateManager {
 
     /// Apply a fresh transfer with the sender's exact next nonce.
     ///
-    /// Timestamps use the same ±30 second replay window as authenticated P2P
+    /// Timestamps use the configured replay window as authenticated P2P
     /// messages. Historical canonical blocks use `apply_transfer_with_nonce`
     /// after consensus validation instead of this wall-clock check.
     ///
@@ -910,16 +1090,8 @@ impl StateManager {
         nonce: u64,
         timestamp: u64,
     ) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if now.abs_diff(timestamp) > TRANSACTION_REPLAY_WINDOW_SECS {
-            log::warn!(
-                "[StateManager] apply_transfer: timestamp outside replay window (tx={}, now={})",
-                timestamp,
-                now
-            );
+        if let Err(error) = self.validate_transaction_timestamp(timestamp) {
+            log::warn!("[StateManager] apply_transfer rejected: {error}");
             return false;
         }
 
@@ -935,16 +1107,8 @@ impl StateManager {
         nonce: u64,
         timestamp: u64,
     ) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if now.abs_diff(timestamp) > TRANSACTION_REPLAY_WINDOW_SECS {
-            log::warn!(
-                "[StateManager] apply_transfer_with_fee: timestamp outside replay window (tx={}, now={})",
-                timestamp,
-                now
-            );
+        if let Err(error) = self.validate_transaction_timestamp(timestamp) {
+            log::warn!("[StateManager] apply_transfer_with_fee rejected: {error}");
             return false;
         }
         self.apply_transfer_with_nonce_and_fee(sender, receiver, amount, fee, nonce)
@@ -1285,6 +1449,83 @@ fn snapshot_db_checksum(snapshot_path: &Path) -> StateResult<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn directory_size(path: &Path) -> StateResult<u64> {
+    let entries = fs::read_dir(path).map_err(|error| StateError::Snapshot(error.to_string()))?;
+    let mut total = 0u64;
+    for entry in entries {
+        let entry = entry.map_err(|error| StateError::Snapshot(error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| StateError::Snapshot(error.to_string()))?;
+        if file_type.is_dir() {
+            total = total.saturating_add(directory_size(&entry.path())?);
+        } else if file_type.is_file() {
+            total = total.saturating_add(
+                entry
+                    .metadata()
+                    .map_err(|error| StateError::Snapshot(error.to_string()))?
+                    .len(),
+            );
+        }
+    }
+    Ok(total)
+}
+
+fn prune_snapshots(db_path: &Path, current: &Path, retain: usize) -> StateResult<()> {
+    let parent = db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let db_name = db_path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("bleep-state"))
+        .to_string_lossy();
+    let prefix = format!("{db_name}.snapshot-");
+    let entries = fs::read_dir(parent).map_err(|error| StateError::Snapshot(error.to_string()))?;
+    let mut snapshots = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| StateError::Snapshot(error.to_string()))?;
+        let path = entry.path();
+        if path.is_dir()
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        {
+            let created_at = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.rsplit('-').next())
+                .and_then(|timestamp| timestamp.parse::<u128>().ok())
+                .ok_or_else(|| {
+                    StateError::Snapshot(format!(
+                        "snapshot directory has an invalid timestamp: {}",
+                        path.display()
+                    ))
+                })?;
+            snapshots.push((created_at, path));
+        }
+    }
+    snapshots.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut retained = 0usize;
+    for (_, path) in snapshots {
+        if path == current {
+            retained += 1;
+            continue;
+        }
+        if retained < retain {
+            retained += 1;
+            continue;
+        }
+        fs::remove_dir_all(&path).map_err(|error| {
+            StateError::Snapshot(format!(
+                "failed to prune old snapshot {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn account_key(address: &str) -> Vec<u8> {
     [PREFIX_ACCOUNT, address.as_bytes()].concat()
 }
@@ -1377,13 +1618,13 @@ mod tests {
     fn apply_transfer_rejects_timestamps_outside_replay_window() {
         let mut m = fresh();
         m.mint("alice", 500).expect("mint");
-        let stale_timestamp = now().saturating_sub(TRANSACTION_REPLAY_WINDOW_SECS + 1);
+        let stale_timestamp = now().saturating_sub(DEFAULT_TRANSACTION_REPLAY_WINDOW_SECS + 1);
 
         assert!(!m.apply_transfer("alice", "bob", 100, 0, stale_timestamp));
         assert_eq!(m.get_balance("alice"), 500);
         assert_eq!(m.get_nonce("alice"), 0);
 
-        let future_timestamp = now() + TRANSACTION_REPLAY_WINDOW_SECS + 2;
+        let future_timestamp = now() + DEFAULT_TRANSACTION_REPLAY_WINDOW_SECS + 2;
         assert!(!m.apply_transfer("alice", "bob", 100, 0, future_timestamp));
         assert_eq!(m.get_balance("alice"), 500);
         assert_eq!(m.get_nonce("alice"), 0);
@@ -1778,5 +2019,94 @@ mod tests {
         )
         .is_err());
         fs::remove_dir_all(test_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn snapshot_retention_prunes_only_after_success_and_keeps_three() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "bleep-state-snapshot-retain-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let db_path = test_dir.join("db");
+        let mut state = StateManager::open(&db_path).expect("open state");
+        state.mint("snapshot-account", 1).expect("mint state");
+        let genesis_hash = "snapshot-genesis";
+        let chain_id = "snapshot-test-chain";
+        let mut previous_hash = genesis_hash.to_string();
+        let mut current_snapshot = None;
+        for height in 1..=10_000 {
+            let block = height;
+            let block_hash = format!("snapshot-block-{height}");
+            state
+                .persist_canonical_block(
+                    &block,
+                    height,
+                    &block_hash,
+                    &previous_hash,
+                    chain_id,
+                    genesis_hash,
+                )
+                .expect("persist test block");
+            previous_hash = block_hash;
+            if height % DEFAULT_SNAPSHOT_INTERVAL == 0 {
+                current_snapshot = Some(
+                    state
+                        .create_snapshot_with_retention(3)
+                        .expect("write and prune snapshots"),
+                );
+                let snapshot_count = fs::read_dir(&test_dir)
+                    .expect("read snapshot directory")
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("db.snapshot-")
+                    })
+                    .count();
+                assert!(snapshot_count <= 3, "retained {snapshot_count} snapshots");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        let snapshots = fs::read_dir(&test_dir)
+            .expect("read snapshot directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("db.snapshot-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots.len(), 3);
+        assert!(current_snapshot.expect("latest snapshot").exists());
+        assert_eq!(state.block_height(), 10_000);
+        drop(state);
+        fs::remove_dir_all(test_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn replay_window_accepts_sixty_seconds_and_rejects_beyond_it() {
+        let now = 1_800_000_000;
+        assert!(validate_replay_timestamp(now - 60, now, 60).is_ok());
+        assert!(validate_replay_timestamp(now + 60, now, 60).is_ok());
+        assert!(matches!(
+            validate_replay_timestamp(now - 61, now, 60),
+            Err(StateError::ReplayWindow {
+                window_secs: 60,
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_replay_timestamp(now + 61, now, 60),
+            Err(StateError::ReplayWindow {
+                window_secs: 60,
+                ..
+            })
+        ));
     }
 }
