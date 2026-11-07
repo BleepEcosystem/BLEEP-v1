@@ -815,6 +815,15 @@ pub fn rpc_routes_with_state(
                 ));
             }
 
+            if st.blockchain.is_some() {
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&ErrResp {
+                        error: "Direct native minting is disabled while consensus is active; credits must be committed through the chain.".into(),
+                    }),
+                    warp::http::StatusCode::CONFLICT,
+                ));
+            }
+
             let state_mgr = match st.state_mgr {
                 Some(sm) => sm,
                 None => {
@@ -3356,6 +3365,15 @@ fn faucet_drip(
                     )) as Box<dyn warp::Reply + Send>;
                 }
 
+                if st.blockchain.is_some() {
+                    return Box::new(warp::reply::with_status(
+                        warp::reply::json(&ErrResp {
+                            error: "Direct faucet credits are disabled while consensus is active; credits must be committed through the chain.".into(),
+                        }),
+                        warp::http::StatusCode::CONFLICT,
+                    )) as Box<dyn warp::Reply + Send>;
+                }
+
                 let now = now_secs();
                 let ip = peer
                     .map(|socket| socket.ip().to_string())
@@ -4972,7 +4990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn faucet_drip_updates_authoritative_state_and_its_blockchain_view() {
+    async fn faucet_refuses_uncommitted_credit_when_consensus_is_active() {
         let _network_mode_guard = FAUCET_NETWORK_MODE_LOCK.lock().unwrap();
         let address = "BLEEP1faucetaddress".to_string();
 
@@ -5012,11 +5030,11 @@ mod tests {
             std::env::remove_var("BLEEP_FAUCET_ENABLED");
         }
 
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), warp::http::StatusCode::CONFLICT);
 
         let balance = state_mgr.lock().get_balance(&address);
-        assert_eq!(balance, RpcState::FAUCET_DRIP_AMOUNT as u128);
-        assert_eq!(state_mgr.lock().get_nonce(FAUCET_TREASURY_ADDRESS), 1);
+        assert_eq!(balance, 0);
+        assert_eq!(state_mgr.lock().get_nonce(FAUCET_TREASURY_ADDRESS), 0);
 
         let core_view = blockchain.read().unwrap().balance_of(&address).unwrap();
         assert_eq!(u128::from(core_view), balance);

@@ -646,7 +646,7 @@ EIP-1559-style base fee with compile-time verified split: **25% burned / 50% val
 | Maximum base fee | 10,000,000,000 microBLEEP |
 | Max base fee change per block | 1,250 bps (12.5%) |
 | Initial circulating supply | 25,000,000 BLEEP (12.5%) |
-| Private dev/test faucet | Disabled by default; 10 BLEEP / address / 24 hours when explicitly enabled |
+| Private dev/test faucet | Disabled by default; standalone RPC only (live consensus nodes reject direct credits) |
 
 ---
 
@@ -850,7 +850,9 @@ DevNet UI
 
 The faucet is disabled unless `BLEEP_FAUCET_ENABLED=true` and
 `BLEEP_NETWORK_MODE` is `dev`, `development`, or `test`. It is not available in
-`testnet` or `pretestnet` modes.
+`testnet` or `pretestnet` modes. Live consensus nodes also reject direct faucet
+and native-mint state changes; funding must be included in a committed chain
+transaction rather than applied to one validator's local state.
 
 At startup, `BLEEP_NETWORK_MODE=mainnet` selects the embedded
 `config/mainnet_config.json`; `testnet`, `pretestnet`, and development/test modes

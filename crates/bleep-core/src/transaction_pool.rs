@@ -720,6 +720,43 @@ mod tests {
         assert_eq!(pool.pool_size().await, 1);
     }
 
+    #[tokio::test]
+    async fn rejects_nonce_gap_until_missing_transaction_arrives() {
+        let (public_key, secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&public_key);
+        let nonce_zero = make_signed_tx_with_key(
+            &public_key,
+            &secret_key,
+            &sender,
+            "recipient-zero",
+            100,
+            1,
+            1_700_000_025,
+            0,
+        );
+        let nonce_one = make_signed_tx_with_key(
+            &public_key,
+            &secret_key,
+            &sender,
+            "recipient-one",
+            100,
+            1,
+            1_700_000_026,
+            1,
+        );
+        let state = Arc::new(StateMutex::new(test_state()));
+        state
+            .lock()
+            .set_balance(&sender, 10_000)
+            .expect("fund sender");
+        let pool = TransactionPool::new_with_state(10, bleep_crypto::DEFAULT_CHAIN_ID, Some(state));
+
+        assert!(!pool.add_transaction(nonce_one.clone()).await);
+        assert!(pool.add_transaction(nonce_zero).await);
+        assert!(pool.add_transaction(nonce_one).await);
+        assert_eq!(pool.pool_size().await, 2);
+    }
+
     proptest! {
         #[test]
         fn random_pending_nonces_are_unique_and_bounded(nonces in prop::collection::vec(any::<u64>(), 0..160)) {
@@ -746,7 +783,9 @@ mod tests {
             let accepted_nonces: BTreeSet<_> = pending.iter().map(|tx| tx.nonce).collect();
             prop_assert_eq!(accepted_nonces.len(), pending.len());
             prop_assert!(pending.len() <= crate::transaction::MAX_PENDING_PER_SENDER);
-            prop_assert!(pending.iter().all(|tx| tx.nonce <= crate::transaction::MAX_PENDING_NONCE_GAP));
+            for (expected, nonce) in accepted_nonces.iter().enumerate() {
+                prop_assert_eq!(*nonce, expected as u64);
+            }
         }
     }
 

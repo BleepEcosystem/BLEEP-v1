@@ -28,7 +28,10 @@ Plaintext storage is only available for disposable dev/test wallets when both
 The faucet is disabled by default. To enable it on a private dev/test node,
 start the process with both `BLEEP_FAUCET_ENABLED=true` and
 `BLEEP_NETWORK_MODE=dev` (or `development` or `test`). The faucet deliberately
-refuses `testnet` and `pretestnet` modes.
+refuses `testnet` and `pretestnet` modes. It also refuses direct credits when
+the RPC server is attached to a live consensus chain, because a local-only
+credit would split validator state. Use a standalone dev/test RPC instance for
+this faucet; credits on a live chain must be committed as chain transactions.
 
 ## 1. Create a BLEEP address
 

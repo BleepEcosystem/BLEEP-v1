@@ -576,6 +576,7 @@ const GENESIS_ADMIN_PUBKEY_CONFIG_KEY: &str = "BLEEP_GENESIS_ADMIN_PUBKEY";
 const GENESIS_ADMIN_STATE_KEY: &str = "bleep:auth:genesis-admin-pubkey:v1";
 const VALIDATOR_REGISTRY_HASH_ENV: &str = "BLEEP_VALIDATOR_REGISTRY_SHA256";
 const VALIDATOR_REGISTRY_SNAPSHOT_ENV: &str = "BLEEP_VALIDATOR_REGISTRY_SNAPSHOT";
+const VALIDATOR_REGISTRY_PIN_STATE_KEY: &str = "bleep:validators:genesis-sha256:v1";
 const SINGLE_NODE_DEV_MODE_ENV: &str = "BLEEP_SINGLE_NODE_DEV_MODE";
 
 fn parse_validator_registry_hash(value: &str) -> Result<String, Box<dyn Error>> {
@@ -610,6 +611,29 @@ fn verify_validator_registry_hash(
         .into());
     }
     Ok(())
+}
+
+fn pin_validator_registry_hash(
+    state: &mut StateManager,
+    expected_hash: &str,
+) -> Result<(), Box<dyn Error>> {
+    let pinned = state
+        .get_application_data(VALIDATOR_REGISTRY_PIN_STATE_KEY)
+        .map_err(|error| format!("Failed to read pinned validator registry hash: {error}"))?;
+    match pinned {
+        Some(pinned) if pinned == expected_hash.as_bytes() => Ok(()),
+        Some(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Configured validator registry hash differs from the persisted genesis pin.",
+        )
+        .into()),
+        None => {
+            state
+                .put_application_data(VALIDATOR_REGISTRY_PIN_STATE_KEY, expected_hash.as_bytes())
+                .map_err(|error| format!("Failed to pin validator registry hash: {error}"))?;
+            Ok(())
+        }
+    }
 }
 
 fn parse_validator_registry_snapshot(
@@ -879,6 +903,34 @@ mod epoch_config_tests {
 
         let empty_registry = ValidatorRegistry::new().to_persistent_bytes().unwrap();
         assert!(parse_validator_registry_snapshot(&empty_registry, None).is_err());
+    }
+
+    #[test]
+    fn validator_registry_pin_survives_epoch_state_changes() {
+        let expected = hex::encode(Sha256::digest(b"genesis registry"));
+        let mut state = StateManager::new();
+        pin_validator_registry_hash(&mut state, &expected).unwrap();
+
+        let mut evolved_registry = ValidatorRegistry::new();
+        let (public_key, secret_key) = generate_tx_keypair();
+        let id = hex::encode(&public_key[..8]);
+        let identity = ValidatorIdentity::new_with_vrf_public_key(
+            id.clone(),
+            vec![1; 1568],
+            hex::encode(&public_key),
+            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&secret_key)
+                .unwrap(),
+            1_000,
+            0,
+        )
+        .unwrap();
+        evolved_registry.register_validator(identity).unwrap();
+        evolved_registry.activate_validator(&id).unwrap();
+        let evolved_bytes = evolved_registry.to_persistent_bytes().unwrap();
+
+        assert!(parse_validator_registry_snapshot(&evolved_bytes, None).is_ok());
+        pin_validator_registry_hash(&mut state, &expected).unwrap();
+        assert!(pin_validator_registry_hash(&mut state, &hex::encode([0; 32])).is_err());
     }
 
     #[test]
@@ -1391,7 +1443,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .map_err(|error| format!("Validator registry load failed: {error}"))?
         {
             Some(bytes) => {
-                parse_validator_registry_snapshot(&bytes, expected_registry_hash.as_deref())?
+                let registry = parse_validator_registry_snapshot(&bytes, None)?;
+                if let Some(expected_hash) = expected_registry_hash.as_deref() {
+                    pin_validator_registry_hash(&mut state_guard, expected_hash)?;
+                }
+                registry
             }
             None if state_guard.block_height() == 0 => {
                 if let (Some(expected_hash), Some(snapshot_path)) = (
@@ -1408,6 +1464,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         .map_err(|error| {
                             format!("Genesis validator registry persistence failed: {error}")
                         })?;
+                    pin_validator_registry_hash(&mut state_guard, expected_hash)?;
                     info!("  ✅ Pinned genesis validator registry snapshot loaded.");
                     registry
                 } else if single_node_dev_mode && expected_registry_hash.is_none() {

@@ -2,6 +2,7 @@ use bleep_crypto::quantum_secure::QuantumSecure;
 use bleep_state::state_manager::StateManager;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // Re-export these from bleep_p2p once available
@@ -129,12 +130,22 @@ pub fn pending_admission_allowed(
     candidate: &ZKTransaction,
 ) -> bool {
     let committed_nonce = state.get_nonce(&candidate.sender);
+    let pending_nonces: BTreeSet<u64> = pending
+        .iter()
+        .filter(|tx| tx.sender == candidate.sender)
+        .map(|tx| tx.nonce)
+        .collect();
+    let mut next_nonce = committed_nonce;
+    while pending_nonces.contains(&next_nonce) {
+        let Some(next) = next_nonce.checked_add(1) else {
+            return false;
+        };
+        next_nonce = next;
+    }
+
     if candidate.nonce == u64::MAX
-        || candidate.nonce < committed_nonce
+        || candidate.nonce != next_nonce
         || candidate.nonce > committed_nonce.saturating_add(MAX_PENDING_NONCE_GAP)
-        || pending
-            .iter()
-            .any(|tx| tx.sender == candidate.sender && tx.nonce == candidate.nonce)
         || pending
             .iter()
             .filter(|tx| tx.sender == candidate.sender)
