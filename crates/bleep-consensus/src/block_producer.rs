@@ -6,8 +6,7 @@
 //! TransactionPool.peek_for_block(MAX_TXS)
 //!   │
 //!   ▼  Convert ZKTransaction → (block::Transaction + VM Intent)
-//! VM Executor.execute(TransferIntent)   ← per-tx intent execution
-//!   │  StateDiff (gas charged, state changes)
+//! VM Executor.execute(TransferIntent)   ← validate and meter each tx
 //!   ▼
 //! StateManager.apply_transfer           ← native balance accounting
 //! StateManager.persist_canonical_block  ← atomically persist state + history
@@ -49,7 +48,6 @@ use bleep_p2p::types::MessageType;
 
 // VM imports for per-transaction intent execution
 use bleep_vm::execution::executor::{Executor, ExecutorConfig};
-use bleep_vm::execution::state_transition::StateDiff;
 use bleep_vm::intent::{Intent, IntentKind, TransferIntent};
 use bleep_vm::types::ChainId;
 
@@ -74,6 +72,8 @@ pub struct FinalizedBlock {
     pub state_root: [u8; 32],
     pub gas_used: u64,
 }
+
+pub type CommittedBlockHandler = Arc<dyn Fn(FinalizedBlock, u128) + Send + Sync>;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -103,10 +103,6 @@ fn vm_account_bytes(address: &str) -> [u8; 32] {
     let copied_len = address.len().min(account.len());
     account[..copied_len].copy_from_slice(&address[..copied_len]);
     account
-}
-
-fn is_transfer_account(account: &[u8; 32], address: &str) -> bool {
-    *account == vm_account_bytes(address)
 }
 
 // ── ProducerConfig ────────────────────────────────────────────────────────────
@@ -156,6 +152,7 @@ pub struct BlockProducer {
     pbft_finality: Option<Arc<LivePbftFinality>>,
     my_stake: u64,
     canonical_commit_lock: Arc<tokio::sync::Mutex<()>>,
+    committed_block_handler: PLMutex<Option<CommittedBlockHandler>>,
     config: ProducerConfig,
     blocks_per_epoch: u64,
     block_tx: tokio::sync::broadcast::Sender<FinalizedBlock>,
@@ -194,13 +191,18 @@ impl BlockProducer {
         self.canonical_commit_lock = lock;
     }
 
+    /// Attach the shared post-commit handler used by producer and inbound paths.
+    pub fn set_committed_block_handler(&self, handler: CommittedBlockHandler) {
+        *self.committed_block_handler.lock() = Some(handler);
+    }
+
     /// Build a new block producer with a real SPHINCS+-SHAKE-256f-simple keypair.
     ///
     /// `sphincs_sk_bytes` — full SPHINCS+ secret key bytes (128 bytes, from `generate_tx_keypair()`).
     /// `sphincs_pk_bytes` — full SPHINCS+ public key bytes (64 bytes).
     ///
-    /// Returns `(producer, receiver)`. Subscribe the receiver in `main.rs` for
-    /// both the scheduler relay and the `GossipBridge`.
+    /// Returns `(producer, receiver)` for observers of finalized block events.
+    /// Consensus-side effects are delivered through the shared commit handler.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         validator_id: String,
@@ -280,6 +282,7 @@ impl BlockProducer {
                 pbft_finality,
                 my_stake,
                 canonical_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+                committed_block_handler: PLMutex::new(None),
                 config,
                 blocks_per_epoch: BLOCKS_PER_EPOCH,
                 block_tx,
@@ -327,12 +330,12 @@ impl BlockProducer {
                         fb.epoch,
                         fb.tx_count,
                         fb.gas_used,
-                        hex::encode(&fb.state_root[..4])
+                        hex::encode(fb.state_root)
                     );
                     let _ = self.block_tx.send(fb);
                 }
                 Ok(None) => {}
-                Err(e) => error!("[BlockProducer] {}", e),
+                Err(e) => Self::report_production_error(e),
             }
         }
     }
@@ -362,14 +365,22 @@ impl BlockProducer {
                         fb.epoch,
                         fb.tx_count,
                         fb.gas_used,
-                        hex::encode(&fb.state_root[..4])
+                        hex::encode(fb.state_root)
                     );
                     let _ = self_arc.block_tx.send(fb);
                 }
                 Ok(None) => {}
-                Err(e) => error!("[BlockProducer] {}", e),
+                Err(e) => Self::report_production_error(e),
             }
         }
+    }
+
+    fn report_production_error(error: String) {
+        if error.starts_with("CRITICAL_STORAGE:") {
+            error!(target: "bleep::critical", "CRITICAL: {}", error);
+            std::process::exit(1);
+        }
+        error!("[BlockProducer] {}", error);
     }
 
     async fn produce_one(&self) -> Result<Option<FinalizedBlock>, String> {
@@ -536,8 +547,8 @@ impl BlockProducer {
         // Phase A (no lock): route every tx through the VM executor.
         //   Collects (ZKTransaction, gas, accepted) tuples.
         // Phase B (with lock): apply accepted balance changes to StateManager.
-        let mut vm_results: Vec<(usize, u64, bool, StateDiff)> = Vec::with_capacity(tx_count);
-        // (pending_index, gas, vm_accepted, state_diff)
+        let mut vm_results: Vec<(usize, u64, bool)> = Vec::with_capacity(tx_count);
+        // (pending_index, gas, vm_accepted)
 
         for (idx, zt) in pending.iter().enumerate() {
             let block_tx = Transaction {
@@ -559,7 +570,7 @@ impl BlockProducer {
                             next_height / self.blocks_per_epoch,
                         )
                         .is_ok();
-                    vm_results.push((idx, 0, valid, StateDiff::empty()));
+                    vm_results.push((idx, 0, valid));
                     continue;
                 }
                 Err(error) => {
@@ -567,7 +578,7 @@ impl BlockProducer {
                         "[BlockProducer] Invalid validator stake transaction from {}: {}",
                         zt.sender, error
                     );
-                    vm_results.push((idx, 0, false, StateDiff::empty()));
+                    vm_results.push((idx, 0, false));
                     continue;
                 }
                 Ok(None) => {}
@@ -585,31 +596,25 @@ impl BlockProducer {
                 BLEEP_CHAIN_ID,
             );
 
-            // Single VM call — collect gas, accepted, and StateDiff together
-            let (gas, accepted, diff) = match self.executor.execute(&intent).await {
+            // Single VM call — collect gas and accepted status together.
+            let (gas, accepted) = match self.executor.execute(&intent).await {
                 Ok(o) => {
                     let gas = o.bleep_gas;
                     let accepted = o.success();
-                    let diff = o.state_diff().clone();
-                    (gas, accepted, diff)
+                    (gas, accepted)
                 }
                 Err(e) => {
                     warn!(
                         "[BlockProducer] VM error tx {}→{}: {:?}",
                         zt.sender, zt.receiver, e
                     );
-                    (0, false, StateDiff::empty())
+                    (0, false)
                 }
             };
-            vm_results.push((idx, gas, accepted, diff));
+            vm_results.push((idx, gas, accepted));
         }
 
         // Phase B: acquire state lock (sync), apply accepted txs
-        //
-        // Two accounting paths (both applied for accepted txs):
-        //   1. Native apply_transfer()  — canonical BLEEP balance accounting
-        //   2. VM StateDiff.balances    — EVM/WASM/ZK engine side-effects
-        //      (contract-emitted balance changes beyond the simple transfer)
         let mut block_txs: Vec<Transaction> = Vec::with_capacity(tx_count);
         let mut failed_tx_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut total_gas: u64 = 0;
@@ -619,7 +624,7 @@ impl BlockProducer {
             .map(|registry| registry.lock().clone());
         {
             let mut state = self.state.lock();
-            for (idx, gas, vm_ok, diff) in &vm_results {
+            for (idx, gas, vm_ok) in &vm_results {
                 let zt = &pending[*idx];
                 if !vm_ok
                     || zt.chain_id != self.config.chain_id
@@ -721,44 +726,6 @@ impl BlockProducer {
                         .register_stake_transaction(&block_tx, next_height / self.blocks_per_epoch)
                     {
                         return Err(format!("Validator stake registration failed: {error}"));
-                    }
-                }
-
-                // Path 2: apply any additional VM-produced balance deltas.
-                // These represent contract-side effects (e.g. gas refunds,
-                // token mints, fee distributions) beyond the transfer itself.
-                // We skip the sender/receiver pair to avoid double-counting.
-                for (acct_bytes, update) in &diff.balances {
-                    let addr = hex::encode(acct_bytes);
-                    // Only apply VM diff for accounts that are not the direct
-                    // transfer pair (those are handled by apply_transfer above).
-                    if is_transfer_account(acct_bytes, &zt.sender)
-                        || is_transfer_account(acct_bytes, &zt.receiver)
-                    {
-                        continue;
-                    }
-                    state
-                        .apply_balance_delta(&addr, update.delta)
-                        .map_err(|error| {
-                            format!(
-                                "VM balance delta rejected for account {addr} in block {next_height}: {error}"
-                            )
-                        })?;
-                }
-
-                // Path 3: apply nonce updates from VM diff.
-                // For accounts modified by smart contracts (not direct transfers),
-                // bump nonces to the VM-reported value by calling increment_nonce
-                // until we reach the target. Skip sender (already bumped by apply_transfer).
-                for (acct_bytes, nonce_update) in &diff.nonces {
-                    let addr = hex::encode(acct_bytes);
-                    if is_transfer_account(acct_bytes, &zt.sender) {
-                        continue; // already bumped by apply_transfer above
-                    }
-                    // Bring nonce up to the VM-reported new_nonce
-                    let mut current = state.get_nonce(&addr);
-                    while current < nonce_update.new_nonce {
-                        current = state.increment_nonce(&addr);
                     }
                 }
 
@@ -901,7 +868,7 @@ impl BlockProducer {
                     chain.rollback();
                     let cleanup = finality.abandon_proposal(next_height);
                     return Err(format!(
-                        "Block {} durable commit failed: {}; PBFT cleanup: {}",
+                        "CRITICAL_STORAGE: Block {} durable commit failed: {}; PBFT cleanup: {}",
                         next_height,
                         e,
                         cleanup
@@ -931,19 +898,7 @@ impl BlockProducer {
         if let (Some(registry), Some(staged_registry)) =
             (self.validator_registry.as_ref(), staged_validator_registry)
         {
-            let snapshot = staged_registry.to_persistent_bytes().map_err(|error| {
-                format!("Validator registry serialization after block commit failed: {error}")
-            })?;
             *registry.lock() = staged_registry;
-            if let Err(error) = self.state.lock().put_application_data(
-                crate::validator_identity::VALIDATOR_REGISTRY_STORAGE_KEY,
-                &snapshot,
-            ) {
-                error!(
-                    "[BlockProducer] Validator registry persistence failed after committed staking transaction: {}",
-                    error
-                );
-            }
         }
 
         // Inbound validators require each transaction's full signature. Until
@@ -1008,14 +963,21 @@ impl BlockProducer {
             .lock()
             .record_block(block_txs.len(), prove_time_ms, block_time_ms);
 
-        Ok(Some(FinalizedBlock {
+        let finalized_block = FinalizedBlock {
             height: next_height,
             epoch: epoch_id,
             hash: block.compute_hash(),
             tx_count: block_txs.len(),
             state_root,
             gas_used: total_gas,
-        }))
+        };
+        let fee_revenue = block_txs
+            .iter()
+            .fold(0u128, |fees, tx| fees.saturating_add(u128::from(tx.fee)));
+        if let Some(handler) = self.committed_block_handler.lock().as_ref() {
+            handler(finalized_block.clone(), fee_revenue);
+        }
+        Ok(Some(finalized_block))
     }
 
     fn canonical_tx_id(zt: &ZKTransaction) -> String {
@@ -1252,12 +1214,10 @@ mod real_transaction_benchmark {
         let address = "BLEEP1sender";
         let account = vm_account_bytes(address);
 
-        assert!(is_transfer_account(&account, address));
-        assert!(!is_transfer_account(&account, "BLEEP1receiver"));
-        assert!(is_transfer_account(
-            &vm_account_bytes(&"BLEEP1".repeat(8)),
-            &"BLEEP1".repeat(8)
-        ));
+        assert_eq!(&account[..address.len()], address.as_bytes());
+        assert!(account[address.len()..].iter().all(|byte| *byte == 0));
+        let long_address = "A".repeat(33);
+        assert_eq!(vm_account_bytes(&long_address), [b'A'; 32]);
     }
 
     #[test]

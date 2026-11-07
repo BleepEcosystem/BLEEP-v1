@@ -205,6 +205,9 @@ jobs:
       - name: Smoke test PBFT rejection and replacement
         run: cargo run --locked -p bleep-consensus --example e2e_tx
 
+      - name: Test three-validator state roots across five epochs
+        run: cargo test --locked -p bleep-root --bin bleep committed_block_tests -- --nocapture
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3

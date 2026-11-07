@@ -21,6 +21,8 @@ pub enum StateError {
     AccountNotFound(String),
     #[error("Storage error: {0}")]
     Storage(String),
+    #[error("Storage write error: {0}")]
+    StorageWrite(String),
     #[error("Invalid state configuration: {0}")]
     InvalidConfiguration(String),
     #[error("Serialisation error: {0}")]
@@ -364,7 +366,7 @@ impl StateManager {
         let db_key = [PREFIX_APPLICATION, key.as_bytes()].concat();
         self.db
             .put(db_key, value)
-            .map_err(|error| StateError::Storage(error.to_string()))
+            .map_err(|error| StateError::StorageWrite(error.to_string()))
     }
 
     /// Capture in-memory state so an uncommitted block proposal can be undone.
@@ -666,7 +668,7 @@ impl StateManager {
         batch.put(block_key, block_value);
         self.db
             .write(batch)
-            .map_err(|e| StateError::Storage(e.to_string()))?;
+            .map_err(|e| StateError::StorageWrite(e.to_string()))?;
         Ok(())
     }
 
@@ -1207,7 +1209,7 @@ impl StateManager {
 
         self.db
             .write(batch)
-            .map_err(|e| StateError::Storage(e.to_string()))?;
+            .map_err(|e| StateError::StorageWrite(e.to_string()))?;
 
         log::debug!(
             "[StateManager] Flushed {} accounts, height={}",

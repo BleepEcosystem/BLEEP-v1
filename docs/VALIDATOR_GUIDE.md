@@ -30,18 +30,18 @@ Before starting a node, provision a unique random JWT secret for it and export i
 `init` performs the following steps:
 
 - Creates `~/.bleep/validators/validator-1/state/`.
-- Generates real ML-KEM-1024 and SPHINCS+-SHAKE-256f-simple keys if they are absent. Re-running it never regenerates existing keys.
+- Generates real ML-KEM-1024 and SPHINCS+-SHAKE-256f-simple keys if they are absent. Re-running it never regenerates existing keys. The key files in the state directory are stored with mode `0600`.
 - Creates an operator session and performs registration through RPC.
 - On testnet, requests one faucet drip when the configured account balance is below the requested stake. Faucet top-up is never attempted on mainnet.
 - Writes `~/.bleep/validators/validator-1/config.toml`.
 - Prints one prominent backup instruction for `validator.key`.
 - Starts the validator.
 
-The private key files are in the state directory. Back up `validator.key` and protect the backup. Losing it loses the validator identity and stake.
+The validator key files are in the state directory. Back up `validator.key` and `sphincs.secret` securely; losing the signing key loses the validator identity and stake. On startup, the node checks that the signing key matches the registered validator ID and refuses to start if they differ.
 
 ## Restart
 
-The saved configuration supplies the ports, state directory, binary, RPC endpoint, seed, network, and stake:
+The saved configuration supplies the ports, state directory, binary, RPC endpoint, seed, network, and stake. The node reuses its persisted keys and chain state on restart:
 
 ```bash
 ./scripts/run-validator.sh run --name validator-1

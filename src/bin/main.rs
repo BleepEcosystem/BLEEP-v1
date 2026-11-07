@@ -41,6 +41,9 @@
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::error::Error;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tracing::{error, info, warn};
 
@@ -61,6 +64,7 @@ use bleep_state::cross_shard_2pc::CoordinatorManager;
 use bleep_state::state_manager::StateManager;
 
 // ── Consensus ─────────────────────────────────────────────────────────────────
+use bleep_consensus::block_producer::FinalizedBlock;
 use bleep_consensus::slashing_engine::SlashingEngine;
 use bleep_consensus::validator_identity::{
     ValidatorIdentity, ValidatorRegistry, VALIDATOR_REGISTRY_STORAGE_KEY,
@@ -127,6 +131,198 @@ fn persist_validator_registry(
         .lock()
         .put_application_data(VALIDATOR_REGISTRY_STORAGE_KEY, &snapshot)
         .map_err(|error| format!("Persist validator registry: {error}"))
+}
+
+#[derive(Clone)]
+struct CommittedBlockEffects {
+    state: Arc<Mutex<StateManager>>,
+    registry: Arc<Mutex<ValidatorRegistry>>,
+    scheduler: Arc<Scheduler>,
+    blocks_produced: MetricCounter,
+    txs_processed: MetricCounter,
+    gas_used_gauge: MetricGauge,
+    rpc_blocks_produced: Arc<std::sync::atomic::AtomicU64>,
+    rpc_txs_processed: Arc<std::sync::atomic::AtomicU64>,
+    rpc_height: Arc<std::sync::atomic::AtomicU64>,
+    epoch_fee_revenue: Arc<Mutex<u128>>,
+    blocks_per_epoch: u64,
+}
+
+fn critical_storage_failure(context: &str, error: impl std::fmt::Display) -> ! {
+    tracing::error!(target: "bleep::critical", "CRITICAL: {context}: {error}");
+    std::process::exit(1);
+}
+
+fn apply_committed_block(
+    block: FinalizedBlock,
+    fee_revenue: u128,
+    effects: &CommittedBlockEffects,
+) {
+    if block.height.is_multiple_of(effects.blocks_per_epoch) {
+        if let Err(error) = effects.registry.lock().apply_reputation_decay(0.995, 0.10) {
+            critical_storage_failure("epoch validator state transition failed", error);
+        }
+    }
+    if let Err(error) = persist_validator_registry(&effects.state, &effects.registry) {
+        critical_storage_failure("validator registry persistence failed", error);
+    }
+
+    effects.blocks_produced.increment();
+    effects
+        .rpc_blocks_produced
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    for _ in 0..block.tx_count {
+        effects.txs_processed.increment();
+        effects
+            .rpc_txs_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    effects.gas_used_gauge.set(block.gas_used as i64);
+    effects
+        .rpc_height
+        .store(block.height, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut fees = effects.epoch_fee_revenue.lock();
+        *fees = fees.saturating_add(fee_revenue);
+    }
+
+    effects.scheduler.on_new_block(BlockTick {
+        height: block.height,
+        epoch: block.epoch,
+        timestamp: block.height,
+    });
+
+    info!(
+        "📦 Block {} | epoch={} | txs={} | gas={} | root={}",
+        block.height,
+        block.epoch,
+        block.tx_count,
+        block.gas_used,
+        hex::encode(block.state_root)
+    );
+}
+
+fn write_private_key_file(path: &Path, contents: &[u8]) -> Result<(), Box<dyn Error>> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn load_or_create_validator_keys(
+    key_dir: &Path,
+) -> Result<(Vec<u8>, Vec<u8>, KyberPublicKey), Box<dyn Error>> {
+    std::fs::create_dir_all(key_dir)?;
+    let public_path = key_dir.join("sphincs.public");
+    let secret_path = key_dir.join("sphincs.secret");
+    let kyber_path = key_dir.join("kyber.public");
+    let exists = [
+        public_path.exists(),
+        secret_path.exists(),
+        kyber_path.exists(),
+    ];
+
+    let (public, secret, kyber) = if exists.iter().all(|exists| *exists) {
+        for path in [&public_path, &secret_path, &kyber_path] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let public = hex::decode(std::fs::read_to_string(&public_path)?.trim())?;
+        let secret = hex::decode(std::fs::read_to_string(&secret_path)?.trim())?;
+        let kyber =
+            KyberPublicKey::from_bytes(hex::decode(std::fs::read_to_string(&kyber_path)?.trim())?)?;
+        (public, secret, kyber)
+    } else if exists.iter().any(|exists| *exists) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Incomplete validator key set in {}; restore sphincs.public, sphincs.secret, and kyber.public together",
+                key_dir.display()
+            ),
+        )
+        .into());
+    } else {
+        let (public, secret) = generate_tx_keypair();
+        let (kyber, _) = KyberKem::keygen().map_err(|error| {
+            std::io::Error::other(format!("Kyber-1024 keygen failed: {error:?}"))
+        })?;
+        write_private_key_file(&public_path, hex::encode(&public).as_bytes())?;
+        write_private_key_file(&secret_path, hex::encode(&secret).as_bytes())?;
+        write_private_key_file(&kyber_path, hex::encode(kyber.as_bytes()).as_bytes())?;
+        (public, secret, kyber)
+    };
+
+    if public.len() != 64 || secret.len() != 128 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Invalid persisted SPHINCS+ key lengths in {}: public={}, secret={}",
+                key_dir.display(),
+                public.len(),
+                secret.len()
+            ),
+        )
+        .into());
+    }
+    kyber.validate()?;
+    let challenge = b"BLEEP validator keypair startup check v1";
+    let signature =
+        bleep_crypto::tx_signer::sign_tx_payload(challenge, &secret).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Persisted SPHINCS+ secret key is invalid: {error}"),
+            )
+        })?;
+    if !bleep_crypto::tx_signer::verify_tx_signature(challenge, &signature, &public) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Persisted SPHINCS+ public and secret keys do not match",
+        )
+        .into());
+    }
+    Ok((public, secret, kyber))
+}
+
+fn registered_local_validator_id(
+    registry: &ValidatorRegistry,
+    public_key: &[u8],
+) -> Result<String, Box<dyn Error>> {
+    if public_key.len() != bleep_core::block::SPHINCS_PK_LEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Local SPHINCS+ public key has an invalid length",
+        )
+        .into());
+    }
+    let id = hex::encode(&public_key[..8]);
+    let validator = registry.get(&id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Local key is not registered as validator {id}"),
+        )
+    })?;
+    if !validator
+        .signing_key_id
+        .eq_ignore_ascii_case(&hex::encode(public_key))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Loaded SPHINCS+ key does not match registered validator ID {id}"),
+        )
+        .into());
+    }
+    if !validator.can_participate() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Registered validator {id} is not active"),
+        )
+        .into());
+    }
+    Ok(id)
 }
 
 fn process_completed_economics_epoch(
@@ -666,6 +862,238 @@ mod epoch_config_tests {
     }
 }
 
+#[cfg(test)]
+mod committed_block_tests {
+    use super::*;
+    use bleep_state::state_manager::{CanonicalBlockContext, CanonicalTransfer};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn validator_keys_persist_with_private_permissions_and_reload() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let (public, secret, kyber) =
+            load_or_create_validator_keys(directory.path()).expect("generate validator keys");
+
+        for name in ["sphincs.public", "sphincs.secret", "kyber.public"] {
+            let metadata = std::fs::metadata(directory.path().join(name)).expect("key metadata");
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+
+        let (loaded_public, loaded_secret, loaded_kyber) =
+            load_or_create_validator_keys(directory.path()).expect("reload validator keys");
+        assert_eq!(loaded_public, public);
+        assert_eq!(loaded_secret, secret);
+        assert_eq!(loaded_kyber.as_bytes(), kyber.as_bytes());
+
+        let id = hex::encode(&public[..8]);
+        let identity = ValidatorIdentity::new_with_vrf_public_key(
+            id.clone(),
+            kyber.as_bytes().to_vec(),
+            hex::encode(&public),
+            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&secret)
+                .expect("derive local VRF key"),
+            1_000,
+            0,
+        )
+        .expect("create registered local validator");
+        let mut registry = ValidatorRegistry::new();
+        registry
+            .register_validator(identity)
+            .expect("register local validator");
+        registry
+            .activate_validator(&id)
+            .expect("activate local validator");
+        assert_eq!(
+            registered_local_validator_id(&registry, &public).unwrap(),
+            id
+        );
+        let mut wrong_public = public.clone();
+        wrong_public[8] ^= 1;
+        assert!(registered_local_validator_id(&registry, &wrong_public).is_err());
+    }
+
+    fn three_validator_registry() -> (ValidatorRegistry, Vec<String>) {
+        let mut registry = ValidatorRegistry::new();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let (public, secret) = generate_tx_keypair();
+            let id = hex::encode(&public[..8]);
+            let identity = ValidatorIdentity::new_with_vrf_public_key(
+                id.clone(),
+                vec![1; 1568],
+                hex::encode(&public),
+                bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(&secret)
+                    .expect("derive VRF key"),
+                1_000,
+                0,
+            )
+            .expect("create validator");
+            registry
+                .register_validator(identity)
+                .expect("register validator");
+            registry
+                .activate_validator(&id)
+                .expect("activate validator");
+            ids.push(id);
+        }
+        (registry, ids)
+    }
+
+    #[test]
+    fn state_roots_match_at_every_height_for_three_validators_across_five_epochs() {
+        const BLOCKS_PER_EPOCH: u64 = 100;
+        const LAST_HEIGHT: u64 = 500;
+        let chain_id = "BLEEP-consensus-regression";
+        let (initial_registry, validator_ids) = three_validator_registry();
+        let directories = (0..3)
+            .map(|_| tempfile::tempdir().expect("temporary validator state directory"))
+            .collect::<Vec<_>>();
+        let states = directories
+            .iter()
+            .map(|directory| {
+                let mut state = StateManager::open(directory.path()).expect("open validator state");
+                state.mint("alice", 100_000).expect("fund source account");
+                state.commit_block().expect("persist genesis accounts");
+                Arc::new(Mutex::new(state))
+            })
+            .collect::<Vec<_>>();
+        let effects = states
+            .iter()
+            .enumerate()
+            .map(|(index, state)| {
+                Arc::new(CommittedBlockEffects {
+                    state: Arc::clone(state),
+                    registry: Arc::new(Mutex::new(initial_registry.clone())),
+                    scheduler: Arc::new(Scheduler::new()),
+                    blocks_produced: MetricCounter::new(&format!("regression_blocks_{index}")),
+                    txs_processed: MetricCounter::new(&format!("regression_txs_{index}")),
+                    gas_used_gauge: MetricGauge::new(&format!("regression_gas_{index}")),
+                    rpc_blocks_produced: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    rpc_txs_processed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    rpc_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    epoch_fee_revenue: Arc::new(Mutex::new(0)),
+                    blocks_per_epoch: BLOCKS_PER_EPOCH,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut previous_hash = Block::genesis_for_chain(chain_id).compute_hash();
+        let genesis_hash = previous_hash.clone();
+        let mut epoch_boundaries = 0;
+        let mut final_state_root = String::new();
+        for height in 1..=LAST_HEIGHT {
+            let proposer_id = &validator_ids[((height - 1) as usize) % validator_ids.len()];
+            let transfer = CanonicalTransfer {
+                sender: "alice".into(),
+                receiver: "bob".into(),
+                amount: 1,
+                fee: 0,
+                nonce: height - 1,
+            };
+            let checkpoint = states[0].lock().checkpoint();
+            assert!(states[0].lock().apply_transfer_with_fee(
+                "alice",
+                "bob",
+                1,
+                0,
+                height - 1,
+                chrono::Utc::now().timestamp().max(0) as u64,
+            ));
+            let expected_root = hex::encode(states[0].lock().state_root());
+            states[0].lock().restore_checkpoint(checkpoint);
+            final_state_root.clone_from(&expected_root);
+            let block_hash = format!("{height:064x}");
+            let block_body = (height, proposer_id.as_str());
+
+            for (index, state) in states.iter().enumerate() {
+                state
+                    .lock()
+                    .apply_canonical_block(
+                        &block_body,
+                        CanonicalBlockContext {
+                            index: height,
+                            block_hash: &block_hash,
+                            previous_hash: &previous_hash,
+                            chain_id,
+                            genesis_hash: &genesis_hash,
+                            expected_post_state_root: &expected_root,
+                            transfers: std::slice::from_ref(&transfer),
+                        },
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("validator {index} failed to apply block {height}: {error}")
+                    });
+            }
+
+            let state_root = hex::decode(&expected_root)
+                .expect("expected root hex")
+                .try_into()
+                .expect("32-byte root");
+            let finalized_block = FinalizedBlock {
+                height,
+                epoch: height / BLOCKS_PER_EPOCH,
+                hash: block_hash.clone(),
+                tx_count: 1,
+                state_root,
+                gas_used: 0,
+            };
+            for node_effects in &effects {
+                apply_committed_block(finalized_block.clone(), 0, node_effects);
+            }
+
+            for (index, state) in states.iter().enumerate() {
+                assert_eq!(
+                    hex::encode(state.lock().state_root()),
+                    expected_root,
+                    "state root mismatch for validator {index} at height {height}"
+                );
+            }
+            let expected_registry = effects[0]
+                .registry
+                .lock()
+                .to_persistent_bytes()
+                .expect("serialize expected validator registry");
+            for node_effects in effects.iter().skip(1) {
+                assert_eq!(
+                    node_effects
+                        .registry
+                        .lock()
+                        .to_persistent_bytes()
+                        .expect("serialize validator registry"),
+                    expected_registry,
+                    "validator registry mismatch at height {height}"
+                );
+            }
+
+            if height.is_multiple_of(BLOCKS_PER_EPOCH) {
+                epoch_boundaries += 1;
+            }
+            previous_hash = block_hash;
+        }
+
+        assert_eq!(epoch_boundaries, 5);
+        for state in &states {
+            assert_eq!(state.lock().block_height(), LAST_HEIGHT);
+        }
+        drop(effects);
+        drop(states);
+        for directory in &directories {
+            let mut reopened =
+                StateManager::open(directory.path()).expect("reopen validator state");
+            assert_eq!(reopened.block_height(), LAST_HEIGHT);
+            assert_eq!(hex::encode(reopened.state_root()), final_state_root);
+            let blocks = reopened
+                .load_canonical_blocks::<(u64, String), _>(
+                    chain_id,
+                    &genesis_hash,
+                    |(height, _)| format!("{height:064x}"),
+                )
+                .expect("load persisted canonical history");
+            assert_eq!(blocks.len(), LAST_HEIGHT as usize);
+        }
+    }
+}
+
 async fn run() -> Result<(), Box<dyn Error>> {
     let network_config = load_network_config()?;
     let network_mode = std::env::var("BLEEP_NETWORK_MODE").ok();
@@ -740,29 +1168,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Generate real SPHINCS+-SHAKE-256f-simple keypair for block signing.
     // generate_tx_keypair() returns (pk_bytes: 64B, sk_bytes: 128B).
-    let key_dir =
+    let state_dir =
         std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
-    let key_paths = (
-        format!("{}/sphincs.public", key_dir),
-        format!("{}/sphincs.secret", key_dir),
-        format!("{}/kyber.public", key_dir),
-    );
-    let (sphincs_pk, sphincs_sk, kyber_pk) = if std::path::Path::new(&key_paths.0).exists()
-        && std::path::Path::new(&key_paths.1).exists()
-        && std::path::Path::new(&key_paths.2).exists()
-    {
-        let public = hex::decode(std::fs::read_to_string(&key_paths.0)?.trim())?;
-        let secret = hex::decode(std::fs::read_to_string(&key_paths.1)?.trim())?;
-        let kyber = KyberPublicKey::from_bytes(hex::decode(
-            std::fs::read_to_string(&key_paths.2)?.trim(),
-        )?)?;
-        (public, secret, kyber)
-    } else {
-        let (public, secret) = generate_tx_keypair();
-        let (kyber, _) =
-            KyberKem::keygen().map_err(|e| format!("Kyber-1024 keygen failed: {:?}", e))?;
-        (public, secret, kyber)
-    };
+    let (sphincs_pk, sphincs_sk, kyber_pk) = load_or_create_validator_keys(Path::new(&state_dir))?;
 
     // Generate real Kyber-1024 keypair for validator KEM binding.
     // KyberKem::keygen() returns (KyberPublicKey: 1568B, KyberSecretKey: 3168B).
@@ -781,9 +1189,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("⛓  [2/16] Initialising genesis block and persistent state…");
 
     let chain_id = network_config.chain_id;
-    let state_dir =
-        std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
-
     let mut state = match StateManager::open(&state_dir) {
         Ok(s) => {
             info!("  ✅ StateManager at {}", state_dir);
@@ -995,6 +1400,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     };
     let validator_registry = Arc::new(Mutex::new(validator_registry));
+    let local_validator_id =
+        registered_local_validator_id(&validator_registry.lock(), &sphincs_pk)?;
+    let local_stake = {
+        let registry = validator_registry.lock();
+        let validator = registry.get(&local_validator_id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Validated local validator {local_validator_id} disappeared"),
+            )
+        })?;
+        u64::try_from(validator.stake).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Local validator stake exceeds u64: {error}"),
+            )
+        })?
+    };
     let slashing_engine = Arc::new(Mutex::new(SlashingEngine::new()));
 
     // ── Step 6c: STARK initialization ─────────────────────────────────────────
@@ -1108,7 +1530,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
         p2p_node.peer_count()
     );
 
-    let local_validator_id = hex::encode(&sphincs_pk[..8]);
     let pbft_validator_keys = validator_registry
         .lock()
         .get_active_validators()
@@ -1167,9 +1588,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Build BlockProducer — proper (sk, pk) keypair, VM execution per-tx.
     // It gossips complete serialized blocks directly through the P2P node.
-    let (mut block_producer, block_rx) = BlockProducer::new_with_sig_availability(
-        hex::encode(&sphincs_pk[..8]), // validator_id (first 8 bytes of SPHINCS+ PK)
-        1_000_000u64,                  // stake weight
+    let (mut block_producer, _block_rx) = BlockProducer::new_with_sig_availability(
+        local_validator_id.clone(),
+        local_stake,
         Arc::clone(&tx_pool),
         Arc::clone(&blockchain),
         Arc::clone(&state),
@@ -1185,8 +1606,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let canonical_commit_lock = Arc::new(tokio::sync::Mutex::new(()));
     block_producer.set_canonical_commit_lock(Arc::clone(&canonical_commit_lock));
     let block_producer = Arc::new(block_producer);
-
-    let mut block_rx_sched = block_rx;
 
     // Build live AuthService for the RPC auth subsystem.
     let jwt_secret_b64 = std::env::var("BLEEP_JWT_SECRET").unwrap_or_else(|_| {
@@ -1245,51 +1664,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 governance
                     .advance_epoch(ctx.epoch)
                     .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
-                governance
-                    .persist()
-                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
-            }
-        },
-    ));
-
-    let proposal_governance = Arc::clone(&governance);
-    scheduler.registry.register(RegisteredTask::interval(
-        "governance_proposal_advance",
-        TaskKind::Governance,
-        "Advance governance proposals through their epoch state machine",
-        120,
-        30,
-        move |ctx| {
-            let governance = Arc::clone(&proposal_governance);
-            async move {
-                let mut governance = governance.lock();
-                governance
-                    .advance_epoch(ctx.epoch)
-                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
-                governance
-                    .persist()
-                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
-            }
-        },
-    ));
-
-    let voting_governance = Arc::clone(&governance);
-    scheduler.registry.register(RegisteredTask::epoch_boundary(
-        "governance_voting_window_close",
-        TaskKind::Governance,
-        "Close governance voting windows at epoch boundaries",
-        blocks_per_epoch,
-        30,
-        move |ctx| {
-            let governance = Arc::clone(&voting_governance);
-            async move {
-                let mut governance = governance.lock();
-                governance
-                    .advance_epoch(ctx.epoch)
-                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
-                governance
-                    .persist()
-                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))
+                if let Err(error) = governance.persist() {
+                    critical_storage_failure("governance epoch persistence failed", error);
+                }
+                Ok(())
             }
         },
     ));
@@ -1319,28 +1697,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
         },
     ));
 
-    let decay_registry = Arc::clone(&validator_registry);
-    let decay_state = Arc::clone(&state);
-    scheduler.registry.register(RegisteredTask::interval(
-        "validator_trust_decay",
-        TaskKind::Consensus,
-        "Decay active validator reputation and persist the registry",
-        600,
-        15,
-        move |_| {
-            let registry = Arc::clone(&decay_registry);
-            let state = Arc::clone(&decay_state);
-            async move {
-                registry
-                    .lock()
-                    .apply_reputation_decay(0.995, 0.10)
-                    .map_err(SchedulerError::ExecutionFailed)?;
-                persist_validator_registry(&state, &registry)
-                    .map_err(SchedulerError::ExecutionFailed)
-            }
-        },
-    ));
-
     let slashing_registry = Arc::clone(&validator_registry);
     let slashing_state = Arc::clone(&state);
     scheduler.registry.register(RegisteredTask::interval(
@@ -1353,8 +1709,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let registry = Arc::clone(&slashing_registry);
             let state = Arc::clone(&slashing_state);
             async move {
-                persist_validator_registry(&state, &registry)
-                    .map_err(SchedulerError::ExecutionFailed)
+                if let Err(error) = persist_validator_registry(&state, &registry) {
+                    critical_storage_failure("slashing registry persistence failed", error);
+                }
+                Ok(())
             }
         },
     ));
@@ -1419,11 +1777,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let burn_runtime = Arc::clone(&economics_runtime);
     let burn_fees = Arc::clone(&epoch_fee_revenue);
-    scheduler.registry.register(RegisteredTask::interval(
+    scheduler.registry.register(RegisteredTask::epoch_boundary(
         "token_burn_execution",
         TaskKind::Economics,
-        "Process any completed epoch fee burns not yet recorded",
-        21600,
+        "Process completed epoch fee burns at each epoch boundary",
+        blocks_per_epoch,
         30,
         move |ctx| {
             let runtime = Arc::clone(&burn_runtime);
@@ -1541,7 +1899,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     ));
 
     let startup_height = state.lock().block_height();
-    scheduler.on_new_block(BlockTick {
+    scheduler.initialize_block(BlockTick {
         height: startup_height,
         epoch: startup_height / blocks_per_epoch,
         timestamp: chrono::Utc::now().timestamp().max(0) as u64,
@@ -1564,61 +1922,24 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_blocks_per_epoch(blocks_per_epoch)
         .with_auth_service(Arc::clone(&auth_service));
 
-    // Relay FinalizedBlock events into Scheduler + metrics + economics
-    let scheduler_relay = Arc::clone(&scheduler);
-    let blocks_relay = blocks_produced.clone();
-    let txs_relay = txs_processed.clone();
-    let gas_relay = gas_used_gauge.clone();
-    let rpc_blocks_relay = Arc::clone(&rpc_state.blocks_produced);
-    let rpc_txs_relay = Arc::clone(&rpc_state.txs_processed);
-    let fees_relay = Arc::clone(&epoch_fee_revenue);
-    let rpc_height_relay = Arc::clone(&rpc_state.chain_height);
-    let registry_relay = Arc::clone(&validator_registry);
-    let state_relay = Arc::clone(&state);
-
-    let relay_handle = tokio::spawn(async move {
-        loop {
-            match block_rx_sched.recv().await {
-                Ok(fb) => {
-                    if let Err(error) = persist_validator_registry(&state_relay, &registry_relay) {
-                        error!("[relay] Validator registry persistence failed: {error}");
-                    }
-                    blocks_relay.increment();
-                    rpc_blocks_relay.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    for _ in 0..fb.tx_count {
-                        txs_relay.increment();
-                        rpc_txs_relay.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    gas_relay.set(fb.gas_used as i64);
-                    rpc_height_relay.store(fb.height, std::sync::atomic::Ordering::Relaxed);
-
-                    {
-                        let mut fees = fees_relay.lock();
-                        *fees = fees.saturating_add(fb.gas_used as u128 * 1_000);
-                    }
-
-                    scheduler_relay.on_new_block(BlockTick {
-                        height: fb.height,
-                        epoch: fb.epoch,
-                        timestamp: chrono::Utc::now().timestamp() as u64,
-                    });
-
-                    info!(
-                        "📦 Block {} | epoch={} | txs={} | gas={} | root={}",
-                        fb.height,
-                        fb.epoch,
-                        fb.tx_count,
-                        fb.gas_used,
-                        hex::encode(&fb.state_root[..4])
-                    );
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("[relay] Lagged {} blocks — scheduler may miss ticks", n);
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
+    let committed_block_effects = Arc::new(CommittedBlockEffects {
+        state: Arc::clone(&state),
+        registry: Arc::clone(&validator_registry),
+        scheduler: Arc::clone(&scheduler),
+        blocks_produced: blocks_produced.clone(),
+        txs_processed: txs_processed.clone(),
+        gas_used_gauge: gas_used_gauge.clone(),
+        rpc_blocks_produced: Arc::clone(&rpc_state.blocks_produced),
+        rpc_txs_processed: Arc::clone(&rpc_state.txs_processed),
+        rpc_height: Arc::clone(&rpc_state.chain_height),
+        epoch_fee_revenue: Arc::clone(&epoch_fee_revenue),
+        blocks_per_epoch,
     });
+    let committed_block_handler: bleep_consensus::block_producer::CommittedBlockHandler = {
+        let effects = Arc::clone(&committed_block_effects);
+        Arc::new(move |block, fee_revenue| apply_committed_block(block, fee_revenue, &effects))
+    };
+    block_producer.set_committed_block_handler(Arc::clone(&committed_block_handler));
 
     let producer_for_task = Arc::clone(&block_producer);
     let producer_handle = tokio::spawn(async move {
@@ -1633,7 +1954,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let inbound_tx_pool = Arc::clone(&tx_pool);
     let inbound_state = Arc::clone(&state);
     let inbound_validators = Arc::clone(&validator_registry);
-    let inbound_registry_state = Arc::clone(&state);
+    let inbound_committed_block_handler = Arc::clone(&committed_block_handler);
     let inbound_chain_id = chain_id.clone();
     let inbound_genesis_hash = genesis_hash.clone();
     let inbound_commit_lock = Arc::clone(&canonical_commit_lock);
@@ -2074,6 +2395,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     block.clone(),
                                     &epoch_validator_keys,
                                 ),
+                                Err(bleep_state::state_manager::StateError::StorageWrite(
+                                    error,
+                                )) => {
+                                    critical_storage_failure(
+                                        "inbound canonical block persistence failed",
+                                        error,
+                                    );
+                                }
                                 Err(e) => {
                                     warn!(
                                         "[InboundBlockHandler] Block {} state transition rejected: {}",
@@ -2087,14 +2416,21 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                     if accepted {
                         *inbound_validators.lock() = staged_validator_registry;
-                        if let Err(error) =
-                            persist_validator_registry(&inbound_registry_state, &inbound_validators)
-                        {
-                            error!(
-                                "[InboundBlockHandler] Validator registry persistence failed: {}",
-                                error
-                            );
-                        }
+                        let state_root = inbound_state.lock().state_root();
+                        inbound_committed_block_handler(
+                            FinalizedBlock {
+                                height: block.index,
+                                epoch: block.epoch_id,
+                                hash: block.compute_hash(),
+                                tx_count: block.transactions.len(),
+                                state_root,
+                                gas_used: 0,
+                            },
+                            block
+                                .transactions
+                                .iter()
+                                .fold(0u128, |fees, tx| fees.saturating_add(u128::from(tx.fee))),
+                        );
                         info!(
                             "[InboundBlockHandler] ✅ Accepted inbound block {} txs={}",
                             block.index,
@@ -2251,7 +2587,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Abort background tasks
     producer_handle.abort();
-    relay_handle.abort();
     bridge_handle.abort();
     interval_handle.abort();
     block_sched_handle.abort();

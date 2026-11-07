@@ -3,15 +3,17 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 fn write_private(path: PathBuf, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
     file.write_all(hex::encode(bytes).as_bytes())?;
+    file.sync_all()?;
     #[cfg(unix)]
     fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     Ok(())
@@ -57,11 +59,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_private(dir.join("validator.key"), &sphincs_secret_bytes)?;
     write_private(sphincs_secret, &sphincs_secret_bytes)?;
     write_private(kyber_secret, kyber_secret_value.as_bytes())?;
-    fs::write(dir.join("sphincs.public"), hex::encode(sphincs_public))?;
-    fs::write(
-        dir.join("kyber.public"),
-        hex::encode(kyber_public.as_bytes()),
-    )?;
+    write_private(dir.join("sphincs.public"), &sphincs_public)?;
+    write_private(dir.join("kyber.public"), kyber_public.as_bytes())?;
     println!("created");
     Ok(())
 }

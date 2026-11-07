@@ -40,7 +40,7 @@ pub use task::{ExecutionOutcome, TaskId, TaskKind, TaskRunRecord, TaskStatus, Tr
 
 use log::{error, info, warn};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::time::{interval as tokio_interval, Duration};
 
 /// Chain clock signal. Emit from the consensus layer on every finalised block.
@@ -58,7 +58,8 @@ pub struct BlockTick {
 pub struct Scheduler {
     pub registry: Arc<TaskRegistry>,
     pub metrics: Arc<MetricsStore>,
-    block_tick_tx: broadcast::Sender<BlockTick>,
+    block_tick_tx: mpsc::UnboundedSender<BlockTick>,
+    block_tick_rx: parking_lot::Mutex<Option<mpsc::UnboundedReceiver<BlockTick>>>,
     latest_tick: Arc<parking_lot::RwLock<Option<BlockTick>>>,
 }
 
@@ -70,11 +71,12 @@ impl Default for Scheduler {
 
 impl Scheduler {
     pub fn new() -> Self {
-        let (block_tick_tx, _) = broadcast::channel(256);
+        let (block_tick_tx, block_tick_rx) = mpsc::unbounded_channel();
         Self {
             registry: Arc::new(TaskRegistry::new()),
             metrics: Arc::new(MetricsStore::new()),
             block_tick_tx,
+            block_tick_rx: parking_lot::Mutex::new(Some(block_tick_rx)),
             latest_tick: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
@@ -95,7 +97,14 @@ impl Scheduler {
     /// Signal a new block from the consensus layer.
     pub fn on_new_block(&self, tick: BlockTick) {
         *self.latest_tick.write() = Some(tick.clone());
-        let _ = self.block_tick_tx.send(tick);
+        if self.block_tick_tx.send(tick).is_err() {
+            warn!("[Scheduler] Block tick queue is closed; committed block tasks cannot run");
+        }
+    }
+
+    /// Seed scheduler context from the persisted chain tip without replaying it.
+    pub fn initialize_block(&self, tick: BlockTick) {
+        *self.latest_tick.write() = Some(tick);
     }
 
     /// Start both execution loops. Returns (interval_handle, block_handle).
@@ -137,21 +146,17 @@ impl Scheduler {
     fn spawn_block_loop(&self) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(&self.registry);
         let metrics = Arc::clone(&self.metrics);
-        let mut rx = self.block_tick_tx.subscribe();
+        let Some(mut rx) = self.block_tick_rx.lock().take() else {
+            warn!("[Scheduler] Block loop was already started");
+            return tokio::spawn(async {});
+        };
 
         tokio::spawn(async move {
             info!("[Scheduler] Block loop started");
             loop {
-                let tick = match rx.recv().await {
-                    Ok(t) => t,
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("[Scheduler] Lagged {n} ticks");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        warn!("[Scheduler] Block channel closed");
-                        break;
-                    }
+                let Some(tick) = rx.recv().await else {
+                    warn!("[Scheduler] Block tick queue closed");
+                    break;
                 };
                 let now = chrono::Utc::now();
                 for task in registry.due_block(tick.height) {
@@ -165,9 +170,7 @@ impl Scheduler {
                         },
                     );
                     let timeout = task.timeout_secs;
-                    tokio::spawn(async move {
-                        run_task(task, ctx, timeout, m).await;
-                    });
+                    run_task(task, ctx, timeout, m).await;
                 }
             }
         })
@@ -312,6 +315,46 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         bh.abort();
+    }
+
+    #[tokio::test]
+    async fn queued_block_ticks_run_tasks_in_height_order() {
+        let s = Arc::new(Scheduler::new());
+        let (height_tx, mut height_rx) = mpsc::unbounded_channel();
+        s.register(RegisteredTask::every_n_blocks(
+            "ordered-block-ticks",
+            TaskKind::Consensus,
+            "record processed block heights",
+            1,
+            5,
+            move |ctx| {
+                let height_tx = height_tx.clone();
+                async move {
+                    height_tx
+                        .send(ctx.block_height)
+                        .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
+                    Ok(())
+                }
+            },
+        ));
+
+        let (_, block_handle) = s.start();
+        for height in 1..=3 {
+            s.on_new_block(BlockTick {
+                height,
+                epoch: 0,
+                timestamp: height,
+            });
+        }
+
+        for expected_height in 1..=3 {
+            let actual_height = tokio::time::timeout(Duration::from_secs(2), height_rx.recv())
+                .await
+                .expect("block task should complete")
+                .expect("block task should report its height");
+            assert_eq!(actual_height, expected_height);
+        }
+        block_handle.abort();
     }
 
     #[tokio::test]
