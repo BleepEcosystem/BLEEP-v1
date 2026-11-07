@@ -18,6 +18,8 @@ pub struct TaskContext {
     pub block_height: u64,
     /// Current epoch
     pub epoch: u64,
+    /// Fees accumulated through the completed epoch boundary, when applicable.
+    pub completed_epoch_fee_revenue: Option<u128>,
     /// Wall-clock at dispatch time
     pub dispatched_at: chrono::DateTime<chrono::Utc>,
 }
@@ -230,7 +232,8 @@ impl TaskRegistry {
             return Vec::new();
         }
 
-        self.tasks
+        let mut due = self
+            .tasks
             .iter()
             .filter(|t| {
                 if !t.enabled {
@@ -245,6 +248,8 @@ impl TaskRegistry {
                 }
             })
             .map(|t| t.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        due.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+        due
     }
 }

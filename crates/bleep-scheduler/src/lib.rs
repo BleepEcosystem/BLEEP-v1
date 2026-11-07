@@ -49,6 +49,7 @@ pub struct BlockTick {
     pub height: u64,
     pub epoch: u64,
     pub timestamp: u64,
+    pub completed_epoch_fee_revenue: Option<u128>,
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +132,7 @@ impl Scheduler {
                         TaskContext {
                             block_height: tick.as_ref().map_or(0, |tick| tick.height),
                             epoch: tick.as_ref().map_or(0, |tick| tick.epoch),
+                            completed_epoch_fee_revenue: None,
                             dispatched_at: now,
                         },
                     );
@@ -166,6 +168,7 @@ impl Scheduler {
                         TaskContext {
                             block_height: tick.height,
                             epoch: tick.epoch,
+                            completed_epoch_fee_revenue: tick.completed_epoch_fee_revenue,
                             dispatched_at: now,
                         },
                     );
@@ -188,6 +191,7 @@ impl Scheduler {
         let ctx = TaskContext {
             block_height: 0,
             epoch: 0,
+            completed_epoch_fee_revenue: None,
             dispatched_at: chrono::Utc::now(),
         };
 
@@ -311,6 +315,7 @@ mod tests {
             height: 10,
             epoch: 0,
             timestamp: 50,
+            completed_epoch_fee_revenue: None,
         });
         sleep(Duration::from_millis(100)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -331,7 +336,7 @@ mod tests {
                 let height_tx = height_tx.clone();
                 async move {
                     height_tx
-                        .send(ctx.block_height)
+                        .send((ctx.block_height, ctx.completed_epoch_fee_revenue))
                         .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
                     Ok(())
                 }
@@ -344,17 +349,43 @@ mod tests {
                 height,
                 epoch: 0,
                 timestamp: height,
+                completed_epoch_fee_revenue: (height == 2).then_some(123),
             });
         }
 
         for expected_height in 1..=3 {
-            let actual_height = tokio::time::timeout(Duration::from_secs(2), height_rx.recv())
-                .await
-                .expect("block task should complete")
-                .expect("block task should report its height");
+            let (actual_height, fee_revenue) =
+                tokio::time::timeout(Duration::from_secs(2), height_rx.recv())
+                    .await
+                    .expect("block task should complete")
+                    .expect("block task should report its height");
             assert_eq!(actual_height, expected_height);
+            assert_eq!(fee_revenue, (expected_height == 2).then_some(123));
         }
         block_handle.abort();
+    }
+
+    #[test]
+    fn due_block_tasks_have_stable_id_order() {
+        let s = Scheduler::new();
+        for id in ["z-task", "a-task", "m-task"] {
+            s.register(RegisteredTask::every_n_blocks(
+                id,
+                TaskKind::Consensus,
+                "test deterministic task order",
+                10,
+                5,
+                |_| async { Ok(()) },
+            ));
+        }
+
+        let task_ids = s
+            .registry
+            .due_block(10)
+            .into_iter()
+            .map(|task| task.id.0)
+            .collect::<Vec<_>>();
+        assert_eq!(task_ids, ["a-task", "m-task", "z-task"]);
     }
 
     #[tokio::test]
@@ -387,6 +418,7 @@ mod tests {
             height: 42,
             epoch: 3,
             timestamp: 0,
+            completed_epoch_fee_revenue: None,
         });
 
         let (ih, bh) = s.start();

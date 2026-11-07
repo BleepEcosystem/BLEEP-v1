@@ -153,6 +153,19 @@ fn critical_storage_failure(context: &str, error: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
+fn accumulate_epoch_fee_revenue(
+    accumulated_fees: &Mutex<u128>,
+    height: u64,
+    blocks_per_epoch: u64,
+    fee_revenue: u128,
+) -> Option<u128> {
+    let mut fees = accumulated_fees.lock();
+    *fees = fees.saturating_add(fee_revenue);
+    height
+        .is_multiple_of(blocks_per_epoch)
+        .then(|| std::mem::take(&mut *fees))
+}
+
 fn apply_committed_block(
     block: FinalizedBlock,
     fee_revenue: u128,
@@ -181,15 +194,18 @@ fn apply_committed_block(
     effects
         .rpc_height
         .store(block.height, std::sync::atomic::Ordering::Relaxed);
-    {
-        let mut fees = effects.epoch_fee_revenue.lock();
-        *fees = fees.saturating_add(fee_revenue);
-    }
+    let completed_epoch_fee_revenue = accumulate_epoch_fee_revenue(
+        &effects.epoch_fee_revenue,
+        block.height,
+        effects.blocks_per_epoch,
+        fee_revenue,
+    );
 
     effects.scheduler.on_new_block(BlockTick {
         height: block.height,
         epoch: block.epoch,
         timestamp: block.height,
+        completed_epoch_fee_revenue,
     });
 
     info!(
@@ -328,7 +344,6 @@ fn registered_local_validator_id(
 fn process_completed_economics_epoch(
     context: TaskContext,
     runtime: &Arc<Mutex<BleepEconomicsRuntime>>,
-    fee_revenue: &Arc<Mutex<u128>>,
     blocks_per_epoch: u64,
 ) -> Result<(), String> {
     let Some(epoch) = context.epoch.checked_sub(1) else {
@@ -340,10 +355,12 @@ fn process_completed_economics_epoch(
         return Ok(());
     }
 
-    let fees = {
-        let mut accumulated = fee_revenue.lock();
-        std::mem::take(&mut *accumulated)
-    };
+    let fees = context.completed_epoch_fee_revenue.ok_or_else(|| {
+        format!(
+            "Missing completed epoch fee revenue at height {}",
+            context.block_height
+        )
+    })?;
     match runtime.process_epoch(EpochInput {
         epoch,
         block_count: blocks_per_epoch,
@@ -363,11 +380,7 @@ fn process_completed_economics_epoch(
             );
             Ok(())
         }
-        Err(error) => {
-            let mut accumulated = fee_revenue.lock();
-            *accumulated = accumulated.saturating_add(fees);
-            Err(error.to_string())
-        }
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -867,6 +880,15 @@ mod committed_block_tests {
     use super::*;
     use bleep_state::state_manager::{CanonicalBlockContext, CanonicalTransfer};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn epoch_fee_revenue_is_captured_at_the_committed_boundary() {
+        let fees = Mutex::new(0);
+        assert_eq!(accumulate_epoch_fee_revenue(&fees, 1, 3, 5), None);
+        assert_eq!(accumulate_epoch_fee_revenue(&fees, 2, 3, 7), None);
+        assert_eq!(accumulate_epoch_fee_revenue(&fees, 3, 3, 11), Some(23));
+        assert_eq!(accumulate_epoch_fee_revenue(&fees, 4, 3, 13), None);
+    }
 
     #[test]
     fn validator_keys_persist_with_private_permissions_and_reload() {
@@ -1758,7 +1780,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     ));
 
     let reward_runtime = Arc::clone(&economics_runtime);
-    let reward_fees = Arc::clone(&epoch_fee_revenue);
     scheduler.registry.register(RegisteredTask::epoch_boundary(
         "validator_reward_distribution",
         TaskKind::Consensus,
@@ -1767,16 +1788,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
         60,
         move |ctx| {
             let runtime = Arc::clone(&reward_runtime);
-            let fees = Arc::clone(&reward_fees);
             async move {
-                process_completed_economics_epoch(ctx, &runtime, &fees, blocks_per_epoch)
+                process_completed_economics_epoch(ctx, &runtime, blocks_per_epoch)
                     .map_err(SchedulerError::ExecutionFailed)
             }
         },
     ));
 
     let burn_runtime = Arc::clone(&economics_runtime);
-    let burn_fees = Arc::clone(&epoch_fee_revenue);
     scheduler.registry.register(RegisteredTask::epoch_boundary(
         "token_burn_execution",
         TaskKind::Economics,
@@ -1785,9 +1804,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         30,
         move |ctx| {
             let runtime = Arc::clone(&burn_runtime);
-            let fees = Arc::clone(&burn_fees);
             async move {
-                process_completed_economics_epoch(ctx, &runtime, &fees, blocks_per_epoch)
+                process_completed_economics_epoch(ctx, &runtime, blocks_per_epoch)
                     .map_err(SchedulerError::ExecutionFailed)
             }
         },
@@ -1851,10 +1869,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         move |ctx| {
             let state = Arc::clone(&checkpoint_state);
             async move {
-                let snapshot = state
-                    .lock()
-                    .create_snapshot()
-                    .map_err(|error| SchedulerError::ExecutionFailed(error.to_string()))?;
+                let snapshot = state.lock().create_snapshot().unwrap_or_else(|error| {
+                    critical_storage_failure("scheduled state snapshot persistence failed", error)
+                });
                 info!(
                     "[State] Checkpoint saved at height={} path={}",
                     ctx.block_height,
@@ -1903,6 +1920,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         height: startup_height,
         epoch: startup_height / blocks_per_epoch,
         timestamp: chrono::Utc::now().timestamp().max(0) as u64,
+        completed_epoch_fee_revenue: None,
     });
     let (interval_handle, block_sched_handle) = scheduler.start();
 
@@ -2575,15 +2593,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 snapshot_path.display(),
                 s.block_height()
             ),
-            Err(error) => warn!("State snapshot: {}", error),
+            Err(error) => {
+                critical_storage_failure("shutdown state snapshot persistence failed", error)
+            }
         }
     }
 
     // Persist governance
-    governance
-        .lock()
-        .persist()
-        .unwrap_or_else(|e| warn!("Governance persist: {}", e));
+    governance.lock().persist().unwrap_or_else(|error| {
+        critical_storage_failure("shutdown governance persistence failed", error)
+    });
 
     // Abort background tasks
     producer_handle.abort();

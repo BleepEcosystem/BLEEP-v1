@@ -1207,7 +1207,7 @@ pub fn start_block_producer(
 mod real_transaction_benchmark {
     use super::*;
     use bleep_core::blockchain::{Blockchain, BlockchainState};
-    use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+    use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload};
 
     #[test]
     fn vm_transfer_accounts_match_native_addresses() {
