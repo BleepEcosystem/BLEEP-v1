@@ -308,7 +308,27 @@ pub struct TxReq {
     fee: u64,
     timestamp: u64,
     nonce: u64,
+    #[serde(deserialize_with = "deserialize_tx_signature")]
     signature: Vec<u8>,
+}
+
+fn deserialize_tx_signature<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SignatureEncoding {
+        Bytes(Vec<u8>),
+        Base64(String),
+    }
+
+    match SignatureEncoding::deserialize(deserializer)? {
+        SignatureEncoding::Bytes(bytes) => Ok(bytes),
+        SignatureEncoding::Base64(encoded) => {
+            STANDARD.decode(encoded).map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 impl TxReq {
@@ -4373,6 +4393,28 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use warp::test::request;
 
+    #[test]
+    fn transaction_signature_accepts_legacy_bytes_and_compact_base64() {
+        let fields = serde_json::json!({
+            "chain_id": "test-chain",
+            "sender": "sender",
+            "receiver": "receiver",
+            "amount": 1,
+            "timestamp": 1,
+            "nonce": 0,
+        });
+        for signature in [
+            serde_json::json!([1, 2, 255]),
+            serde_json::json!(STANDARD.encode([1, 2, 255])),
+        ] {
+            let mut request = fields.clone();
+            request["signature"] = signature;
+            let parsed = TxReq::parse(&serde_json::to_vec(&request).unwrap())
+                .expect("parse transaction signature encoding");
+            assert_eq!(parsed.signature, [1, 2, 255]);
+        }
+    }
+
     static FAUCET_NETWORK_MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
@@ -5300,7 +5342,7 @@ mod tests_sprint8 {
 
     #[tokio::test]
     async fn bootstrap_admin_auth_smoke() {
-        use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload, tx_payload};
+        use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload};
 
         let (admin_public_key, admin_secret_key) = generate_tx_keypair();
         let mut auth_service = AuthService::new((0u8..32).collect()).unwrap();

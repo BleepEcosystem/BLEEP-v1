@@ -1,5 +1,72 @@
 # BLEEP Benchmark Report
 
+## Parallel Capacity Sweep Harness
+
+The legacy measurements below used sequential CLI submission and do not
+establish the node's parallel capacity. `test_tps.sh` now runs the release
+`bleep-loadgen` benchmark for 10, 50, 100, 300, and 1,000 offered TPS (five
+seconds per level by default). Transactions are signed before each load run
+across 500 independently funded senders, then submitted on a paced schedule.
+The benchmark records per-transaction send time, sampled node height at send,
+RPC response, and observed inclusion height/time. It writes JSONL details and a
+CSV summary with rejection rate and nearest-rank p50/p99 inclusion latency.
+The CSV also records request transport errors and p99 dispatch lag against the
+requested pace, to distinguish a client-side scheduling bottleneck from node
+rejections or slow inclusion.
+
+The sender input must be a JSON array with at least 500 funded SPHINCS+ accounts:
+
+```json
+[
+  {
+    "public_key_hex": "<64-byte public key, hex>",
+    "secret_key_hex": "<128-byte secret key, hex>"
+  }
+]
+```
+
+Treat this file as unencrypted private key material: restrict it to the
+benchmark operator (`chmod 600`) and do not commit or share it. Each sender
+must be funded for all scheduled transfers and the transaction fee. The tool
+does not create accounts, mint funds, or change node balances.
+
+Admin login uses the node's one-time admin challenge, signs the challenge with
+the configured key, then registers a unique benchmark DApp and uses its
+`SubmitTransaction` session. The admin key file must contain the raw 128-byte
+SPHINCS+ secret key; its public key is supplied as hex. The replay window must
+cover pre-sign time plus each load schedule duration. Configure the same
+`BLEEP_TX_REPLAY_WINDOW_SECS` value on all benchmark nodes and in
+`BLEEP_TPS_REPLAY_WINDOW_SECS` (default 30 seconds).
+To reduce benchmark client and wire overhead, submitted transaction signatures
+use a compact Base64 JSON string; `/rpc/tx` continues to accept the legacy JSON
+byte-array representation as well.
+
+```bash
+export BLEEP_RPC=http://127.0.0.1:8545
+export BLEEP_ADMIN_PUBLIC_KEY_HEX='<configured admin public key>'
+export BLEEP_ADMIN_SECRET_KEY_FILE=/secure/path/admin.secret
+export BLEEP_TPS_SENDERS=/secure/path/funded-senders.json
+export BLEEP_TX_REPLAY_WINDOW_SECS=300
+export BLEEP_TPS_REPLAY_WINDOW_SECS=300
+export BLEEP_TPS_DURATION_SECS=5
+bash ./test_tps.sh
+```
+
+Set `BLEEP_TPS_SWEEP` to override the comma-separated offered rates,
+`BLEEP_TPS_SENDER_COUNT` to select the first N supplied accounts, and
+`BLEEP_TPS_RESULTS` / `BLEEP_TPS_SUMMARY` to choose output paths. The reported
+knee candidate is the first offered rate with less than 90% observed throughput,
+more than 1% rejected submissions, or more than 1% transport errors. It is a
+load indicator, not a bottleneck diagnosis. For a Linux node, set
+`BLEEP_TPS_PROFILE_PID` to its process ID to
+record a `perf` profile during the sweep; the script writes a `perf report`
+text summary for identifying the limiting subsystem.
+
+No new parallel sweep has been measured yet: the current workspace has no RPC
+node listening on `127.0.0.1:8545`, and the 500 funded sender keys/admin key
+were not available. Do not interpret the historical sequential figures below
+as a knee or as a profiled capacity result.
+
 ## Three-Node Mesh and 1,000-Transaction Run
 
 ### Connectivity

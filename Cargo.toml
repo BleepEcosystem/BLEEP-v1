@@ -56,6 +56,9 @@ path = "src/bin/bleep-validator-keygen.rs"
 [[bin]]
 name = "bleep-executor"
 path = "src/bin/executor.rs"
+[[bin]]
+name = "bleep-loadgen"
+path = "src/bin/bleep-loadgen.rs"
 
 [features]
 default = ["mainnet"]
