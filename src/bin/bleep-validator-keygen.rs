@@ -28,7 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .nth(5)
             .ok_or("missing challenge timestamp")?
             .parse()?;
-        let secret = hex::decode(fs::read_to_string(state_dir.join("sphincs.secret"))?.trim())?;
+        let secret = hex::decode(
+            fs::read_to_string(state_dir.join("keys").join("sphincs.secret"))?.trim(),
+        )?;
         let signature = sign_tx_payload(
             &tx_payload(
                 bleep_crypto::DEFAULT_CHAIN_ID,
@@ -46,13 +48,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_dir = env::args()
         .nth(1)
         .ok_or("usage: bleep-validator-keygen STATE_DIR")?;
-    let dir = PathBuf::from(state_dir);
+    let dir = PathBuf::from(state_dir.as_str()).join("keys");
     fs::create_dir_all(&dir)?;
     let sphincs_secret = dir.join("sphincs.secret");
     let kyber_secret = dir.join("kyber.secret");
-    if sphincs_secret.exists() || kyber_secret.exists() {
+    let key_files = [
+        dir.join("validator.key"),
+        sphincs_secret.clone(),
+        kyber_secret.clone(),
+        dir.join("sphincs.public"),
+        dir.join("kyber.public"),
+    ];
+    let legacy_files = [
+        PathBuf::from(state_dir.as_str()).join("validator.key"),
+        PathBuf::from(state_dir.as_str()).join("sphincs.secret"),
+        PathBuf::from(state_dir.as_str()).join("kyber.secret"),
+        PathBuf::from(state_dir.as_str()).join("sphincs.public"),
+        PathBuf::from(state_dir.as_str()).join("kyber.public"),
+    ];
+    if key_files.iter().all(|path| !path.exists()) && legacy_files.iter().any(|path| path.exists())
+    {
+        if !legacy_files.iter().all(|path| path.exists()) {
+            return Err(format!(
+                "incomplete legacy validator key set in {}; restore all key files together",
+                state_dir
+            )
+            .into());
+        }
+        for (source, destination) in legacy_files.iter().zip(key_files.iter()) {
+            write_private(destination.clone(), &fs::read(source)?)?;
+        }
+    }
+    if key_files.iter().all(|path| path.exists()) {
         println!("existing");
         return Ok(());
+    }
+    if key_files.iter().any(|path| path.exists()) {
+        return Err(format!(
+            "incomplete validator key set in {}; restore all key files together",
+            dir.display()
+        )
+        .into());
     }
     let (sphincs_public, sphincs_secret_bytes) = generate_tx_keypair();
     let (kyber_public, kyber_secret_value) = KyberKem::keygen()?;

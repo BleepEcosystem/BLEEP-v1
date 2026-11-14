@@ -27,11 +27,12 @@ Plaintext storage is only available for disposable dev/test wallets when both
 
 The faucet is disabled by default. To enable it on a private dev/test node,
 start the process with both `BLEEP_FAUCET_ENABLED=true` and
-`BLEEP_NETWORK_MODE=dev` (or `development` or `test`). The faucet deliberately
-refuses `testnet` and `pretestnet` modes. It also refuses direct credits when
-the RPC server is attached to a live consensus chain, because a local-only
-credit would split validator state. Use a standalone dev/test RPC instance for
-this faucet; credits on a live chain must be committed as chain transactions.
+`BLEEP_NETWORK_MODE=dev`, `development`, `test`, `testnet`, or `pretestnet`.
+It also refuses direct credits when the RPC server is attached to a live
+consensus chain, because a local-only credit would split validator state. The
+endpoint allows one drip per address and client IP per 24 hours, so it is for
+isolated development only—not bulk funding. Use test-only genesis prefunds for
+multi-sender load tests; see [Deployment: Funding TPS benchmark senders](../DEPLOYMENT.md#funding-tps-benchmark-senders).
 
 ## 1. Create a BLEEP address
 
@@ -64,10 +65,10 @@ A successful response looks like:
 ```json
 {
   "address": "BLEEP1a3f7b2c9d4e8f1a0b5c6d7e9f2a3b4c5d6e7f8",
-  "amount_bleep": 1000,
-  "amount_micro": 100000000000,
+  "amount_bleep": 10,
+  "amount_micro": 1000000000,
   "cooldown_secs": 86400,
-  "message": "1,000 test BLEEP sent to BLEEP1..."
+  "message": "10 test BLEEP sent to BLEEP1..."
 }
 ```
 

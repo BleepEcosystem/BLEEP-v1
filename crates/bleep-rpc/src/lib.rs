@@ -4868,6 +4868,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepted_rpc_transaction_is_gossiped_to_connected_peer() {
+        use bleep_p2p::p2p_node::{BootstrapPeer, P2PNode, P2PNodeConfig};
+        use bleep_p2p::peer_manager::PeerManagerConfig;
+        use std::net::TcpListener;
+        use std::time::Duration;
+        use tokio::time::{sleep, timeout};
+
+        let first_listener =
+            TcpListener::bind("127.0.0.1:0").expect("reserve first local port");
+        let second_listener =
+            TcpListener::bind("127.0.0.1:0").expect("reserve second local port");
+        let first_addr = first_listener.local_addr().expect("read first local address");
+        let second_addr = second_listener
+            .local_addr()
+            .expect("read second local address");
+        drop((first_listener, second_listener));
+        let (first_node, first_handle) = P2PNode::start(P2PNodeConfig {
+            listen_addr: first_addr,
+            bootstrap_peers: Vec::new(),
+            peer_manager_config: PeerManagerConfig::default(),
+        })
+        .await
+        .expect("start RPC node");
+        let (second_node, second_handle) = P2PNode::start(P2PNodeConfig {
+            listen_addr: second_addr,
+            bootstrap_peers: vec![BootstrapPeer {
+                addr: first_addr,
+                identity_public_key: Vec::new(),
+                sphincs_pubkey: Vec::new(),
+            }],
+            peer_manager_config: PeerManagerConfig::default(),
+        })
+        .await
+        .expect("start receiving peer");
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if first_node.message_protocol.has_session(&second_node.node_id)
+                    && second_node.message_protocol.has_session(&first_node.node_id)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("P2P peers should establish authenticated sessions");
+
+        let auth = Arc::new(AuthService::new((0u8..32).collect()).unwrap());
+        let (_, token) = auth
+            .register_dapp(
+                "rpc-gossip-test".into(),
+                "RPC Gossip Test".into(),
+                "rpc-gossip-test-password".into(),
+            )
+            .await
+            .expect("register transaction submitter");
+        let state_mgr = Arc::new(Mutex::new(StateManager::new()));
+        let (public_key, secret_key) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&public_key);
+        state_mgr
+            .lock()
+            .set_balance(&sender, 10_000)
+            .expect("seed sender balance");
+        let pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&state_mgr)),
+        );
+        let routes = rpc_routes_with_state(
+            RpcState::new()
+                .with_auth_service(auth)
+                .with_state_manager(state_mgr)
+                .with_transaction_pool(pool)
+                .with_p2p_node(Arc::clone(&first_node)),
+        );
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID;
+        let receiver = "BLEEP1gossip-recipient";
+        let amount = 5;
+        let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+        let timestamp = now_secs();
+        let nonce = 0;
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
+            chain_id, &sender, receiver, amount, fee, timestamp, nonce,
+        );
+        let mut signature = public_key;
+        signature.extend(sign_tx_payload(&payload, &secret_key).unwrap());
+
+        let response = request()
+            .method("POST")
+            .path("/rpc/tx")
+            .header("authorization", format!("Bearer {}", token.token))
+            .json(&serde_json::json!({
+                "chain_id": chain_id,
+                "version": 2,
+                "sender": sender.clone(),
+                "receiver": receiver,
+                "amount": amount,
+                "fee": fee,
+                "timestamp": timestamp,
+                "nonce": nonce,
+                "signature": signature,
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(response.status(), warp::http::StatusCode::ACCEPTED);
+
+        let (_, message, payload) =
+            timeout(Duration::from_secs(10), second_node.recv_with_payload())
+                .await
+                .expect("receiving peer should get transaction gossip")
+                .expect("peer receive channel remains open");
+        assert_eq!(message.message_type, MessageType::Transaction);
+        let received: ZKTransaction =
+            serde_json::from_slice(&payload).expect("gossiped transaction is valid JSON");
+        assert_eq!(received.sender, sender);
+        assert_eq!(received.receiver, receiver);
+        assert_eq!(received.amount, amount);
+        assert_eq!(received.nonce, nonce);
+
+        first_handle.shutdown().await;
+        second_handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn rpc_tx_nonce_includes_contiguous_pending_transactions() {
         let state_mgr = Arc::new(Mutex::new(StateManager::new()));
         let pool = TransactionPool::new_with_state(

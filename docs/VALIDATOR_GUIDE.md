@@ -30,14 +30,14 @@ Before starting a node, provision a unique random JWT secret for it and export i
 `init` performs the following steps:
 
 - Creates `~/.bleep/validators/validator-1/state/`.
-- Generates real ML-KEM-1024 and SPHINCS+-SHAKE-256f-simple keys if they are absent. Re-running it never regenerates existing keys. The key files in the state directory are stored with mode `0600`.
+- Generates real ML-KEM-1024 and SPHINCS+-SHAKE-256f-simple keys under `state/keys/` if they are absent. Re-running it never regenerates existing keys. The key files are stored with mode `0600`.
 - Creates an operator session and performs registration through RPC.
 - On testnet, requests one faucet drip when the configured account balance is below the requested stake. Faucet top-up is never attempted on mainnet.
 - Writes `~/.bleep/validators/validator-1/config.toml`.
 - Prints one prominent backup instruction for `validator.key`.
 - Starts the validator.
 
-The validator key files are in the state directory. Back up `validator.key` and `sphincs.secret` securely; losing the signing key loses the validator identity and stake. On startup, the node checks that the signing key matches the registered validator ID and refuses to start if they differ.
+The validator key files are in the `keys/` subdirectory of the configured state directory (`BLEEP_STATE_DIR/keys/`). Back up `validator.key` and `sphincs.secret` securely; losing the signing key loses the validator identity and stake. On startup, the node loads these persistent keys and checks that the signing key matches the registered validator ID and refuses to start if they differ.
 
 ## Restart
 
@@ -82,4 +82,4 @@ Snapshots require at least the estimated database size plus 64 MiB free before w
 
 Transactions accepted by `/rpc/tx` are durably stored in RocksDB before the node responds with `accepted_durable`. Pending transactions are replayed on startup. If recovery rejects an expired or invalid entry, it is removed and logged as an explicit drop.
 
-Do not commit the state directory, `validator.key`, or the generated operator password.
+Do not commit the state directory, `keys/validator.key`, or the generated operator password.

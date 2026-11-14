@@ -43,7 +43,7 @@ use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tracing::{error, info, warn};
 
@@ -319,6 +319,18 @@ fn load_or_create_validator_keys(
     Ok((public, secret, kyber))
 }
 
+fn validator_key_directory(state_dir: &Path) -> PathBuf {
+    let key_dir = state_dir.join("keys");
+    let key_names = ["sphincs.public", "sphincs.secret", "kyber.public"];
+    if key_names.iter().any(|name| key_dir.join(name).exists()) {
+        return key_dir;
+    }
+    if key_names.iter().any(|name| state_dir.join(name).exists()) {
+        return state_dir.to_path_buf();
+    }
+    key_dir
+}
+
 fn registered_local_validator_id(
     registry: &ValidatorRegistry,
     public_key: &[u8],
@@ -490,6 +502,32 @@ fn verify_pos_vrf_block(
     Ok(())
 }
 
+fn registered_proposer_signing_key(
+    block: &Block,
+    active_validators: &[ValidatorIdentity],
+) -> Result<Vec<u8>, String> {
+    let proposer_key = block
+        .validator_signature
+        .get(..bleep_core::block::SPHINCS_PK_LEN)
+        .ok_or_else(|| "Block is missing its proposer signing key".to_string())?;
+    let proposer_key_id = hex::encode(proposer_key);
+    let proposer = active_validators
+        .iter()
+        .find(|validator| {
+            validator.can_participate()
+                && validator
+                    .signing_key_id
+                    .eq_ignore_ascii_case(&proposer_key_id)
+        })
+        .ok_or_else(|| "Block proposer signing key is not registered and active".to_string())?;
+    let registered_key = hex::decode(&proposer.signing_key_id)
+        .map_err(|error| format!("Invalid registered proposer signing key: {error}"))?;
+    if registered_key.as_slice() != proposer_key {
+        return Err("Registered proposer signing key does not match the block signer".into());
+    }
+    Ok(registered_key)
+}
+
 struct TxPoolSigCache {
     tx_pool: Arc<TransactionPool>,
 }
@@ -572,12 +610,170 @@ struct NetworkConfig {
     genesis_admin_pubkey: Option<Vec<u8>>,
 }
 
+#[derive(serde::Deserialize)]
+struct GenesisPrefundFile {
+    chain_id: String,
+    accounts: Vec<GenesisPrefundAccount>,
+}
+
+#[derive(serde::Deserialize)]
+struct GenesisPrefundAccount {
+    address: String,
+    balance_micro: String,
+}
+
+struct GenesisPrefunds {
+    accounts: Vec<(String, u128)>,
+    total_micro: u128,
+    hash: Option<Vec<u8>>,
+}
+
 const GENESIS_ADMIN_PUBKEY_CONFIG_KEY: &str = "BLEEP_GENESIS_ADMIN_PUBKEY";
 const GENESIS_ADMIN_STATE_KEY: &str = "bleep:auth:genesis-admin-pubkey:v1";
+const GENESIS_PREFUND_FILE_ENV: &str = "BLEEP_GENESIS_PREFUND_FILE";
+const GENESIS_PREFUND_STATE_KEY: &str = "bleep:genesis:prefund-sha256:v1";
 const VALIDATOR_REGISTRY_HASH_ENV: &str = "BLEEP_VALIDATOR_REGISTRY_SHA256";
 const VALIDATOR_REGISTRY_SNAPSHOT_ENV: &str = "BLEEP_VALIDATOR_REGISTRY_SNAPSHOT";
 const VALIDATOR_REGISTRY_PIN_STATE_KEY: &str = "bleep:validators:genesis-sha256:v1";
 const SINGLE_NODE_DEV_MODE_ENV: &str = "BLEEP_SINGLE_NODE_DEV_MODE";
+
+fn decode_genesis_admin_pubkey(encoded: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let public_key = hex::decode(encoded.trim()).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} is not valid hex: {error}"),
+        )
+    })?;
+    if public_key.len() != 64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} must decode to a 64-byte SPHINCS+ public key"),
+        )
+        .into());
+    }
+    Ok(public_key)
+}
+
+fn apply_genesis_admin_override(
+    config: &mut NetworkConfig,
+    env_value: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(env_value) = env_value else {
+        return Ok(());
+    };
+    let public_key = decode_genesis_admin_pubkey(env_value)?;
+    if config
+        .genesis_admin_pubkey
+        .as_ref()
+        .is_some_and(|configured| configured != &public_key)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} environment value differs from the genesis config"
+            ),
+        )
+        .into());
+    }
+    config.genesis_admin_pubkey = Some(public_key);
+    Ok(())
+}
+
+fn parse_genesis_prefunds(raw: &[u8], chain_id: &str) -> Result<GenesisPrefunds, Box<dyn Error>> {
+    let prefund_file: GenesisPrefundFile = serde_json::from_slice(raw)?;
+    if prefund_file.chain_id != chain_id {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Genesis prefund chain_id '{}' does not match configured chain '{}'",
+                prefund_file.chain_id, chain_id
+            ),
+        )
+        .into());
+    }
+    let mut seen = std::collections::HashSet::with_capacity(prefund_file.accounts.len());
+    let mut total_micro = 0u128;
+    let mut accounts = Vec::with_capacity(prefund_file.accounts.len());
+    for account in prefund_file.accounts {
+        if account.address.trim().is_empty()
+            || account.address.starts_with("bleep:genesis:")
+            || !seen.insert(account.address.clone())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Genesis prefund addresses must be non-empty, unique, and not reserved genesis accounts",
+            )
+            .into());
+        }
+        let balance_micro: u128 = account.balance_micro.parse().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid genesis prefund balance for {}: {error}", account.address),
+            )
+        })?;
+        if balance_micro == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Genesis prefund balance for {} must be positive", account.address),
+            )
+            .into());
+        }
+        total_micro = total_micro.checked_add(balance_micro).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Genesis prefund total overflows u128",
+            )
+        })?;
+        accounts.push((account.address, balance_micro));
+    }
+    let total_genesis_supply = INITIAL_CIRCULATING_SUPPLY
+        .checked_add(total_micro)
+        .ok_or("Genesis supply including prefunds overflows u128")?;
+    if total_genesis_supply > bleep_core::protocol_invariants::MAX_TOKEN_SUPPLY {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Genesis prefunds exceed the protocol supply cap",
+        )
+        .into());
+    }
+    Ok(GenesisPrefunds {
+        accounts,
+        total_micro,
+        hash: Some(Sha256::digest(raw).to_vec()),
+    })
+}
+
+fn load_genesis_prefunds(
+    path: Option<&str>,
+    network_mode: Option<&str>,
+    chain_id: &str,
+) -> Result<GenesisPrefunds, Box<dyn Error>> {
+    let Some(path) = path else {
+        return Ok(GenesisPrefunds {
+            accounts: Vec::new(),
+            total_micro: 0,
+            hash: None,
+        });
+    };
+    let is_test_network = network_mode
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|mode| {
+            matches!(
+                mode.as_str(),
+                "dev" | "development" | "test" | "testnet" | "pretestnet"
+            )
+        });
+    if !is_test_network {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{GENESIS_PREFUND_FILE_ENV} is allowed only in dev/test network modes"),
+        )
+        .into());
+    }
+    let raw = std::fs::read(path)?;
+    parse_genesis_prefunds(&raw, chain_id)
+}
 
 fn parse_validator_registry_hash(value: &str) -> Result<String, Box<dyn Error>> {
     let decoded = hex::decode(value.trim()).map_err(|error| {
@@ -752,22 +948,7 @@ fn parse_network_config(
                         format!("{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} must be a non-empty hex string"),
                     )
                 })?;
-            let public_key = hex::decode(encoded).map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} is not valid hex: {error}"),
-                )
-            })?;
-            if public_key.len() != 64 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} must decode to a 64-byte SPHINCS+ public key"
-                    ),
-                )
-                .into());
-            }
-            Some(public_key)
+            Some(decode_genesis_admin_pubkey(encoded)?)
         }
     };
     Ok(NetworkConfig {
@@ -793,7 +974,14 @@ fn load_network_config() -> Result<NetworkConfig, Box<dyn Error>> {
         embedded_network_config(std::env::var("BLEEP_NETWORK_MODE").ok().as_deref())?.to_string()
     };
     let chain_id_override = std::env::var("BLEEP_CHAIN_ID").ok();
-    parse_network_config(&raw, chain_id_override.as_deref())
+    let mut config = parse_network_config(&raw, chain_id_override.as_deref())?;
+    apply_genesis_admin_override(
+        &mut config,
+        std::env::var(GENESIS_ADMIN_PUBKEY_CONFIG_KEY)
+            .ok()
+            .as_deref(),
+    )?;
+    Ok(config)
 }
 
 fn pin_genesis_admin_config(
@@ -826,6 +1014,47 @@ fn pin_genesis_admin_config(
             Ok(())
         }
     }
+}
+
+fn pin_genesis_prefund_hash(
+    state: &mut StateManager,
+    configured_hash: Option<&[u8]>,
+) -> Result<(), Box<dyn Error>> {
+    let configured = configured_hash.unwrap_or_default();
+    let pinned = state
+        .get_application_data(GENESIS_PREFUND_STATE_KEY)
+        .map_err(|error| format!("Failed to read pinned genesis prefund hash: {error}"))?;
+    match pinned {
+        Some(pinned) if pinned == configured => Ok(()),
+        Some(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Genesis prefund file differs from the persisted network bootstrap.",
+        )
+        .into()),
+        None => {
+            state
+                .put_application_data(GENESIS_PREFUND_STATE_KEY, configured)
+                .map_err(|error| format!("Failed to pin genesis prefund hash: {error}"))?;
+            Ok(())
+        }
+    }
+}
+
+fn verify_existing_chain_prefund(
+    state: &StateManager,
+    configured_hash: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let pinned = state
+        .get_application_data(GENESIS_PREFUND_STATE_KEY)
+        .map_err(|error| format!("Failed to read pinned genesis prefund hash: {error}"))?;
+    if pinned.as_deref() != Some(configured_hash) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Genesis prefunds must be configured before the first block; this file is not pinned to the existing chain.",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -861,19 +1090,62 @@ mod epoch_config_tests {
     }
 
     #[test]
-    fn reads_genesis_admin_public_key_only_from_config() {
+    fn reads_genesis_admin_public_key_from_config_or_environment() {
         let public_key_hex = "ab".repeat(64);
         let config = format!(
             r#"{{"chain_id":"x","consensus":{{"blocks_per_epoch":1}},"BLEEP_GENESIS_ADMIN_PUBKEY":"{public_key_hex}"}}"#
         );
         let parsed = parse_network_config(&config, None).unwrap();
         assert_eq!(parsed.genesis_admin_pubkey, Some(vec![0xab; 64]));
+        let mut env_override = parse_network_config(
+            r#"{"chain_id":"x","consensus":{"blocks_per_epoch":1}}"#,
+            None,
+        )
+        .unwrap();
+        apply_genesis_admin_override(&mut env_override, Some(&"cd".repeat(64))).unwrap();
+        assert_eq!(env_override.genesis_admin_pubkey, Some(vec![0xcd; 64]));
+        assert!(apply_genesis_admin_override(&mut env_override, Some(&"ef".repeat(64))).is_err());
+        assert!(apply_genesis_admin_override(&mut env_override, Some("bad-key")).is_err());
         let no_admin = parse_network_config(
             r#"{"chain_id":"x","consensus":{"blocks_per_epoch":1}}"#,
             None,
         )
         .unwrap();
         assert!(no_admin.genesis_admin_pubkey.is_none());
+    }
+
+    #[test]
+    fn genesis_prefunds_are_chain_bound_unique_and_hash_pinned() {
+        let raw = br#"{"chain_id":"test-chain","accounts":[{"address":"BLEEP1first","balance_micro":"100"},{"address":"BLEEP1second","balance_micro":"200"}]}"#;
+        let prefunds = parse_genesis_prefunds(raw, "test-chain").unwrap();
+        assert_eq!(prefunds.total_micro, 300);
+        assert_eq!(prefunds.accounts.len(), 2);
+        assert_eq!(prefunds.hash, Some(Sha256::digest(raw).to_vec()));
+
+        assert!(parse_genesis_prefunds(raw, "other-chain").is_err());
+        assert!(parse_genesis_prefunds(
+            br#"{"chain_id":"test-chain","accounts":[{"address":"same","balance_micro":"1"},{"address":"same","balance_micro":"2"}]}"#,
+            "test-chain"
+        )
+        .is_err());
+        assert!(parse_genesis_prefunds(
+            br#"{"chain_id":"test-chain","accounts":[{"address":"same","balance_micro":"0"}]}"#,
+            "test-chain"
+        )
+        .is_err());
+        assert!(load_genesis_prefunds(Some("unused"), Some("mainnet"), "test-chain").is_err());
+
+        let mut state = StateManager::new();
+        pin_genesis_prefund_hash(&mut state, prefunds.hash.as_deref()).unwrap();
+        pin_genesis_prefund_hash(&mut state, prefunds.hash.as_deref()).unwrap();
+        assert!(pin_genesis_prefund_hash(&mut state, None).is_err());
+        verify_existing_chain_prefund(&state, prefunds.hash.as_deref().unwrap()).unwrap();
+        let unpinned_state = StateManager::new();
+        assert!(verify_existing_chain_prefund(
+            &unpinned_state,
+            prefunds.hash.as_deref().unwrap()
+        )
+        .is_err());
     }
 
     #[test]
@@ -968,16 +1240,17 @@ mod committed_block_tests {
     #[test]
     fn validator_keys_persist_with_private_permissions_and_reload() {
         let directory = tempfile::tempdir().expect("temporary state directory");
+        let key_dir = validator_key_directory(directory.path());
         let (public, secret, kyber) =
-            load_or_create_validator_keys(directory.path()).expect("generate validator keys");
+            load_or_create_validator_keys(&key_dir).expect("generate validator keys");
 
         for name in ["sphincs.public", "sphincs.secret", "kyber.public"] {
-            let metadata = std::fs::metadata(directory.path().join(name)).expect("key metadata");
+            let metadata = std::fs::metadata(key_dir.join(name)).expect("key metadata");
             assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         }
 
         let (loaded_public, loaded_secret, loaded_kyber) =
-            load_or_create_validator_keys(directory.path()).expect("reload validator keys");
+            load_or_create_validator_keys(&key_dir).expect("reload validator keys");
         assert_eq!(loaded_public, public);
         assert_eq!(loaded_secret, secret);
         assert_eq!(loaded_kyber.as_bytes(), kyber.as_bytes());
@@ -1001,12 +1274,62 @@ mod committed_block_tests {
             .activate_validator(&id)
             .expect("activate local validator");
         assert_eq!(
+            registry.get(&id).unwrap().signing_key_id,
+            hex::encode(&loaded_public)
+        );
+        assert_eq!(
             registered_local_validator_id(&registry, &public).unwrap(),
             id
         );
         let mut wrong_public = public.clone();
         wrong_public[8] ^= 1;
         assert!(registered_local_validator_id(&registry, &wrong_public).is_err());
+    }
+
+    #[test]
+    fn inbound_block_signer_is_resolved_from_active_registry() {
+        let (proposer_public, proposer_secret) = generate_tx_keypair();
+        let (receiver_public, _) = generate_tx_keypair();
+        let proposer_id = hex::encode(&proposer_public[..8]);
+        let identity = ValidatorIdentity::new_with_vrf_public_key(
+            proposer_id.clone(),
+            vec![1; 1568],
+            hex::encode(&proposer_public),
+            bleep_consensus::pos_engine::PoSConsensusEngine::derive_vrf_public_key(
+                &proposer_secret,
+            )
+            .expect("derive proposer VRF key"),
+            1_000,
+            0,
+        )
+        .expect("create registered proposer");
+        let mut registry = ValidatorRegistry::new();
+        registry
+            .register_validator(identity)
+            .expect("register proposer");
+        registry
+            .activate_validator(&proposer_id)
+            .expect("activate proposer");
+        let active_validators: Vec<_> = registry
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        let mut block = Block::new(1, vec![], "parent".into());
+        block.validator_signature = proposer_public.clone();
+
+        assert_eq!(
+            registered_proposer_signing_key(&block, &active_validators).unwrap(),
+            proposer_public
+        );
+        assert_ne!(
+            registered_proposer_signing_key(&block, &active_validators).unwrap(),
+            receiver_public
+        );
+
+        block.validator_signature = receiver_public;
+        assert!(registered_proposer_signing_key(&block, &active_validators).is_err());
     }
 
     fn three_validator_registry() -> (ValidatorRegistry, Vec<String>) {
@@ -1212,6 +1535,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         network_mode.as_deref(),
         std::env::var(SINGLE_NODE_DEV_MODE_ENV).ok().as_deref(),
     )?;
+    let genesis_prefund_path = std::env::var(GENESIS_PREFUND_FILE_ENV).ok();
     let expected_registry_hash = std::env::var(VALIDATOR_REGISTRY_HASH_ENV)
         .ok()
         .map(|hash| parse_validator_registry_hash(&hash))
@@ -1281,7 +1605,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // generate_tx_keypair() returns (pk_bytes: 64B, sk_bytes: 128B).
     let state_dir =
         std::env::var("BLEEP_STATE_DIR").unwrap_or_else(|_| "/tmp/bleep-state".to_string());
-    let (sphincs_pk, sphincs_sk, kyber_pk) = load_or_create_validator_keys(Path::new(&state_dir))?;
+    let key_dir = validator_key_directory(Path::new(&state_dir));
+    let (sphincs_pk, sphincs_sk, kyber_pk) = load_or_create_validator_keys(&key_dir)?;
 
     // Generate real Kyber-1024 keypair for validator KEM binding.
     // KyberKem::keygen() returns (KyberPublicKey: 1568B, KyberSecretKey: 3168B).
@@ -1300,6 +1625,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!("⛓  [2/16] Initialising genesis block and persistent state…");
 
     let chain_id = network_config.chain_id;
+    let genesis_prefunds = load_genesis_prefunds(
+        genesis_prefund_path.as_deref(),
+        network_mode.as_deref(),
+        &chain_id,
+    )?;
     let mut state = match StateManager::open(&state_dir) {
         Ok(s) => {
             info!("  ✅ StateManager at {}", state_dir);
@@ -1317,6 +1647,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .set_blocks_per_epoch(blocks_per_epoch)
         .map_err(|error| format!("StateManager epoch configuration failed: {error}"))?;
     pin_genesis_admin_config(&mut state, network_config.genesis_admin_pubkey.as_deref())?;
+    if state.block_height() > 0 {
+        if let Some(hash) = genesis_prefunds.hash.as_deref() {
+            verify_existing_chain_prefund(&state, hash)?;
+        }
+    }
+    pin_genesis_prefund_hash(&mut state, genesis_prefunds.hash.as_deref())?;
+    let expected_genesis_supply = INITIAL_CIRCULATING_SUPPLY
+        .checked_add(genesis_prefunds.total_micro)
+        .ok_or("Genesis supply including prefunds overflows u128")?;
 
     // Mint the canonical launch unlocks only into a fresh genesis state.
     // Existing height-0 state with a different supply must be migrated or reset,
@@ -1335,24 +1674,29 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 });
             }
-        } else if existing_supply != INITIAL_CIRCULATING_SUPPLY {
+            for (address, balance_micro) in &genesis_prefunds.accounts {
+                state.mint(address, *balance_micro).map_err(|error| {
+                    format!("Genesis prefund for {address} failed: {error}")
+                })?;
+            }
+        } else if existing_supply != expected_genesis_supply {
             error!(
-                "Height-0 state has {} microBLP; expected 0 (fresh genesis) or {} (already allocated). Reset or explicitly migrate this state before starting the updated testnet.",
-                existing_supply, INITIAL_CIRCULATING_SUPPLY
+                "Height-0 state has {} microBLP; expected 0 (fresh genesis) or {} (configured genesis allocations). Reset or explicitly migrate this state before starting the updated testnet.",
+                existing_supply, expected_genesis_supply
             );
             std::process::exit(1);
         }
-        if state.total_supply() != INITIAL_CIRCULATING_SUPPLY {
+        if state.total_supply() != expected_genesis_supply {
             error!(
                 "Genesis supply invariant failed: expected {} microBLP, got {}.",
-                INITIAL_CIRCULATING_SUPPLY,
+                expected_genesis_supply,
                 state.total_supply()
             );
             std::process::exit(1);
         }
         info!(
-            "  ✅ Genesis allocations verified ({} BLP circulating; 200,000,000 BLP hard cap).",
-            INITIAL_CIRCULATING_SUPPLY / 100_000_000
+            "  ✅ Genesis allocations verified ({} microBLEEP in launch unlocks and prefunds; 200,000,000 BLEEP hard cap).",
+            expected_genesis_supply
         );
     }
     state
@@ -2209,10 +2553,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 continue;
                             }
                         };
-                        let epoch_validator_keys = committee_keys
-                            .iter()
-                            .map(|(_, public_key)| public_key.clone())
-                            .collect::<Vec<_>>();
                         if !inbound_pbft_finality.matches_committee(&committee_keys) {
                             if let Err(e) =
                                 inbound_pbft_finality.sync_committee(committee_keys.clone())
@@ -2349,6 +2689,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 );
                                 continue;
                             }
+                            let proposer_signing_key =
+                                match registered_proposer_signing_key(block, &active_validators) {
+                                    Ok(key) => key,
+                                    Err(error) => {
+                                        warn!(
+                                            "[InboundBlockHandler] PBFT proposal {} has no registered proposer key: {}",
+                                            block.index, error
+                                        );
+                                        continue;
+                                    }
+                                };
                             let proposal_valid = {
                                 let chain = inbound_blockchain.read().unwrap();
                                 let Some(tip) = chain.latest_block() else {
@@ -2364,10 +2715,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 if verify_pos_vrf_block(block, &tip, &active_validators).is_err()
                                     || block.index != tip.index.saturating_add(1)
                                     || !stake_transactions_valid
-                                    || !BlockValidator::validate_full_block_with_validator_set(
+                                    || !BlockValidator::validate_full_block(
                                         &tip,
                                         block,
-                                        &epoch_validator_keys,
+                                        &proposer_signing_key,
                                     )
                                 {
                                     false
@@ -2419,37 +2770,26 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    let (epoch_validator_keys, active_validators) = {
+                    let active_validators = {
                         let registry = inbound_validators.lock();
-                        let active_validators: Vec<_> = registry
+                        registry
                             .get_active_validators()
                             .into_iter()
                             .filter(|validator| validator.can_participate())
                             .cloned()
-                            .collect();
-                        let keys = active_validators
-                            .iter()
-                            .map(|validator| {
-                                hex::decode(&validator.signing_key_id).map_err(|e| {
-                                    format!(
-                                        "Invalid signing key for active validator {}: {}",
-                                        validator.id, e
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>();
-                        (keys, active_validators)
+                            .collect::<Vec<_>>()
                     };
-                    let epoch_validator_keys = match epoch_validator_keys {
-                        Ok(keys) => keys,
-                        Err(e) => {
-                            warn!(
-                                "[InboundBlockHandler] Could not load epoch validator keys: {}",
-                                e
-                            );
-                            continue;
-                        }
-                    };
+                    let proposer_signing_key =
+                        match registered_proposer_signing_key(&block, &active_validators) {
+                            Ok(key) => key,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Block {} has no registered proposer key: {}",
+                                    block.index, error
+                                );
+                                continue;
+                            }
+                        };
 
                     let parent = {
                         let chain = inbound_blockchain.read().unwrap();
@@ -2466,10 +2806,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    let valid = BlockValidator::validate_block_with_validator_set(
-                        &block,
-                        &epoch_validator_keys,
-                    ) && block.chain_id == inbound_chain_id
+                    let valid = BlockValidator::validate_block(&block, &proposer_signing_key)
+                        && block.chain_id == inbound_chain_id
                         && block
                             .transactions
                             .iter()
@@ -2523,10 +2861,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         };
                         if block.index != tip.index.saturating_add(1)
                             || verify_pos_vrf_block(&block, &tip, &active_validators).is_err()
-                            || !BlockValidator::validate_full_block_with_validator_set(
+                            || !BlockValidator::validate_full_block(
                                 &tip,
                                 &block,
-                                &epoch_validator_keys,
+                                &proposer_signing_key,
                             )
                         {
                             false
@@ -2585,7 +2923,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             ) {
                                 Ok(()) => chain.add_committed_block_with_validator_set(
                                     block.clone(),
-                                    &epoch_validator_keys,
+                                    std::slice::from_ref(&proposer_signing_key),
                                 ),
                                 Err(bleep_state::state_manager::StateError::StorageWrite(
                                     error,
