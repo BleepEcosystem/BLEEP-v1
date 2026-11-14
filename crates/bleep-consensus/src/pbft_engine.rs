@@ -26,7 +26,7 @@ use tokio::sync::Notify;
 
 const PBFT_VOTE_DOMAIN: &[u8] = b"BLEEP:PBFT:VOTE:V1\0";
 pub const PBFT_MESSAGE_TYPE: &str = "BLEEP_PBFT_V1";
-pub const PBFT_VIEW_TIMEOUT: Duration = Duration::from_secs(10);
+pub const PBFT_VIEW_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Encode the signed payload for one prepare or commit vote.
 pub fn pbft_vote_message(
@@ -80,6 +80,17 @@ pub enum PbftMessage {
     },
 }
 
+struct PendingPbftVote {
+    phase: PbftPhase,
+    validator_id: String,
+    signature: Vec<u8>,
+}
+
+struct PendingPbftVotes {
+    received_at: Instant,
+    votes: Vec<PendingPbftVote>,
+}
+
 /// Live transport and quorum state for the running node.
 ///
 /// Proposal blocks are only candidates. The producer may commit one after this
@@ -92,6 +103,7 @@ pub struct LivePbftFinality {
     engine: Arc<Mutex<PbftConsensusEngine>>,
     local_prepare_sent: Arc<Mutex<HashSet<u64>>>,
     local_commit_sent: Arc<Mutex<HashSet<u64>>>,
+    pending_votes: Arc<Mutex<HashMap<(u64, String), PendingPbftVotes>>>,
     finalized: Notify,
 }
 
@@ -137,6 +149,7 @@ impl LivePbftFinality {
             engine: Arc::new(Mutex::new(engine)),
             local_prepare_sent: Arc::new(Mutex::new(HashSet::new())),
             local_commit_sent: Arc::new(Mutex::new(HashSet::new())),
+            pending_votes: Arc::new(Mutex::new(HashMap::new())),
             finalized: Notify::new(),
         })
     }
@@ -176,6 +189,7 @@ impl LivePbftFinality {
         drop(engine);
         self.local_prepare_sent.lock().clear();
         self.local_commit_sent.lock().clear();
+        self.pending_votes.lock().clear();
         if newly_finalized {
             self.finalized.notify_waiters();
         }
@@ -199,7 +213,8 @@ impl LivePbftFinality {
             .broadcast(&PbftMessage::Proposal {
                 block: block.clone(),
             })
-            .and_then(|()| self.send_local_vote(PbftPhase::Prepare, block.index));
+            .and_then(|()| self.send_local_vote(PbftPhase::Prepare, block.index))
+            .and_then(|()| self.apply_pending_votes(block.index, &block.compute_hash()));
         if let Err(error) = result {
             return self.abandon_after_error(block.index, error);
         }
@@ -211,6 +226,9 @@ impl LivePbftFinality {
         let is_new = self.start_proposal(block)?;
         if is_new {
             if let Err(error) = self.send_local_vote(PbftPhase::Prepare, block.index) {
+                return self.abandon_after_error(block.index, error);
+            }
+            if let Err(error) = self.apply_pending_votes(block.index, &block.compute_hash()) {
                 return self.abandon_after_error(block.index, error);
             }
         }
@@ -233,9 +251,31 @@ impl LivePbftFinality {
         signature: &[u8],
     ) -> Result<(), String> {
         self.expire_stalled_proposal(block_height)?;
+        if phase == PbftPhase::PrePrepare {
+            return Err("PBFT proposal phase cannot be submitted as a vote".into());
+        }
         {
             let mut engine = self.engine.lock();
-            if engine.block_hashes.get(&block_height).map(String::as_str) != Some(block_hash) {
+            if !engine.known_validators.contains(validator_id) {
+                return Err(format!(
+                    "PBFT vote from unregistered validator {validator_id}"
+                ));
+            }
+            let Some(known_hash) = engine.block_hashes.get(&block_height) else {
+                engine
+                    .verify_vote_for_hash(phase, block_height, block_hash, validator_id, signature)
+                    .map_err(|e| e.to_string())?;
+                drop(engine);
+                self.defer_vote(
+                    phase,
+                    block_height,
+                    block_hash,
+                    validator_id,
+                    signature,
+                )?;
+                return Ok(());
+            };
+            if known_hash != block_hash {
                 return Err(format!(
                     "PBFT vote from {validator_id} refers to an unknown block at height {block_height}"
                 ));
@@ -244,22 +284,42 @@ impl LivePbftFinality {
                 PbftPhase::Prepare => engine
                     .process_prepare(block_height, validator_id, signature)
                     .map_err(|e| e.to_string())?,
-                PbftPhase::Commit => engine
-                    .process_commit(block_height, validator_id, signature)
-                    .map_err(|e| e.to_string())?,
-                PbftPhase::PrePrepare => {
-                    return Err("PBFT proposal phase cannot be submitted as a vote".into())
+                PbftPhase::Commit => {
+                    if engine.block_state(block_height) == Some(PbftBlockState::Proposed) {
+                        engine
+                            .verify_vote(phase, block_height, validator_id, signature)
+                            .map_err(|e| e.to_string())?;
+                        drop(engine);
+                        self.defer_vote(
+                            phase,
+                            block_height,
+                            block_hash,
+                            validator_id,
+                            signature,
+                        )?;
+                        return Ok(());
+                    }
+                    engine
+                        .process_commit(block_height, validator_id, signature)
+                        .map_err(|e| e.to_string())?
                 }
+                PbftPhase::PrePrepare => unreachable!("proposal phase was rejected above"),
             }
             if engine.is_finalized(block_height) {
                 self.finalized.notify_one();
                 self.local_prepare_sent.lock().remove(&block_height);
                 self.local_commit_sent.lock().remove(&block_height);
+                self.pending_votes
+                    .lock()
+                    .retain(|(height, _), _| *height != block_height);
             }
         }
 
         if phase == PbftPhase::Prepare {
             self.start_local_commit_if_prepared(block_height)?;
+            if self.engine.lock().block_state(block_height) == Some(PbftBlockState::Prepared) {
+                self.apply_pending_votes(block_height, block_hash)?;
+            }
         }
         Ok(())
     }
@@ -331,6 +391,74 @@ impl LivePbftFinality {
         clear_proposal_state(&mut engine, height);
         self.local_prepare_sent.lock().remove(&height);
         self.local_commit_sent.lock().remove(&height);
+        self.pending_votes
+            .lock()
+            .retain(|(pending_height, _), _| *pending_height != height);
+        Ok(())
+    }
+
+    fn defer_vote(
+        &self,
+        phase: PbftPhase,
+        height: u64,
+        block_hash: &str,
+        validator_id: &str,
+        signature: &[u8],
+    ) -> Result<(), String> {
+        const MAX_PENDING_CANDIDATES: usize = 64;
+
+        let max_votes = self.validator_count().saturating_mul(2);
+        let mut pending = self.pending_votes.lock();
+        pending.retain(|_, votes| votes.received_at.elapsed() < PBFT_VIEW_TIMEOUT);
+        let key = (height, block_hash.to_string());
+        if !pending.contains_key(&key) && pending.len() >= MAX_PENDING_CANDIDATES {
+            return Err("PBFT pending-vote buffer is full".into());
+        }
+
+        let bucket = pending.entry(key).or_insert_with(|| PendingPbftVotes {
+            received_at: Instant::now(),
+            votes: Vec::new(),
+        });
+        if bucket.votes.iter().any(|vote| {
+            vote.phase == phase && vote.validator_id == validator_id
+        }) {
+            return Ok(());
+        }
+        if bucket.votes.len() >= max_votes {
+            return Err("PBFT pending-vote bucket is full".into());
+        }
+        bucket.votes.push(PendingPbftVote {
+            phase,
+            validator_id: validator_id.to_string(),
+            signature: signature.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn apply_pending_votes(&self, height: u64, block_hash: &str) -> Result<(), String> {
+        let pending = self
+            .pending_votes
+            .lock()
+            .remove(&(height, block_hash.to_string()));
+        if let Some(mut pending) = pending {
+            if pending.received_at.elapsed() >= PBFT_VIEW_TIMEOUT {
+                return Ok(());
+            }
+            pending.votes.sort_by_key(|vote| match vote.phase {
+                PbftPhase::Prepare => 0,
+                PbftPhase::Commit => 1,
+                PbftPhase::PrePrepare => 2,
+            });
+            for vote in pending.votes {
+                self.receive_vote(
+                    vote.phase,
+                    height,
+                    block_hash,
+                    &vote.validator_id,
+                    &vote.signature,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -341,6 +469,7 @@ impl LivePbftFinality {
         let engine = Arc::clone(&self.engine);
         let local_prepare_sent = Arc::clone(&self.local_prepare_sent);
         let local_commit_sent = Arc::clone(&self.local_commit_sent);
+        let pending_votes = Arc::clone(&self.pending_votes);
         runtime.spawn(async move {
             tokio::time::sleep_until(tokio::time::Instant::from_std(
                 started_at + PBFT_VIEW_TIMEOUT,
@@ -355,6 +484,9 @@ impl LivePbftFinality {
                 clear_proposal_state(&mut engine, height);
                 local_prepare_sent.lock().remove(&height);
                 local_commit_sent.lock().remove(&height);
+                pending_votes
+                    .lock()
+                    .remove(&(height, block_hash));
             }
         });
     }
@@ -822,11 +954,6 @@ impl PbftConsensusEngine {
         preparer_id: &str,
         signature: &[u8],
     ) -> Result<(), ConsensusError> {
-        // Only accept votes for blocks in Proposed state
-        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Proposed) {
-            return Ok(()); // silently ignore out-of-order or duplicate messages
-        }
-
         // Only count votes from registered validators
         if !self.known_validators.contains(preparer_id) {
             warn!(
@@ -836,6 +963,11 @@ impl PbftConsensusEngine {
             return Ok(());
         }
         self.verify_vote(PbftPhase::Prepare, block_height, preparer_id, signature)?;
+
+        // Only accept votes for blocks in Proposed state
+        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Proposed) {
+            return Ok(()); // ignore out-of-order or duplicate messages
+        }
 
         let votes = self.prepare_votes.entry(block_height).or_default();
         votes.insert(preparer_id.to_string());
@@ -869,11 +1001,6 @@ impl PbftConsensusEngine {
         committer_id: &str,
         signature: &[u8],
     ) -> Result<(), ConsensusError> {
-        // Only accept commits for blocks that have reached Prepared
-        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Prepared) {
-            return Ok(());
-        }
-
         if !self.known_validators.contains(committer_id) {
             warn!(
                 "PBFT: Ignoring commit vote from unknown validator {}",
@@ -882,6 +1009,11 @@ impl PbftConsensusEngine {
             return Ok(());
         }
         self.verify_vote(PbftPhase::Commit, block_height, committer_id, signature)?;
+
+        // Only count commits for blocks that have reached Prepared
+        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Prepared) {
+            return Ok(());
+        }
 
         let votes = self.commit_votes.entry(block_height).or_default();
         votes.insert(committer_id.to_string());
@@ -917,6 +1049,22 @@ impl PbftConsensusEngine {
         validator_id: &str,
         signature: &[u8],
     ) -> Result<(), ConsensusError> {
+        let block_hash = self.block_hashes.get(&block_height).ok_or_else(|| {
+            ConsensusError::ProposalRejected {
+                reason: format!("No pre-prepare block hash for height {block_height}"),
+            }
+        })?;
+        self.verify_vote_for_hash(phase, block_height, block_hash, validator_id, signature)
+    }
+
+    fn verify_vote_for_hash(
+        &self,
+        phase: PbftPhase,
+        block_height: u64,
+        block_hash: &str,
+        validator_id: &str,
+        signature: &[u8],
+    ) -> Result<(), ConsensusError> {
         let public_key = self.validator_pubkeys.get(validator_id).ok_or_else(|| {
             ConsensusError::InvalidSignature {
                 validator_id: validator_id.to_string(),
@@ -927,11 +1075,6 @@ impl PbftConsensusEngine {
                 validator_id: validator_id.to_string(),
             });
         }
-        let block_hash = self.block_hashes.get(&block_height).ok_or_else(|| {
-            ConsensusError::ProposalRejected {
-                reason: format!("No pre-prepare block hash for height {block_height}"),
-            }
-        })?;
         let message = pbft_vote_message(phase, block_height, block_hash, validator_id);
         let public_key =
             sphincsshake256fsimple::PublicKey::from_bytes(public_key).map_err(|_| {
@@ -1186,26 +1329,30 @@ mod tests {
         .unwrap();
         let block = signed_block(&engine, &secret_keys, 600, "h599");
         let block_hash = block.compute_hash();
+        let validator_id = "v2";
+        let message = pbft_vote_message(PbftPhase::Prepare, 600, &block_hash, validator_id);
+        let secret_key =
+            sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
+        let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
+            .as_bytes()
+            .to_vec();
+        finality
+            .receive_vote(
+                PbftPhase::Prepare,
+                600,
+                &block_hash,
+                validator_id,
+                &signature,
+            )
+            .unwrap();
+
         finality.propose(&block).unwrap();
         assert!(!finality.is_finalized(600, &block_hash));
 
-        for validator_id in ["v2", "v3"] {
-            let message = pbft_vote_message(PbftPhase::Prepare, 600, &block_hash, validator_id);
-            let secret_key =
-                sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
-            let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
-                .as_bytes()
-                .to_vec();
-            finality
-                .receive_vote(
-                    PbftPhase::Prepare,
-                    600,
-                    &block_hash,
-                    validator_id,
-                    &signature,
-                )
-                .unwrap();
-        }
+        assert_eq!(
+            finality.engine.lock().block_state(600),
+            Some(PbftBlockState::Proposed)
+        );
 
         for validator_id in ["v2", "v3"] {
             let message = pbft_vote_message(PbftPhase::Commit, 600, &block_hash, validator_id);
@@ -1224,6 +1371,24 @@ mod tests {
                 )
                 .unwrap();
         }
+
+        assert!(!finality.is_finalized(600, &block_hash));
+        let validator_id = "v3";
+        let message = pbft_vote_message(PbftPhase::Prepare, 600, &block_hash, validator_id);
+        let secret_key =
+            sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
+        let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
+            .as_bytes()
+            .to_vec();
+        finality
+            .receive_vote(
+                PbftPhase::Prepare,
+                600,
+                &block_hash,
+                validator_id,
+                &signature,
+            )
+            .unwrap();
 
         assert!(finality.is_finalized(600, &block_hash));
     }

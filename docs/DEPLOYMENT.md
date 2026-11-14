@@ -227,10 +227,18 @@ BLEEP_TPS_SENDERS="$HOME/.bleep/tps/senders.json" \
 BLEEP_TPS_SENDER_COUNT=500 \
 BLEEP_TPS_SWEEP=2000 \
 BLEEP_TPS_DURATION_SECS=5 \
+BLEEP_TPS_REPLAY_WINDOW_SECS=600 \
 BLEEP_ADMIN_PUBLIC_KEY_HEX="$BLEEP_GENESIS_ADMIN_PUBKEY" \
 BLEEP_ADMIN_SECRET_KEY_FILE=/secure/path/admin.secret.bin \
 ./test_tps.sh
 ```
+
+The 600-second replay window is for an isolated benchmark network only. Set
+`BLEEP_TX_REPLAY_WINDOW_SECS=600` on every benchmark validator before startup,
+and set `BLEEP_TPS_REPLAY_WINDOW_SECS` to the same value for the load generator;
+the load generator rejects a run if pre-signing plus the schedule exceeds its
+configured replay window. Do not widen replay windows on a public/shared
+testnet just to accommodate a slow benchmark machine.
 
 The admin secret file must contain the raw 128-byte SPHINCS+ secret key (not
 hex-encoded text); restrict it to the benchmark operator. The benchmark amount

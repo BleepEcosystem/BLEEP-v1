@@ -40,6 +40,7 @@
 
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
+use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -118,6 +119,27 @@ use bleep_telemetry::{
 // ── RPC ───────────────────────────────────────────────────────────────────────
 use base64::{engine::general_purpose, Engine as _};
 use bleep_rpc::{rpc_routes_with_state, RpcState};
+
+const GOSSIP_RELAY_CACHE_CAPACITY: usize = 16_384;
+
+fn should_relay_gossip_payload(
+    payload: &[u8],
+    seen: &mut HashSet<[u8; 32]>,
+    order: &mut VecDeque<[u8; 32]>,
+) -> bool {
+    let id: [u8; 32] = Sha256::digest(payload).into();
+    if !seen.insert(id) {
+        return false;
+    }
+
+    order.push_back(id);
+    if order.len() > GOSSIP_RELAY_CACHE_CAPACITY {
+        if let Some(expired) = order.pop_front() {
+            seen.remove(&expired);
+        }
+    }
+    true
+}
 
 struct ValidatorRegistryAdapter {
     inner: Arc<Mutex<ValidatorRegistry>>,
@@ -574,6 +596,33 @@ mod tx_pool_sig_cache_tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod gossip_relay_dedup_tests {
+    use super::*;
+
+    #[test]
+    fn relay_deduplicates_payloads_and_evicts_old_entries() {
+        let mut seen = HashSet::new();
+        let mut order = VecDeque::new();
+        let payload = b"pbft vote";
+
+        assert!(should_relay_gossip_payload(payload, &mut seen, &mut order));
+        assert!(!should_relay_gossip_payload(payload, &mut seen, &mut order));
+
+        for index in 0..GOSSIP_RELAY_CACHE_CAPACITY {
+            let payload = format!("pbft vote {index}");
+            assert!(should_relay_gossip_payload(
+                payload.as_bytes(),
+                &mut seen,
+                &mut order
+            ));
+        }
+
+        assert_eq!(seen.len(), GOSSIP_RELAY_CACHE_CAPACITY);
+        assert!(should_relay_gossip_payload(payload, &mut seen, &mut order));
     }
 }
 
@@ -2498,6 +2547,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let inbound_handle = tokio::spawn(async move {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
+        let mut relayed_gossip_payloads = HashSet::new();
+        let mut gossip_relay_order = VecDeque::new();
         loop {
             match inbound_p2p_node.recv_with_payload().await {
                 Some((peer_id, mut msg, plaintext)) => {
@@ -2744,6 +2795,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                         if let Err(e) = inbound_pbft_finality.receive_message(message) {
                             warn!("[InboundBlockHandler] PBFT message rejected: {}", e);
+                        } else if should_relay_gossip_payload(
+                            &msg.payload,
+                            &mut relayed_gossip_payloads,
+                            &mut gossip_relay_order,
+                        ) {
+                            inbound_p2p_node.gossip.enqueue(msg, Some(peer_id));
                         }
                         continue;
                     }
@@ -2966,6 +3023,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             block.index,
                             block.transactions.len()
                         );
+                        if should_relay_gossip_payload(
+                            &msg.payload,
+                            &mut relayed_gossip_payloads,
+                            &mut gossip_relay_order,
+                        ) {
+                            inbound_p2p_node.gossip.enqueue(msg, Some(peer_id));
+                        }
                     }
                 }
                 None => {

@@ -4825,7 +4825,7 @@ mod tests {
         state_mgr.lock().set_balance(&sender, 10_000).unwrap();
         let receiver = "BLEEP1receiver".to_string();
         let amount = 123u64;
-        let timestamp = 1_700_000_000u64;
+        let timestamp = now_secs();
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
         let nonce = 0;
 
@@ -4875,11 +4875,11 @@ mod tests {
         use std::time::Duration;
         use tokio::time::{sleep, timeout};
 
-        let first_listener =
-            TcpListener::bind("127.0.0.1:0").expect("reserve first local port");
-        let second_listener =
-            TcpListener::bind("127.0.0.1:0").expect("reserve second local port");
-        let first_addr = first_listener.local_addr().expect("read first local address");
+        let first_listener = TcpListener::bind("127.0.0.1:0").expect("reserve first local port");
+        let second_listener = TcpListener::bind("127.0.0.1:0").expect("reserve second local port");
+        let first_addr = first_listener
+            .local_addr()
+            .expect("read first local address");
         let second_addr = second_listener
             .local_addr()
             .expect("read second local address");
@@ -4905,8 +4905,12 @@ mod tests {
 
         timeout(Duration::from_secs(10), async {
             loop {
-                if first_node.message_protocol.has_session(&second_node.node_id)
-                    && second_node.message_protocol.has_session(&first_node.node_id)
+                if first_node
+                    .message_protocol
+                    .has_session(&second_node.node_id)
+                    && second_node
+                        .message_protocol
+                        .has_session(&first_node.node_id)
                 {
                     break;
                 }
@@ -5004,7 +5008,7 @@ mod tests {
         let sender = bleep_crypto::derive_account_address(&public_key);
         let receiver = "BLEEP1nonce-recipient".to_string();
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID.to_string();
-        let timestamp = 1_700_000_000;
+        let timestamp = now_secs();
         let nonce = 0;
         state_mgr.lock().set_balance(&sender, 10_000).unwrap();
         let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
@@ -5560,7 +5564,7 @@ mod tests_sprint8 {
         let receiver = "BLEEP1bootstrap-smoke-recipient";
         let chain_id = bleep_crypto::DEFAULT_CHAIN_ID;
         let amount = 1;
-        let timestamp = 1_700_000_000;
+        let timestamp = now_secs();
         let nonce = 0;
         state_mgr.lock().set_balance(&sender, 10_000).unwrap();
         let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
