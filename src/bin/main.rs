@@ -40,12 +40,13 @@
 
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 // ── Crypto ────────────────────────────────────────────────────────────────────
@@ -91,7 +92,7 @@ use bleep_governance::governance_core::GovernanceEngine;
 use bleep_core::block_validation::BlockValidator;
 use bleep_p2p::p2p_node::{P2PNode, P2PNodeConfig};
 use bleep_p2p::sig_availability::SigAvailabilityBridge;
-use bleep_p2p::types::MessageType;
+use bleep_p2p::types::{MessageType, NodeId, SecureMessage};
 
 // ── Wallet & PAT ─────────────────────────────────────────────────────────────
 use bleep_pat::launch_asset_token_logic;
@@ -121,6 +122,62 @@ use base64::{engine::general_purpose, Engine as _};
 use bleep_rpc::{rpc_routes_with_state, RpcState};
 
 const GOSSIP_RELAY_CACHE_CAPACITY: usize = 16_384;
+const MAX_PENDING_BLOCK_GOSSIP: usize = 16;
+const PENDING_BLOCK_GOSSIP_TTL: Duration = Duration::from_secs(60);
+
+struct PendingBlockGossip {
+    received_at: Instant,
+    peer_id: NodeId,
+    message: SecureMessage,
+}
+
+fn buffer_pending_block_gossip(
+    pending: &mut HashMap<(u64, String), PendingBlockGossip>,
+    peer_id: NodeId,
+    message: SecureMessage,
+    block: &Block,
+) -> bool {
+    let key = (block.index, block.compute_hash());
+    if pending.contains_key(&key) {
+        return true;
+    }
+    if pending.len() >= MAX_PENDING_BLOCK_GOSSIP {
+        return false;
+    }
+    pending.insert(
+        key,
+        PendingBlockGossip {
+            received_at: Instant::now(),
+            peer_id,
+            message,
+        },
+    );
+    true
+}
+
+fn collect_ready_pending_blocks(
+    pending: &mut HashMap<(u64, String), PendingBlockGossip>,
+    now: Instant,
+    is_finalized: impl Fn(u64, &str) -> bool,
+) -> VecDeque<(NodeId, SecureMessage, Option<Vec<u8>>)> {
+    let mut ready = VecDeque::new();
+    let mut retained = HashMap::with_capacity(pending.len());
+    for ((height, hash), buffered) in pending.drain() {
+        if is_finalized(height, &hash) {
+            ready.push_back((buffered.peer_id, buffered.message, None));
+        } else if now.duration_since(buffered.received_at) < PENDING_BLOCK_GOSSIP_TTL {
+            retained.insert((height, hash), buffered);
+        } else {
+            warn!(
+                height,
+                block_hash = %hash,
+                "Discarding buffered block gossip after PBFT finality timeout"
+            );
+        }
+    }
+    *pending = retained;
+    ready
+}
 
 fn should_relay_gossip_payload(
     payload: &[u8],
@@ -623,6 +680,82 @@ mod gossip_relay_dedup_tests {
 
         assert_eq!(seen.len(), GOSSIP_RELAY_CACHE_CAPACITY);
         assert!(should_relay_gossip_payload(payload, &mut seen, &mut order));
+    }
+}
+
+#[cfg(test)]
+mod pending_block_gossip_tests {
+    use super::*;
+
+    fn block_message(index: u64) -> (NodeId, SecureMessage, Block) {
+        let block = Block::new(index, Vec::new(), "parent".into());
+        let message = SecureMessage {
+            version: 1,
+            sender_id: NodeId::random(),
+            message_type: MessageType::Block,
+            payload: serde_json::to_vec(&block).unwrap(),
+            signature: Vec::new(),
+            hop_count: 0,
+            nonce: [0; 16],
+            timestamp: 0,
+        };
+        (NodeId::random(), message, block)
+    }
+
+    #[test]
+    fn block_waits_for_local_finality_then_becomes_retryable() {
+        let mut pending = HashMap::new();
+        let (peer_id, message, block) = block_message(1);
+        assert!(buffer_pending_block_gossip(
+            &mut pending,
+            peer_id.clone(),
+            message,
+            &block
+        ));
+
+        assert!(
+            collect_ready_pending_blocks(&mut pending, Instant::now(), |_, _| false).is_empty()
+        );
+        assert_eq!(pending.len(), 1);
+
+        let ready = collect_ready_pending_blocks(&mut pending, Instant::now(), |height, hash| {
+            height == block.index && hash == block.compute_hash()
+        });
+        assert!(pending.is_empty());
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, peer_id);
+        assert_eq!(ready[0].1.message_type, MessageType::Block);
+        assert!(ready[0].2.is_none());
+    }
+
+    #[test]
+    fn pending_block_buffer_is_bounded_and_expires_entries() {
+        let mut pending = HashMap::new();
+        for index in 1..=MAX_PENDING_BLOCK_GOSSIP as u64 {
+            let (peer_id, message, block) = block_message(index);
+            assert!(buffer_pending_block_gossip(
+                &mut pending,
+                peer_id,
+                message,
+                &block
+            ));
+        }
+        let (peer_id, message, block) = block_message(100);
+        assert!(!buffer_pending_block_gossip(
+            &mut pending,
+            peer_id,
+            message,
+            &block
+        ));
+
+        let expired_at = Instant::now() - PENDING_BLOCK_GOSSIP_TTL - Duration::from_secs(1);
+        for buffered in pending.values_mut() {
+            buffered.received_at = expired_at;
+        }
+        assert!(
+            collect_ready_pending_blocks(&mut pending, Instant::now(), |_, _| false).is_empty()
+        );
+        assert!(pending.is_empty());
     }
 }
 
@@ -2549,10 +2682,32 @@ async fn run() -> Result<(), Box<dyn Error>> {
         info!("[InboundBlockHandler] Listening for P2P block gossip…");
         let mut relayed_gossip_payloads = HashSet::new();
         let mut gossip_relay_order = VecDeque::new();
+        let mut pending_blocks = HashMap::new();
+        let mut ready_blocks = VecDeque::new();
+        let mut pending_block_retry = tokio::time::interval(Duration::from_secs(1));
         loop {
-            match inbound_p2p_node.recv_with_payload().await {
+            let inbound = if let Some(ready) = ready_blocks.pop_front() {
+                Some(ready)
+            } else {
+                tokio::select! {
+                    inbound = inbound_p2p_node.recv_with_payload() => {
+                        inbound.map(|(peer_id, msg, plaintext)| (peer_id, msg, Some(plaintext)))
+                    }
+                    _ = pending_block_retry.tick() => {
+                        ready_blocks.extend(collect_ready_pending_blocks(
+                            &mut pending_blocks,
+                            Instant::now(),
+                            |height, hash| inbound_pbft_finality.is_finalized(height, hash),
+                        ));
+                        continue;
+                    }
+                }
+            };
+            match inbound {
                 Some((peer_id, mut msg, plaintext)) => {
-                    msg.payload = plaintext;
+                    if let Some(plaintext) = plaintext {
+                        msg.payload = plaintext;
+                    }
                     if msg.message_type == MessageType::Transaction {
                         let transaction: bleep_core::transaction::ZKTransaction =
                             match serde_json::from_slice(&msg.payload) {
@@ -2795,12 +2950,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                         if let Err(e) = inbound_pbft_finality.receive_message(message) {
                             warn!("[InboundBlockHandler] PBFT message rejected: {}", e);
-                        } else if should_relay_gossip_payload(
-                            &msg.payload,
-                            &mut relayed_gossip_payloads,
-                            &mut gossip_relay_order,
-                        ) {
-                            inbound_p2p_node.gossip.enqueue(msg, Some(peer_id));
+                        } else {
+                            ready_blocks.extend(collect_ready_pending_blocks(
+                                &mut pending_blocks,
+                                Instant::now(),
+                                |height, hash| inbound_pbft_finality.is_finalized(height, hash),
+                            ));
+                            if should_relay_gossip_payload(
+                                &msg.payload,
+                                &mut relayed_gossip_payloads,
+                                &mut gossip_relay_order,
+                            ) {
+                                inbound_p2p_node.gossip.enqueue(msg, Some(peer_id));
+                            }
                         }
                         continue;
                     }
@@ -2820,10 +2982,36 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     };
 
                     if !inbound_pbft_finality.is_finalized(block.index, &block.compute_hash()) {
-                        warn!(
-                            "[InboundBlockHandler] Rejecting block {} without a verified PBFT commit quorum",
-                            block.index
+                        if block.chain_id != inbound_chain_id
+                            || block
+                                .transactions
+                                .iter()
+                                .any(|tx| tx.chain_id != inbound_chain_id)
+                        {
+                            warn!(
+                                "[InboundBlockHandler] Rejecting unfinalized block {} for a different chain",
+                                block.index
+                            );
+                            continue;
+                        }
+                        let _ = collect_ready_pending_blocks(
+                            &mut pending_blocks,
+                            Instant::now(),
+                            |_, _| false,
                         );
+                        if !buffer_pending_block_gossip(&mut pending_blocks, peer_id, msg, &block) {
+                            warn!(
+                                height = block.index,
+                                pending = pending_blocks.len(),
+                                "Pending block gossip buffer is full; rejecting unfinalized block"
+                            );
+                        } else {
+                            info!(
+                                height = block.index,
+                                pending = pending_blocks.len(),
+                                "Buffered block gossip until local PBFT finality arrives"
+                            );
+                        }
                         continue;
                     }
 

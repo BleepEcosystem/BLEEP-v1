@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bleep_crypto::tx_signer::{sign_tx_payload, tx_payload_v2};
 use futures::{stream, StreamExt};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha3::Digest;
@@ -17,6 +18,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, sleep_until, Instant};
+
+const MAX_IN_FLIGHT_REQUESTS: usize = 512;
 
 #[derive(Deserialize)]
 struct SenderKey {
@@ -285,7 +288,7 @@ fn presign(
         );
     }
     let timestamp = now_ms() as u64 / 1000;
-    let mut prepared = Vec::with_capacity(count);
+    let mut signing_tasks = Vec::with_capacity(count);
     for index in 0..count {
         let sender_index = index % senders.len();
         let sender = &senders[sender_index];
@@ -304,33 +307,43 @@ fn presign(
             timestamp,
             nonce,
         );
-        let signature = sign_tx_payload(&payload, &sender.secret_key)
-            .map_err(|error| anyhow!("failed to sign transaction {index}: {error}"))?;
-        let mut wire_signature = Vec::with_capacity(sender.public_key.len() + signature.len());
-        wire_signature.extend_from_slice(&sender.public_key);
-        wire_signature.extend_from_slice(&signature);
-        let signing_hash = hex::encode(payload);
-        let submission_id = hex::encode(sha3::Sha3_256::digest(&wire_signature));
-        let request_body = serde_json::to_vec(&json!({
-            "version": 2,
-            "chain_id": chain_id,
-            "sender": sender.address,
-            "receiver": receiver,
-            "amount": amount,
-            "fee": fee,
-            "timestamp": timestamp,
-            "nonce": nonce,
-            "signature": STANDARD.encode(wire_signature),
-        }))
-        .with_context(|| format!("failed serializing transaction {index}"))?;
-        prepared.push((
-            request_body,
-            sender.address.clone(),
-            submission_id,
-            signing_hash,
-        ));
+        signing_tasks.push((index, sender_index, nonce, receiver, payload));
     }
-    Ok(prepared)
+
+    signing_tasks
+        .into_par_iter()
+        .map(|(index, sender_index, nonce, receiver, payload)| {
+            let sender = &senders[sender_index];
+            let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+            let signature = sign_tx_payload(&payload, &sender.secret_key)
+                .map_err(|error| anyhow!("failed to sign transaction {index}: {error}"))?;
+            let mut wire_signature = Vec::with_capacity(sender.public_key.len() + signature.len());
+            wire_signature.extend_from_slice(&sender.public_key);
+            wire_signature.extend_from_slice(&signature);
+            let signing_hash = hex::encode(&payload);
+            let submission_id = hex::encode(sha3::Sha3_256::digest(&wire_signature));
+            let request_body = serde_json::to_vec(&json!({
+                "version": 2,
+                "chain_id": chain_id,
+                "sender": sender.address,
+                "receiver": receiver,
+                "amount": amount,
+                "fee": fee,
+                "timestamp": timestamp,
+                "nonce": nonce,
+                "signature": STANDARD.encode(wire_signature),
+            }))
+            .with_context(|| format!("failed serializing transaction {index}"))?;
+            Ok((
+                request_body,
+                sender.address.clone(),
+                submission_id,
+                signing_hash,
+            ))
+        })
+        .collect::<Vec<Result<_>>>()
+        .into_iter()
+        .collect()
 }
 
 async fn health_height(client: &reqwest::Client, rpc: &str) -> Result<u64> {
@@ -399,7 +412,7 @@ async fn run_load(
     });
 
     let start = Instant::now() + Duration::from_millis(100);
-    let max_in_flight = prepared.len().max(1);
+    let max_in_flight = prepared.len().min(MAX_IN_FLIGHT_REQUESTS);
     let results = stream::iter(prepared.into_iter().enumerate())
         .map(
             |(index, (transaction, sender, submission_id, inclusion_hash))| {

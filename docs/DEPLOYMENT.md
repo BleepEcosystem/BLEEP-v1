@@ -239,6 +239,9 @@ and set `BLEEP_TPS_REPLAY_WINDOW_SECS` to the same value for the load generator;
 the load generator rejects a run if pre-signing plus the schedule exceeds its
 configured replay window. Do not widen replay windows on a public/shared
 testnet just to accommodate a slow benchmark machine.
+Transaction signing is parallelized across available CPU cores, and HTTP
+submission concurrency is capped at 512; dispatch lag is reported so client
+backpressure is distinguishable from validator throughput.
 
 The admin secret file must contain the raw 128-byte SPHINCS+ secret key (not
 hex-encoded text); restrict it to the benchmark operator. The benchmark amount
