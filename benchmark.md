@@ -12,7 +12,10 @@ RPC response, and observed inclusion height/time. It writes JSONL details and a
 CSV summary with rejection rate and nearest-rank p50/p99 inclusion latency.
 The CSV also records request transport errors and p99 dispatch lag against the
 requested pace, to distinguish a client-side scheduling bottleneck from node
-rejections or slow inclusion.
+rejections or slow inclusion. `observed_tps` is included transactions divided
+by the full elapsed time from load dispatch through settlement (or the settle
+timeout), not merely the offered-load schedule; `measurement_duration_ms`
+records that denominator.
 
 The sender input must be a JSON array with at least 500 funded SPHINCS+ accounts:
 
@@ -63,9 +66,9 @@ record a `perf` profile during the sweep; the script writes a `perf report`
 text summary for identifying the limiting subsystem.
 
 No new parallel sweep has been measured yet: the current workspace has no RPC
-node listening on `127.0.0.1:8545`, and the 500 funded sender keys/admin key
-were not available. Do not interpret the historical sequential figures below
-as a knee or as a profiled capacity result.
+node listening on `127.0.0.1:8545`, and the available funded sender/admin keys
+belong to the disposable local test network. Do not interpret the historical
+sequential figures below as a knee or as a profiled capacity result.
 
 ## Three-Node Mesh and 1,000-Transaction Run
 
@@ -78,6 +81,23 @@ The focused P2P test `cargo test -p bleep-p2p test_three_nodes_exchange_authenti
 The full-node run exposed an application-level block propagation failure despite successful peer connectivity and gossip delivery (`attempted=2 delivered=2`). Receivers rejected JSON blocks because validation used the receiver's local validator key; the separate `GossipBridge` also sent a compact binary payload to an inbound handler that only decodes JSON. RPC transaction submissions were not broadcast to the other nodes: nodes 2 and 3 remained at height 0 and processed 0 transactions. This is therefore a local-node TPS measurement, not network-wide execution or consensus throughput.
 
 The run also exposed a Tokio runtime panic in the synchronous signature-availability cache adapter, which called `Handle::block_on` from a runtime worker. The adapter now uses `block_in_place`; `cargo test --release -p bleep-root --bin bleep cache_can_be_called_from_runtime_worker` passed. A post-fix two-node smoke run accepted 100/100 transactions in 10.278 seconds, produced blocks on node 1, and left node 2 healthy with one peer. Node 2 still rejected those blocks at validator-signature verification, so this fix does not change the network-wide limitation above.
+
+## PBFT Restart Catch-Up Validation
+
+On 2026-11-14, a private four-validator network was used to test a validator
+restarting two blocks behind. All four nodes first converged through height 3.
+One node was stopped while the other three continued through height 5, then
+restarted with its persisted height-3 state. It requested and applied heights 4
+and 5 using persisted PBFT commit certificates. All four nodes reported the
+same canonical block hash at height 5.
+
+The test also exposed a related liveness bug: replicas could finalize a PBFT
+proposal without applying it to their canonical chain if the proposing process
+stopped before its local commit path ran. Validated PBFT proposals are now
+buffered until quorum finality, then pass through the same canonical block and
+state validation path as block gossip. This recovery test was a zero-transaction
+debug-network test; it does not establish benchmark capacity or public-testnet
+readiness.
 
 ### TPS Measurement
 

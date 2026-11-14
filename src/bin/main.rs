@@ -124,6 +124,31 @@ use bleep_rpc::{rpc_routes_with_state, RpcState};
 const GOSSIP_RELAY_CACHE_CAPACITY: usize = 16_384;
 const MAX_PENDING_BLOCK_GOSSIP: usize = 16;
 const PENDING_BLOCK_GOSSIP_TTL: Duration = Duration::from_secs(60);
+const BLOCK_SYNC_REQUEST_TYPE: &str = "BLEEP_BLOCK_SYNC_REQUEST_V1";
+const BLOCK_SYNC_RESPONSE_TYPE: &str = "BLEEP_BLOCK_SYNC_RESPONSE_V1";
+const BLOCK_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const BLOCK_SYNC_SERVE_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlockSyncRequest {
+    height: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlockSyncResponse {
+    block: Block,
+    certificate: bleep_consensus::PbftFinalityCertificate,
+}
+
+fn request_canonical_block(p2p: &P2PNode, height: u64) -> Result<(), String> {
+    let payload = serde_json::to_vec(&BlockSyncRequest { height })
+        .map_err(|error| format!("Block sync request serialization failed: {error}"))?;
+    p2p.broadcast(
+        MessageType::Custom(BLOCK_SYNC_REQUEST_TYPE.to_string()),
+        payload,
+    );
+    Ok(())
+}
 
 struct PendingBlockGossip {
     received_at: Instant,
@@ -829,7 +854,9 @@ fn decode_genesis_admin_pubkey(encoded: &str) -> Result<Vec<u8>, Box<dyn Error>>
     if public_key.len() != 64 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} must decode to a 64-byte SPHINCS+ public key"),
+            format!(
+                "{GENESIS_ADMIN_PUBKEY_CONFIG_KEY} must decode to a 64-byte SPHINCS+ public key"
+            ),
         )
         .into());
     }
@@ -890,13 +917,19 @@ fn parse_genesis_prefunds(raw: &[u8], chain_id: &str) -> Result<GenesisPrefunds,
         let balance_micro: u128 = account.balance_micro.parse().map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Invalid genesis prefund balance for {}: {error}", account.address),
+                format!(
+                    "Invalid genesis prefund balance for {}: {error}",
+                    account.address
+                ),
             )
         })?;
         if balance_micro == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Genesis prefund balance for {} must be positive", account.address),
+                format!(
+                    "Genesis prefund balance for {} must be positive",
+                    account.address
+                ),
             )
             .into());
         }
@@ -1323,11 +1356,10 @@ mod epoch_config_tests {
         assert!(pin_genesis_prefund_hash(&mut state, None).is_err());
         verify_existing_chain_prefund(&state, prefunds.hash.as_deref().unwrap()).unwrap();
         let unpinned_state = StateManager::new();
-        assert!(verify_existing_chain_prefund(
-            &unpinned_state,
-            prefunds.hash.as_deref().unwrap()
-        )
-        .is_err());
+        assert!(
+            verify_existing_chain_prefund(&unpinned_state, prefunds.hash.as_deref().unwrap())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1857,9 +1889,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 });
             }
             for (address, balance_micro) in &genesis_prefunds.accounts {
-                state.mint(address, *balance_micro).map_err(|error| {
-                    format!("Genesis prefund for {address} failed: {error}")
-                })?;
+                state
+                    .mint(address, *balance_micro)
+                    .map_err(|error| format!("Genesis prefund for {address} failed: {error}"))?;
             }
         } else if existing_supply != expected_genesis_supply {
             error!(
@@ -2685,6 +2717,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let mut pending_blocks = HashMap::new();
         let mut ready_blocks = VecDeque::new();
         let mut pending_block_retry = tokio::time::interval(Duration::from_secs(1));
+        let mut sync_target_height = 0u64;
+        let mut last_sync_request: Option<Instant> = None;
+        let mut last_sync_response: HashMap<NodeId, Instant> = HashMap::new();
         loop {
             let inbound = if let Some(ready) = ready_blocks.pop_front() {
                 Some(ready)
@@ -2699,6 +2734,32 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             Instant::now(),
                             |height, hash| inbound_pbft_finality.is_finalized(height, hash),
                         ));
+                        let local_height = inbound_blockchain
+                            .read()
+                            .unwrap()
+                            .latest_block()
+                            .map(|block| block.index)
+                            .unwrap_or(0);
+                        if local_height >= sync_target_height {
+                            sync_target_height = 0;
+                            last_sync_request = None;
+                        } else if last_sync_request
+                            .is_none_or(|requested| requested.elapsed() >= BLOCK_SYNC_RETRY_INTERVAL)
+                        {
+                            let missing_height = local_height.saturating_add(1);
+                            if let Err(error) =
+                                request_canonical_block(&inbound_p2p_node, missing_height)
+                            {
+                                warn!("[InboundBlockHandler] {error}");
+                            } else {
+                                last_sync_request = Some(Instant::now());
+                                info!(
+                                    missing_height,
+                                    target_height = sync_target_height,
+                                    "Requested missing finalized block"
+                                );
+                            }
+                        }
                         continue;
                     }
                 }
@@ -2735,6 +2796,184 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                     if msg.message_type == MessageType::SigAvailability {
                         sal_bridge.handle_inbound_message(msg);
+                        continue;
+                    }
+
+                    if matches!(
+                        &msg.message_type,
+                        MessageType::Custom(name) if name == BLOCK_SYNC_REQUEST_TYPE
+                    ) {
+                        let request: BlockSyncRequest = match serde_json::from_slice(&msg.payload) {
+                            Ok(request) => request,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Invalid block sync request: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        };
+                        let now = Instant::now();
+                        last_sync_response.retain(|_, served| {
+                            now.duration_since(*served) < BLOCK_SYNC_SERVE_INTERVAL * 4
+                        });
+                        if last_sync_response
+                            .get(&peer_id)
+                            .is_some_and(|served| served.elapsed() < BLOCK_SYNC_SERVE_INTERVAL)
+                        {
+                            continue;
+                        }
+                        last_sync_response.insert(peer_id.clone(), now);
+                        let block = inbound_blockchain
+                            .read()
+                            .unwrap()
+                            .get_block_by_index(request.height);
+                        let Some(block) = block else {
+                            continue;
+                        };
+                        let certificate_bytes = match inbound_state
+                            .lock()
+                            .canonical_block_finality_certificate(request.height)
+                        {
+                            Ok(Some(bytes)) => bytes,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Failed loading certificate for block {}: {}",
+                                    request.height, error
+                                );
+                                continue;
+                            }
+                        };
+                        let certificate = match serde_json::from_slice(&certificate_bytes) {
+                            Ok(certificate) => certificate,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Persisted certificate for block {} is invalid: {}",
+                                    request.height, error
+                                );
+                                continue;
+                            }
+                        };
+                        let response = BlockSyncResponse { block, certificate };
+                        let payload = match serde_json::to_vec(&response) {
+                            Ok(payload) => payload,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Block sync response serialization failed: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        };
+                        if let Err(error) = inbound_p2p_node
+                            .send_to_peer(
+                                &peer_id,
+                                MessageType::Custom(BLOCK_SYNC_RESPONSE_TYPE.to_string()),
+                                payload,
+                            )
+                            .await
+                        {
+                            warn!(
+                                "[InboundBlockHandler] Failed sending block sync response to {peer_id}: {error}"
+                            );
+                        }
+                        continue;
+                    }
+
+                    if matches!(
+                        &msg.message_type,
+                        MessageType::Custom(name) if name == BLOCK_SYNC_RESPONSE_TYPE
+                    ) {
+                        let response: BlockSyncResponse = match serde_json::from_slice(&msg.payload)
+                        {
+                            Ok(response) => response,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Invalid block sync response: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        };
+                        if response.block.chain_id != inbound_chain_id
+                            || response
+                                .block
+                                .transactions
+                                .iter()
+                                .any(|tx| tx.chain_id != inbound_chain_id)
+                        {
+                            warn!(
+                                "[InboundBlockHandler] Block sync response contains a different chain ID"
+                            );
+                            continue;
+                        }
+                        let tip_height = inbound_blockchain
+                            .read()
+                            .unwrap()
+                            .latest_block()
+                            .map(|block| block.index)
+                            .unwrap_or(0);
+                        if response.block.index <= tip_height {
+                            continue;
+                        }
+                        if response.block.index != tip_height.saturating_add(1) {
+                            continue;
+                        }
+                        let committee_keys = inbound_validators
+                            .lock()
+                            .get_active_validators()
+                            .into_iter()
+                            .filter(|validator| validator.can_participate())
+                            .map(|validator| {
+                                hex::decode(&validator.signing_key_id)
+                                    .map(|key| (validator.id.clone(), key))
+                            })
+                            .collect::<Result<Vec<_>, _>>();
+                        let committee_keys = match committee_keys {
+                            Ok(keys) => keys,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Invalid committee during block sync: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        };
+                        if !inbound_pbft_finality.matches_committee(&committee_keys) {
+                            if let Err(error) =
+                                inbound_pbft_finality.sync_committee(committee_keys.clone())
+                            {
+                                warn!(
+                                    "[InboundBlockHandler] PBFT committee sync failed during block sync: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        }
+                        if let Err(error) = inbound_pbft_finality.accept_finality_certificate(
+                            &response.block,
+                            response.certificate,
+                            &committee_keys,
+                        ) {
+                            warn!(
+                                "[InboundBlockHandler] Block sync certificate rejected at height {}: {}",
+                                response.block.index, error
+                            );
+                            continue;
+                        }
+                        msg.message_type = MessageType::Block;
+                        msg.payload = match serde_json::to_vec(&response.block) {
+                            Ok(payload) => payload,
+                            Err(error) => {
+                                warn!(
+                                    "[InboundBlockHandler] Synced block serialization failed: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        };
+                        ready_blocks.push_back((peer_id, msg, None));
                         continue;
                     }
 
@@ -2834,6 +3073,38 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 );
                                 continue;
                             };
+                            let local_height = inbound_blockchain
+                                .read()
+                                .unwrap()
+                                .latest_block()
+                                .map(|parent| parent.index)
+                                .unwrap_or(0);
+                            if block.index > local_height.saturating_add(1) {
+                                let signed_by_active_proposer =
+                                    registered_proposer_signing_key(block, &active_validators)
+                                        .and_then(|key| {
+                                            block.verify_signature(&key).map_err(|error| {
+                                                format!(
+                                                    "Future proposal signature verification failed: {error}"
+                                                )
+                                            })
+                                        });
+                                if block.chain_id == inbound_chain_id
+                                    && block
+                                        .transactions
+                                        .iter()
+                                        .all(|tx| tx.chain_id == inbound_chain_id)
+                                    && matches!(signed_by_active_proposer, Ok(true))
+                                {
+                                    sync_target_height = sync_target_height.max(block.index);
+                                } else {
+                                    warn!(
+                                        "[InboundBlockHandler] Ignoring unauthenticated future PBFT proposal {}",
+                                        block.index
+                                    );
+                                }
+                                continue;
+                            }
                             let Some(parent) = inbound_blockchain.read().unwrap().latest_block()
                             else {
                                 continue;
@@ -2895,17 +3166,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 );
                                 continue;
                             }
-                            let proposer_signing_key =
-                                match registered_proposer_signing_key(block, &active_validators) {
-                                    Ok(key) => key,
-                                    Err(error) => {
-                                        warn!(
+                            let proposer_signing_key = match registered_proposer_signing_key(
+                                block,
+                                &active_validators,
+                            ) {
+                                Ok(key) => key,
+                                Err(error) => {
+                                    warn!(
                                             "[InboundBlockHandler] PBFT proposal {} has no registered proposer key: {}",
                                             block.index, error
                                         );
-                                        continue;
-                                    }
-                                };
+                                    continue;
+                                }
+                            };
                             let proposal_valid = {
                                 let chain = inbound_blockchain.read().unwrap();
                                 let Some(tip) = chain.latest_block() else {
@@ -2946,6 +3219,33 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 );
                                 continue;
                             }
+
+                            let pending_payload = match serde_json::to_vec(block) {
+                                Ok(payload) => payload,
+                                Err(error) => {
+                                    warn!(
+                                        "[InboundBlockHandler] PBFT proposal {} block serialization failed: {}",
+                                        block.index, error
+                                    );
+                                    continue;
+                                }
+                            };
+                            let mut pending_message = msg.clone();
+                            pending_message.message_type = MessageType::Block;
+                            pending_message.payload = pending_payload;
+                            if !buffer_pending_block_gossip(
+                                &mut pending_blocks,
+                                peer_id.clone(),
+                                pending_message,
+                                block,
+                            ) {
+                                warn!(
+                                    height = block.index,
+                                    pending = pending_blocks.len(),
+                                    "Pending PBFT proposal buffer is full; rejecting proposal"
+                                );
+                                continue;
+                            }
                         }
 
                         if let Err(e) = inbound_pbft_finality.receive_message(message) {
@@ -2981,19 +3281,54 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         }
                     };
 
-                    if !inbound_pbft_finality.is_finalized(block.index, &block.compute_hash()) {
-                        if block.chain_id != inbound_chain_id
-                            || block
-                                .transactions
-                                .iter()
-                                .any(|tx| tx.chain_id != inbound_chain_id)
+                    if block.chain_id != inbound_chain_id
+                        || block
+                            .transactions
+                            .iter()
+                            .any(|tx| tx.chain_id != inbound_chain_id)
+                    {
+                        warn!(
+                            "[InboundBlockHandler] Rejecting block {} for a different chain",
+                            block.index
+                        );
+                        continue;
+                    }
+                    let local_height = inbound_blockchain
+                        .read()
+                        .unwrap()
+                        .latest_block()
+                        .map(|tip| tip.index)
+                        .unwrap_or(0);
+                    if block.index <= local_height {
+                        continue;
+                    }
+                    if block.index > local_height.saturating_add(1) {
+                        let active_validators = inbound_validators
+                            .lock()
+                            .get_active_validators()
+                            .into_iter()
+                            .filter(|validator| validator.can_participate())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if block
+                            .transactions
+                            .iter()
+                            .all(|tx| tx.chain_id == inbound_chain_id)
+                            && registered_proposer_signing_key(&block, &active_validators)
+                                .and_then(|key| block.verify_signature(&key))
+                                .is_ok_and(|valid| valid)
                         {
+                            sync_target_height = sync_target_height.max(block.index);
+                        } else {
                             warn!(
-                                "[InboundBlockHandler] Rejecting unfinalized block {} for a different chain",
+                                "[InboundBlockHandler] Ignoring unauthenticated future block {}",
                                 block.index
                             );
-                            continue;
                         }
+                        continue;
+                    }
+
+                    if !inbound_pbft_finality.is_finalized(block.index, &block.compute_hash()) {
                         let _ = collect_ready_pending_blocks(
                             &mut pending_blocks,
                             Instant::now(),
@@ -3029,18 +3364,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             Ok(key) => key,
                             Err(error) => {
                                 warn!(
-                                    "[InboundBlockHandler] Block {} has no registered proposer key: {}",
-                                    block.index, error
-                                );
+                                "[InboundBlockHandler] Block {} has no registered proposer key: {}",
+                                block.index, error
+                            );
                                 continue;
                             }
                         };
 
-                    let parent = {
-                        let chain = inbound_blockchain.read().unwrap();
-                        chain.latest_block()
-                    };
-                    let Some(parent) = parent else {
+                    let Some(parent) = inbound_blockchain.read().unwrap().latest_block() else {
                         continue;
                     };
                     if let Err(error) = verify_pos_vrf_block(&block, &parent, &active_validators) {
@@ -3154,7 +3485,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     continue;
                                 }
                             };
-                            match state.apply_canonical_block(
+                            let Some(finality_certificate) = inbound_pbft_finality
+                                .finality_certificate(block.index, &block.compute_hash())
+                            else {
+                                warn!(
+                                    "[InboundBlockHandler] Block {} reached commit without a PBFT certificate",
+                                    block.index
+                                );
+                                continue;
+                            };
+                            let finality_certificate = match serde_json::to_vec(
+                                &finality_certificate,
+                            ) {
+                                Ok(certificate) => certificate,
+                                Err(error) => {
+                                    warn!(
+                                            "[InboundBlockHandler] Block {} PBFT certificate serialization failed: {}",
+                                            block.index, error
+                                        );
+                                    continue;
+                                }
+                            };
+                            match state.apply_canonical_block_with_finality(
                                 &block,
                                 bleep_state::state_manager::CanonicalBlockContext {
                                     index: block.index,
@@ -3165,6 +3517,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                     expected_post_state_root: &block.shard_state_root,
                                     transfers: &transfers,
                                 },
+                                &finality_certificate,
                             ) {
                                 Ok(()) => chain.add_committed_block_with_validator_set(
                                     block.clone(),

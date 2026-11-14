@@ -199,6 +199,38 @@ export BLEEP_GENESIS_ADMIN_PUBKEY="$(cat "$HOME/.bleep/genesis-admin/keys/sphinc
 The raw `admin.secret.bin` is the offline key used to sign the challenge; never
 copy it to a node or commit it.
 
+For a private local validator cluster, create a registry snapshot from at least
+three validator key directories after running the key generator for each one:
+
+```bash
+cargo run --release --bin bleep-validator-keygen -- \
+  local-registry "$HOME/.bleep/localnet/registry.json" \
+  "$HOME/.bleep/localnet/validator-1" \
+  "$HOME/.bleep/localnet/validator-2" \
+  "$HOME/.bleep/localnet/validator-3"
+```
+
+The command verifies each SPHINCS+ keypair and prints the snapshot path and
+SHA-256 pin for `BLEEP_VALIDATOR_REGISTRY_SNAPSHOT` and
+`BLEEP_VALIDATOR_REGISTRY_SHA256`. It creates an equal-stake active committee
+for private testing only; it is not a validator-admission or public-genesis
+workflow.
+
+### Validator catch-up after restart
+
+When a peer advertises a future block, a validator requests the missing heights
+in order. A recovered block is accepted only with a PBFT commit certificate
+whose signatures meet quorum for the active validator registry; it then passes
+the normal proposer, block, and state-transition checks before being committed.
+The block and certificate are persisted atomically so the node can serve that
+proof to another recovering peer. At least one connected peer must retain the
+block and its certificate. Blocks committed by older versions without persisted
+certificates cannot be used as authenticated catch-up sources; upgrade all
+validators together. A local four-validator test recovered a node from two
+blocks behind and confirmed the same canonical hash across all four nodes.
+Repeat restart, peer-loss, and catch-up tests under the target network
+configuration before relying on recovery in production.
+
 ### Funding TPS benchmark senders
 
 The direct `/faucet/{address}` endpoint is disabled by default, is limited by
@@ -241,7 +273,10 @@ configured replay window. Do not widen replay windows on a public/shared
 testnet just to accommodate a slow benchmark machine.
 Transaction signing is parallelized across available CPU cores, and HTTP
 submission concurrency is capped at 512; dispatch lag is reported so client
-backpressure is distinguishable from validator throughput.
+backpressure is distinguishable from validator throughput. Reported observed
+TPS uses the full interval from load dispatch through transaction settlement,
+not only the offered-load schedule, so long inclusion delays lower the measured
+throughput.
 
 The admin secret file must contain the raw 128-byte SPHINCS+ secret key (not
 hex-encoded text); restrict it to the benchmark operator. The benchmark amount
