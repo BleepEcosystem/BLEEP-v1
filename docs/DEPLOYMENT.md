@@ -162,26 +162,127 @@ environment:
 
 To enable system administration, add the genesis administrator's 64-byte
 SPHINCS+-SHAKE-256f-simple public key as a 128-character hex string in the
-genesis config file:
+root of the selected genesis config (for example `config/genesis.json`), or
+set the same value in `BLEEP_GENESIS_ADMIN_PUBKEY`:
 
 ```json
 {
+  "chain_id": "BLEEP-PreTestnet-001",
+  "consensus": { "blocks_per_epoch": 100 },
   "BLEEP_GENESIS_ADMIN_PUBKEY": "<128-character-public-key-hex>"
 }
 ```
 
-The node reads this value only from the file selected by `BLEEP_GENESIS_CONFIG`
-(or the embedded network config); it never accepts an administrator key from an
-RPC request or directly from an environment variable. Keep the corresponding
-private key offline. To authenticate, request a one-time challenge from
+Select a custom file with `BLEEP_GENESIS_CONFIG=config/genesis.json`. If both
+the file and environment variable specify the key, they must match. The key is
+validated as 64 bytes of hex and pinned in persistent state; changing it (or
+removing it) on restart is rejected as a governance-level change. Set it before
+the first node startup. Keep the corresponding private key offline. To
+authenticate, request a one-time challenge from
 `POST /rpc/auth/admin/challenge`, sign the returned `signing_payload_hex` bytes
 with the genesis private key, then submit the public key, challenge, and
 signature to the existing `POST /rpc/auth/login` endpoint. The login endpoint
 issues the normal session token after verifying the signature. A node started
 without this config value has no system administrator and protected
-administrative operations remain unavailable. Set this value before the first
-node startup: the selected key (or the absence of one) is pinned in persistent
-state, and changing it on restart is rejected as a governance-level change.
+administrative operations remain unavailable.
+
+For a new local/test administrator keypair, the repository key generator writes
+the public key and hex-encoded secret under the supplied directory's `keys/`:
+
+```bash
+cargo run --release --bin bleep-validator-keygen -- "$HOME/.bleep/genesis-admin"
+export BLEEP_GENESIS_ADMIN_PUBKEY="$(cat "$HOME/.bleep/genesis-admin/keys/sphincs.public")"
+(umask 077; xxd -r -p "$HOME/.bleep/genesis-admin/keys/sphincs.secret" \
+  > "$HOME/.bleep/genesis-admin/admin.secret.bin")
+```
+
+The raw `admin.secret.bin` is the offline key used to sign the challenge; never
+copy it to a node or commit it.
+
+For a private local validator cluster, create a registry snapshot from at least
+three validator key directories after running the key generator for each one:
+
+```bash
+cargo run --release --bin bleep-validator-keygen -- \
+  local-registry "$HOME/.bleep/localnet/registry.json" \
+  "$HOME/.bleep/localnet/validator-1" \
+  "$HOME/.bleep/localnet/validator-2" \
+  "$HOME/.bleep/localnet/validator-3"
+```
+
+The command verifies each SPHINCS+ keypair and prints the snapshot path and
+SHA-256 pin for `BLEEP_VALIDATOR_REGISTRY_SNAPSHOT` and
+`BLEEP_VALIDATOR_REGISTRY_SHA256`. It creates an equal-stake active committee
+for private testing only; it is not a validator-admission or public-genesis
+workflow.
+
+### Validator catch-up after restart
+
+When a peer advertises a future block, a validator requests the missing heights
+in order. A recovered block is accepted only with a PBFT commit certificate
+whose signatures meet quorum for the active validator registry; it then passes
+the normal proposer, block, and state-transition checks before being committed.
+The block and certificate are persisted atomically so the node can serve that
+proof to another recovering peer. At least one connected peer must retain the
+block and its certificate. Blocks committed by older versions without persisted
+certificates cannot be used as authenticated catch-up sources; upgrade all
+validators together. A local four-validator test recovered a node from two
+blocks behind and confirmed the same canonical hash across all four nodes.
+Repeat restart, peer-loss, and catch-up tests under the target network
+configuration before relying on recovery in production.
+
+### Funding TPS benchmark senders
+
+The direct `/faucet/{address}` endpoint is disabled by default, is limited by
+address and client IP, and refuses direct credits when attached to a live
+consensus chain. Do not use it to fund a benchmark workload. Instead, create
+test-only genesis allocations and sender keys:
+
+```bash
+scripts/prepare-tps-senders.sh 500 "$HOME/.bleep/tps"
+```
+
+This writes `senders.json` (private signing keys, mode `0600`) and `prefund.json`
+(public addresses and allocations, also mode `0600`). The default allocation is
+10 BLEEP per sender, denominated in microBLEEP. Set
+`BLEEP_TPS_FUND_MICRO` or pass a third argument to change it. Configure every
+node in the private test network with the exact same `BLEEP_GENESIS_PREFUND_FILE`
+and chain ID before its first startup. Prefunds are applied only at genesis,
+only in dev/test/testnet modes, limited by the protocol supply cap, and pinned
+to that state directory; changing the file requires a new genesis state. Never
+use a TPS prefund file on mainnet or an established network.
+
+For a 10,000-transaction offered-load run with 500 funded senders:
+
+```bash
+BLEEP_TPS_SENDERS="$HOME/.bleep/tps/senders.json" \
+BLEEP_TPS_SENDER_COUNT=500 \
+BLEEP_TPS_SWEEP=2000 \
+BLEEP_TPS_DURATION_SECS=5 \
+BLEEP_TPS_REPLAY_WINDOW_SECS=600 \
+BLEEP_ADMIN_PUBLIC_KEY_HEX="$BLEEP_GENESIS_ADMIN_PUBKEY" \
+BLEEP_ADMIN_SECRET_KEY_FILE=/secure/path/admin.secret.bin \
+./test_tps.sh
+```
+
+The 600-second replay window is for an isolated benchmark network only. Set
+`BLEEP_TX_REPLAY_WINDOW_SECS=600` on every benchmark validator before startup,
+and set `BLEEP_TPS_REPLAY_WINDOW_SECS` to the same value for the load generator;
+the load generator rejects a run if pre-signing plus the schedule exceeds its
+configured replay window. Do not widen replay windows on a public/shared
+testnet just to accommodate a slow benchmark machine.
+Transaction signing is parallelized across available CPU cores, and HTTP
+submission concurrency is capped at 512; dispatch lag is reported so client
+backpressure is distinguishable from validator throughput. Reported observed
+TPS uses the full interval from load dispatch through transaction settlement,
+not only the offered-load schedule, so long inclusion delays lower the measured
+throughput.
+
+The admin secret file must contain the raw 128-byte SPHINCS+ secret key (not
+hex-encoded text); restrict it to the benchmark operator. The benchmark amount
+defaults to one microBLEEP per transaction, plus the required fee. A full chain
+setup must also provide the node's normal trusted validator-registry snapshot
+and other required startup configuration.
 
 ---
 

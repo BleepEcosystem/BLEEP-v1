@@ -838,6 +838,13 @@ impl BlockProducer {
         let block_hash = block.compute_hash();
         finality.propose(&block)?;
         finality.wait_for_finality(next_height, &block_hash).await?;
+        let finality_certificate = finality
+            .finality_certificate(next_height, &block_hash)
+            .ok_or_else(|| {
+                format!("PBFT finalized block {next_height} without retaining its certificate")
+            })?;
+        let finality_certificate = serde_json::to_vec(&finality_certificate)
+            .map_err(|error| format!("PBFT certificate serialization failed: {error}"))?;
 
         // ── 10: Commit to chain only after the PBFT commit quorum ───────────────
         let accepted = {
@@ -857,13 +864,14 @@ impl BlockProducer {
             let accepted =
                 chain.add_committed_block_with_validator_set(block.clone(), &epoch_validator_keys);
             if accepted {
-                if let Err(e) = self.state.lock().persist_canonical_block(
+                if let Err(e) = self.state.lock().persist_canonical_block_with_finality(
                     &block,
                     block.index,
                     &block.compute_hash(),
                     &block.previous_hash,
                     &self.config.chain_id,
                     &Block::genesis_for_chain(self.config.chain_id.clone()).compute_hash(),
+                    &finality_certificate,
                 ) {
                     chain.rollback();
                     let cleanup = finality.abandon_proposal(next_height);

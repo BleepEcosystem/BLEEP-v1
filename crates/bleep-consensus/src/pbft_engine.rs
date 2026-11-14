@@ -19,14 +19,16 @@ use parking_lot::Mutex;
 use pqcrypto_sphincsplus::sphincsshake256fsimple;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 const PBFT_VOTE_DOMAIN: &[u8] = b"BLEEP:PBFT:VOTE:V1\0";
+const PBFT_COMMITTEE_DOMAIN: &[u8] = b"BLEEP:PBFT:COMMITTEE:V1\0";
 pub const PBFT_MESSAGE_TYPE: &str = "BLEEP_PBFT_V1";
-pub const PBFT_VIEW_TIMEOUT: Duration = Duration::from_secs(10);
+pub const PBFT_VIEW_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Encode the signed payload for one prepare or commit vote.
 pub fn pbft_vote_message(
@@ -80,6 +82,128 @@ pub enum PbftMessage {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PbftCommitSignature {
+    pub validator_id: String,
+    pub signature: Vec<u8>,
+}
+
+/// Authenticated commit quorum evidence for a canonical block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PbftFinalityCertificate {
+    pub block_height: u64,
+    pub block_hash: String,
+    pub committee_hash: [u8; 32],
+    pub commit_signatures: Vec<PbftCommitSignature>,
+}
+
+impl PbftFinalityCertificate {
+    /// Verify the certificate against the committee active at the block's parent.
+    pub fn verify(
+        &self,
+        block: &Block,
+        validator_keys: &[(String, Vec<u8>)],
+    ) -> Result<(), String> {
+        if self.block_height != block.index || self.block_hash != block.compute_hash() {
+            return Err("PBFT certificate does not match the block".into());
+        }
+        let committee_hash = pbft_committee_hash(validator_keys)?;
+        if self.committee_hash != committee_hash {
+            return Err("PBFT certificate committee does not match the active registry".into());
+        }
+        let quorum_size = validator_keys.len().saturating_mul(2) / 3 + 1;
+        if self.commit_signatures.len() < quorum_size {
+            return Err(format!(
+                "PBFT certificate has {} commit signatures; quorum requires {quorum_size}",
+                self.commit_signatures.len()
+            ));
+        }
+
+        let mut seen = HashSet::with_capacity(self.commit_signatures.len());
+        for vote in &self.commit_signatures {
+            if !seen.insert(vote.validator_id.as_str()) {
+                return Err(format!(
+                    "PBFT certificate contains duplicate signer {}",
+                    vote.validator_id
+                ));
+            }
+            let public_key = validator_keys
+                .iter()
+                .find(|(id, _)| id == &vote.validator_id)
+                .map(|(_, key)| key)
+                .ok_or_else(|| {
+                    format!(
+                        "PBFT certificate signer {} is not in the active committee",
+                        vote.validator_id
+                    )
+                })?;
+            verify_pbft_signature(
+                public_key,
+                &pbft_vote_message(
+                    PbftPhase::Commit,
+                    self.block_height,
+                    &self.block_hash,
+                    &vote.validator_id,
+                ),
+                &vote.signature,
+                &vote.validator_id,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn pbft_committee_hash(validator_keys: &[(String, Vec<u8>)]) -> Result<[u8; 32], String> {
+    let mut keys = validator_keys.iter().collect::<Vec<_>>();
+    keys.sort_by(|left, right| left.0.cmp(&right.0));
+    if keys.is_empty() {
+        return Err("PBFT committee cannot be empty".into());
+    }
+    let mut seen = HashSet::with_capacity(keys.len());
+    let mut hasher = Sha256::new();
+    hasher.update(PBFT_COMMITTEE_DOMAIN);
+    for (id, key) in keys {
+        if id.is_empty() || key.len() != SPHINCS_PK_LEN || !seen.insert(id.as_str()) {
+            return Err("Invalid or duplicate validator in PBFT committee".into());
+        }
+        hasher.update((id.len() as u64).to_le_bytes());
+        hasher.update(id.as_bytes());
+        hasher.update((key.len() as u64).to_le_bytes());
+        hasher.update(key);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn verify_pbft_signature(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+    validator_id: &str,
+) -> Result<(), String> {
+    if public_key.len() != SPHINCS_PK_LEN || signature.len() != SPHINCS_SIG_LEN {
+        return Err(format!(
+            "Invalid PBFT signature or public key length for {validator_id}"
+        ));
+    }
+    let public_key = sphincsshake256fsimple::PublicKey::from_bytes(public_key)
+        .map_err(|error| format!("Invalid PBFT public key for {validator_id}: {error:?}"))?;
+    let signature = sphincsshake256fsimple::DetachedSignature::from_bytes(signature)
+        .map_err(|error| format!("Invalid PBFT signature for {validator_id}: {error:?}"))?;
+    sphincsshake256fsimple::verify_detached_signature(&signature, message, &public_key)
+        .map_err(|_| format!("PBFT signature verification failed for {validator_id}"))
+}
+
+struct PendingPbftVote {
+    phase: PbftPhase,
+    validator_id: String,
+    signature: Vec<u8>,
+}
+
+struct PendingPbftVotes {
+    received_at: Instant,
+    votes: Vec<PendingPbftVote>,
+}
+
 /// Live transport and quorum state for the running node.
 ///
 /// Proposal blocks are only candidates. The producer may commit one after this
@@ -92,6 +216,7 @@ pub struct LivePbftFinality {
     engine: Arc<Mutex<PbftConsensusEngine>>,
     local_prepare_sent: Arc<Mutex<HashSet<u64>>>,
     local_commit_sent: Arc<Mutex<HashSet<u64>>>,
+    pending_votes: Arc<Mutex<HashMap<(u64, String), PendingPbftVotes>>>,
     finalized: Notify,
 }
 
@@ -137,6 +262,7 @@ impl LivePbftFinality {
             engine: Arc::new(Mutex::new(engine)),
             local_prepare_sent: Arc::new(Mutex::new(HashSet::new())),
             local_commit_sent: Arc::new(Mutex::new(HashSet::new())),
+            pending_votes: Arc::new(Mutex::new(HashMap::new())),
             finalized: Notify::new(),
         })
     }
@@ -176,6 +302,7 @@ impl LivePbftFinality {
         drop(engine);
         self.local_prepare_sent.lock().clear();
         self.local_commit_sent.lock().clear();
+        self.pending_votes.lock().clear();
         if newly_finalized {
             self.finalized.notify_waiters();
         }
@@ -199,7 +326,8 @@ impl LivePbftFinality {
             .broadcast(&PbftMessage::Proposal {
                 block: block.clone(),
             })
-            .and_then(|()| self.send_local_vote(PbftPhase::Prepare, block.index));
+            .and_then(|()| self.send_local_vote(PbftPhase::Prepare, block.index))
+            .and_then(|()| self.apply_pending_votes(block.index, &block.compute_hash()));
         if let Err(error) = result {
             return self.abandon_after_error(block.index, error);
         }
@@ -211,6 +339,9 @@ impl LivePbftFinality {
         let is_new = self.start_proposal(block)?;
         if is_new {
             if let Err(error) = self.send_local_vote(PbftPhase::Prepare, block.index) {
+                return self.abandon_after_error(block.index, error);
+            }
+            if let Err(error) = self.apply_pending_votes(block.index, &block.compute_hash()) {
                 return self.abandon_after_error(block.index, error);
             }
         }
@@ -233,9 +364,25 @@ impl LivePbftFinality {
         signature: &[u8],
     ) -> Result<(), String> {
         self.expire_stalled_proposal(block_height)?;
+        if phase == PbftPhase::PrePrepare {
+            return Err("PBFT proposal phase cannot be submitted as a vote".into());
+        }
         {
             let mut engine = self.engine.lock();
-            if engine.block_hashes.get(&block_height).map(String::as_str) != Some(block_hash) {
+            if !engine.known_validators.contains(validator_id) {
+                return Err(format!(
+                    "PBFT vote from unregistered validator {validator_id}"
+                ));
+            }
+            let Some(known_hash) = engine.block_hashes.get(&block_height) else {
+                engine
+                    .verify_vote_for_hash(phase, block_height, block_hash, validator_id, signature)
+                    .map_err(|e| e.to_string())?;
+                drop(engine);
+                self.defer_vote(phase, block_height, block_hash, validator_id, signature)?;
+                return Ok(());
+            };
+            if known_hash != block_hash {
                 return Err(format!(
                     "PBFT vote from {validator_id} refers to an unknown block at height {block_height}"
                 ));
@@ -244,22 +391,36 @@ impl LivePbftFinality {
                 PbftPhase::Prepare => engine
                     .process_prepare(block_height, validator_id, signature)
                     .map_err(|e| e.to_string())?,
-                PbftPhase::Commit => engine
-                    .process_commit(block_height, validator_id, signature)
-                    .map_err(|e| e.to_string())?,
-                PbftPhase::PrePrepare => {
-                    return Err("PBFT proposal phase cannot be submitted as a vote".into())
+                PbftPhase::Commit => {
+                    if engine.block_state(block_height) == Some(PbftBlockState::Proposed) {
+                        engine
+                            .verify_vote(phase, block_height, validator_id, signature)
+                            .map_err(|e| e.to_string())?;
+                        drop(engine);
+                        self.defer_vote(phase, block_height, block_hash, validator_id, signature)?;
+                        return Ok(());
+                    }
+                    engine
+                        .process_commit(block_height, validator_id, signature)
+                        .map_err(|e| e.to_string())?
                 }
+                PbftPhase::PrePrepare => unreachable!("proposal phase was rejected above"),
             }
             if engine.is_finalized(block_height) {
                 self.finalized.notify_one();
                 self.local_prepare_sent.lock().remove(&block_height);
                 self.local_commit_sent.lock().remove(&block_height);
+                self.pending_votes
+                    .lock()
+                    .retain(|(height, _), _| *height != block_height);
             }
         }
 
         if phase == PbftPhase::Prepare {
             self.start_local_commit_if_prepared(block_height)?;
+            if self.engine.lock().block_state(block_height) == Some(PbftBlockState::Prepared) {
+                self.apply_pending_votes(block_height, block_hash)?;
+            }
         }
         Ok(())
     }
@@ -281,6 +442,71 @@ impl LivePbftFinality {
         let engine = self.engine.lock();
         engine.is_finalized(height)
             && engine.block_hashes.get(&height).map(String::as_str) == Some(block_hash)
+    }
+
+    pub fn finality_certificate(
+        &self,
+        height: u64,
+        block_hash: &str,
+    ) -> Option<PbftFinalityCertificate> {
+        let engine = self.engine.lock();
+        if !engine.is_finalized(height)
+            || engine.block_hashes.get(&height).map(String::as_str) != Some(block_hash)
+        {
+            return None;
+        }
+        engine.finality_certificates.get(&height).cloned()
+    }
+
+    /// Import a commit certificate for a block missed while this node was offline.
+    pub fn accept_finality_certificate(
+        &self,
+        block: &Block,
+        certificate: PbftFinalityCertificate,
+        validator_keys: &[(String, Vec<u8>)],
+    ) -> Result<(), String> {
+        certificate.verify(block, validator_keys)?;
+        let mut engine = self.engine.lock();
+        if engine.total_validators != validator_keys.len()
+            || validator_keys.iter().any(|(id, key)| {
+                engine
+                    .validator_pubkeys
+                    .get(id)
+                    .is_none_or(|known| known != key)
+            })
+        {
+            return Err(
+                "PBFT certificate committee differs from the live consensus committee".into(),
+            );
+        }
+        if engine
+            .block_hashes
+            .get(&block.index)
+            .is_some_and(|known| known != &certificate.block_hash)
+        {
+            return Err(format!(
+                "Conflicting PBFT certificate at height {}",
+                block.index
+            ));
+        }
+        engine
+            .block_hashes
+            .insert(block.index, certificate.block_hash.clone());
+        engine
+            .finalized_blocks
+            .insert(block.index, PbftBlockState::Committed);
+        engine.proposal_started_at.remove(&block.index);
+        engine
+            .finality_certificates
+            .insert(block.index, certificate);
+        drop(engine);
+        self.local_prepare_sent.lock().remove(&block.index);
+        self.local_commit_sent.lock().remove(&block.index);
+        self.pending_votes
+            .lock()
+            .retain(|(height, _), _| *height != block.index);
+        self.finalized.notify_one();
+        Ok(())
     }
 
     /// Wait until a verified commit quorum finalizes this exact candidate.
@@ -331,6 +557,76 @@ impl LivePbftFinality {
         clear_proposal_state(&mut engine, height);
         self.local_prepare_sent.lock().remove(&height);
         self.local_commit_sent.lock().remove(&height);
+        self.pending_votes
+            .lock()
+            .retain(|(pending_height, _), _| *pending_height != height);
+        Ok(())
+    }
+
+    fn defer_vote(
+        &self,
+        phase: PbftPhase,
+        height: u64,
+        block_hash: &str,
+        validator_id: &str,
+        signature: &[u8],
+    ) -> Result<(), String> {
+        const MAX_PENDING_CANDIDATES: usize = 64;
+
+        let max_votes = self.validator_count().saturating_mul(2);
+        let mut pending = self.pending_votes.lock();
+        pending.retain(|_, votes| votes.received_at.elapsed() < PBFT_VIEW_TIMEOUT);
+        let key = (height, block_hash.to_string());
+        if !pending.contains_key(&key) && pending.len() >= MAX_PENDING_CANDIDATES {
+            return Err("PBFT pending-vote buffer is full".into());
+        }
+
+        let bucket = pending.entry(key).or_insert_with(|| PendingPbftVotes {
+            received_at: Instant::now(),
+            votes: Vec::new(),
+        });
+        if bucket
+            .votes
+            .iter()
+            .any(|vote| vote.phase == phase && vote.validator_id == validator_id)
+        {
+            return Ok(());
+        }
+        if bucket.votes.len() >= max_votes {
+            return Err("PBFT pending-vote bucket is full".into());
+        }
+        bucket.votes.push(PendingPbftVote {
+            phase,
+            validator_id: validator_id.to_string(),
+            signature: signature.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn apply_pending_votes(&self, height: u64, block_hash: &str) -> Result<(), String> {
+        let pending = self
+            .pending_votes
+            .lock()
+            .remove(&(height, block_hash.to_string()));
+        if let Some(mut pending) = pending {
+            if pending.received_at.elapsed() >= PBFT_VIEW_TIMEOUT {
+                return Ok(());
+            }
+            pending.votes.sort_by_key(|vote| match vote.phase {
+                PbftPhase::Prepare => 0,
+                PbftPhase::Commit => 1,
+                PbftPhase::PrePrepare => 2,
+            });
+            for vote in pending.votes {
+                self.receive_vote(
+                    vote.phase,
+                    height,
+                    block_hash,
+                    &vote.validator_id,
+                    &vote.signature,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -341,6 +637,7 @@ impl LivePbftFinality {
         let engine = Arc::clone(&self.engine);
         let local_prepare_sent = Arc::clone(&self.local_prepare_sent);
         let local_commit_sent = Arc::clone(&self.local_commit_sent);
+        let pending_votes = Arc::clone(&self.pending_votes);
         runtime.spawn(async move {
             tokio::time::sleep_until(tokio::time::Instant::from_std(
                 started_at + PBFT_VIEW_TIMEOUT,
@@ -355,6 +652,7 @@ impl LivePbftFinality {
                 clear_proposal_state(&mut engine, height);
                 local_prepare_sent.lock().remove(&height);
                 local_commit_sent.lock().remove(&height);
+                pending_votes.lock().remove(&(height, block_hash));
             }
         });
     }
@@ -521,7 +819,8 @@ pub struct PbftConsensusEngine {
     prepare_votes: HashMap<u64, HashSet<String>>,
 
     /// Per-block commit-vote accumulators, populated after signature checks.
-    commit_votes: HashMap<u64, HashSet<String>>,
+    commit_votes: HashMap<u64, HashMap<String, Vec<u8>>>,
+    finality_certificates: HashMap<u64, PbftFinalityCertificate>,
 
     /// The set of validator IDs that are currently registered.
     /// Only votes from known validators are counted.
@@ -604,6 +903,7 @@ impl PbftConsensusEngine {
             current_view: 0,
             prepare_votes: HashMap::new(),
             commit_votes: HashMap::new(),
+            finality_certificates: HashMap::new(),
             known_validators,
             validator_pubkeys,
             block_hashes: HashMap::new(),
@@ -656,7 +956,7 @@ impl PbftConsensusEngine {
             votes.retain(|id| retained_voters.contains(id));
         }
         for votes in self.commit_votes.values_mut() {
-            votes.retain(|id| retained_voters.contains(id));
+            votes.retain(|id, _| retained_voters.contains(id));
         }
 
         self.known_validators = known_validators;
@@ -822,11 +1122,6 @@ impl PbftConsensusEngine {
         preparer_id: &str,
         signature: &[u8],
     ) -> Result<(), ConsensusError> {
-        // Only accept votes for blocks in Proposed state
-        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Proposed) {
-            return Ok(()); // silently ignore out-of-order or duplicate messages
-        }
-
         // Only count votes from registered validators
         if !self.known_validators.contains(preparer_id) {
             warn!(
@@ -836,6 +1131,11 @@ impl PbftConsensusEngine {
             return Ok(());
         }
         self.verify_vote(PbftPhase::Prepare, block_height, preparer_id, signature)?;
+
+        // Only accept votes for blocks in Proposed state
+        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Proposed) {
+            return Ok(()); // ignore out-of-order or duplicate messages
+        }
 
         let votes = self.prepare_votes.entry(block_height).or_default();
         votes.insert(preparer_id.to_string());
@@ -869,11 +1169,6 @@ impl PbftConsensusEngine {
         committer_id: &str,
         signature: &[u8],
     ) -> Result<(), ConsensusError> {
-        // Only accept commits for blocks that have reached Prepared
-        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Prepared) {
-            return Ok(());
-        }
-
         if !self.known_validators.contains(committer_id) {
             warn!(
                 "PBFT: Ignoring commit vote from unknown validator {}",
@@ -883,8 +1178,13 @@ impl PbftConsensusEngine {
         }
         self.verify_vote(PbftPhase::Commit, block_height, committer_id, signature)?;
 
+        // Only count commits for blocks that have reached Prepared
+        if self.finalized_blocks.get(&block_height) != Some(&PbftBlockState::Prepared) {
+            return Ok(());
+        }
+
         let votes = self.commit_votes.entry(block_height).or_default();
-        votes.insert(committer_id.to_string());
+        votes.insert(committer_id.to_string(), signature.to_vec());
 
         let count = votes.len();
         log::debug!(
@@ -895,6 +1195,32 @@ impl PbftConsensusEngine {
         );
 
         if count >= self.quorum_size {
+            let certificate = PbftFinalityCertificate {
+                block_height,
+                block_hash: self
+                    .block_hashes
+                    .get(&block_height)
+                    .cloned()
+                    .ok_or_else(|| ConsensusError::ProposalRejected {
+                        reason: format!("Missing block hash for PBFT height {block_height}"),
+                    })?,
+                committee_hash: pbft_committee_hash(
+                    &self
+                        .validator_pubkeys
+                        .iter()
+                        .map(|(id, key)| (id.clone(), key.clone()))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|reason| ConsensusError::ProposalRejected { reason })?,
+                commit_signatures: votes
+                    .iter()
+                    .map(|(validator_id, signature)| PbftCommitSignature {
+                        validator_id: validator_id.clone(),
+                        signature: signature.clone(),
+                    })
+                    .collect(),
+            };
+            self.finality_certificates.insert(block_height, certificate);
             self.finalized_blocks
                 .insert(block_height, PbftBlockState::Committed);
             // Free vote accumulator memory once committed
@@ -917,6 +1243,22 @@ impl PbftConsensusEngine {
         validator_id: &str,
         signature: &[u8],
     ) -> Result<(), ConsensusError> {
+        let block_hash = self.block_hashes.get(&block_height).ok_or_else(|| {
+            ConsensusError::ProposalRejected {
+                reason: format!("No pre-prepare block hash for height {block_height}"),
+            }
+        })?;
+        self.verify_vote_for_hash(phase, block_height, block_hash, validator_id, signature)
+    }
+
+    fn verify_vote_for_hash(
+        &self,
+        phase: PbftPhase,
+        block_height: u64,
+        block_hash: &str,
+        validator_id: &str,
+        signature: &[u8],
+    ) -> Result<(), ConsensusError> {
         let public_key = self.validator_pubkeys.get(validator_id).ok_or_else(|| {
             ConsensusError::InvalidSignature {
                 validator_id: validator_id.to_string(),
@@ -927,28 +1269,12 @@ impl PbftConsensusEngine {
                 validator_id: validator_id.to_string(),
             });
         }
-        let block_hash = self.block_hashes.get(&block_height).ok_or_else(|| {
-            ConsensusError::ProposalRejected {
-                reason: format!("No pre-prepare block hash for height {block_height}"),
-            }
-        })?;
         let message = pbft_vote_message(phase, block_height, block_hash, validator_id);
-        let public_key =
-            sphincsshake256fsimple::PublicKey::from_bytes(public_key).map_err(|_| {
-                ConsensusError::InvalidSignature {
-                    validator_id: validator_id.to_string(),
-                }
-            })?;
-        let signature =
-            sphincsshake256fsimple::DetachedSignature::from_bytes(signature).map_err(|_| {
-                ConsensusError::InvalidSignature {
-                    validator_id: validator_id.to_string(),
-                }
-            })?;
-        sphincsshake256fsimple::verify_detached_signature(&signature, &message, &public_key)
-            .map_err(|_| ConsensusError::InvalidSignature {
+        verify_pbft_signature(public_key, &message, signature, validator_id).map_err(|_| {
+            ConsensusError::InvalidSignature {
                 validator_id: validator_id.to_string(),
-            })
+            }
+        })
     }
 
     /// Returns how many distinct prepare votes have been received for `block_height`.
@@ -958,7 +1284,7 @@ impl PbftConsensusEngine {
 
     /// Returns how many distinct commit votes have been received for `block_height`.
     pub fn commit_vote_count(&self, block_height: u64) -> usize {
-        self.commit_votes.get(&block_height).map_or(0, |v| v.len())
+        self.commit_votes.get(&block_height).map_or(0, HashMap::len)
     }
 
     /// Check if a block is finalized in PBFT.
@@ -1175,10 +1501,10 @@ mod tests {
             .validator_pubkeys
             .iter()
             .map(|(id, key)| (id.clone(), key.clone()))
-            .collect();
+            .collect::<Vec<_>>();
         let finality = LivePbftFinality::new(
             "v1".to_string(),
-            validator_keys,
+            validator_keys.clone(),
             secret_keys["v1"].clone(),
             engine.validator_pubkeys["v1"].clone(),
             None,
@@ -1186,26 +1512,30 @@ mod tests {
         .unwrap();
         let block = signed_block(&engine, &secret_keys, 600, "h599");
         let block_hash = block.compute_hash();
+        let validator_id = "v2";
+        let message = pbft_vote_message(PbftPhase::Prepare, 600, &block_hash, validator_id);
+        let secret_key =
+            sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
+        let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
+            .as_bytes()
+            .to_vec();
+        finality
+            .receive_vote(
+                PbftPhase::Prepare,
+                600,
+                &block_hash,
+                validator_id,
+                &signature,
+            )
+            .unwrap();
+
         finality.propose(&block).unwrap();
         assert!(!finality.is_finalized(600, &block_hash));
 
-        for validator_id in ["v2", "v3"] {
-            let message = pbft_vote_message(PbftPhase::Prepare, 600, &block_hash, validator_id);
-            let secret_key =
-                sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
-            let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
-                .as_bytes()
-                .to_vec();
-            finality
-                .receive_vote(
-                    PbftPhase::Prepare,
-                    600,
-                    &block_hash,
-                    validator_id,
-                    &signature,
-                )
-                .unwrap();
-        }
+        assert_eq!(
+            finality.engine.lock().block_state(600),
+            Some(PbftBlockState::Proposed)
+        );
 
         for validator_id in ["v2", "v3"] {
             let message = pbft_vote_message(PbftPhase::Commit, 600, &block_hash, validator_id);
@@ -1225,7 +1555,53 @@ mod tests {
                 .unwrap();
         }
 
+        assert!(!finality.is_finalized(600, &block_hash));
+        let validator_id = "v3";
+        let message = pbft_vote_message(PbftPhase::Prepare, 600, &block_hash, validator_id);
+        let secret_key =
+            sphincsshake256fsimple::SecretKey::from_bytes(&secret_keys[validator_id]).unwrap();
+        let signature = sphincsshake256fsimple::detached_sign(&message, &secret_key)
+            .as_bytes()
+            .to_vec();
+        finality
+            .receive_vote(
+                PbftPhase::Prepare,
+                600,
+                &block_hash,
+                validator_id,
+                &signature,
+            )
+            .unwrap();
+
         assert!(finality.is_finalized(600, &block_hash));
+        let certificate = finality
+            .finality_certificate(600, &block_hash)
+            .expect("finalized block certificate");
+        certificate.verify(&block, &validator_keys).unwrap();
+        let mut incomplete_certificate = certificate.clone();
+        incomplete_certificate.commit_signatures.pop();
+        assert!(incomplete_certificate
+            .verify(&block, &validator_keys)
+            .is_err());
+        let mut duplicate_signer_certificate = certificate.clone();
+        duplicate_signer_certificate.commit_signatures[1] =
+            duplicate_signer_certificate.commit_signatures[0].clone();
+        assert!(duplicate_signer_certificate
+            .verify(&block, &validator_keys)
+            .is_err());
+
+        let recovered = LivePbftFinality::new(
+            "v1".to_string(),
+            validator_keys.clone(),
+            secret_keys["v1"].clone(),
+            engine.validator_pubkeys["v1"].clone(),
+            None,
+        )
+        .unwrap();
+        recovered
+            .accept_finality_certificate(&block, certificate, &validator_keys)
+            .unwrap();
+        assert!(recovered.is_finalized(600, &block_hash));
     }
 
     #[tokio::test]

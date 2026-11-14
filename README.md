@@ -137,19 +137,12 @@ bash ./demo_interchain.sh
 bash ./test_tps.sh
 ```
 
-For a multi-node run, point `BLEEP_TPS_PEERS` at every additional node RPC.
-The harness records peer counts, active validators, and each node's processed
-transaction delta. To require the full workload to be processed on every
-monitored node:
-
-```bash
-BLEEP_RPC=http://127.0.0.1:18540 \
-BLEEP_TPS_PEERS=http://127.0.0.1:18541,http://127.0.0.1:18542 \
-BLEEP_TPS_MIN_PEERS=2 \
-BLEEP_TPS_REQUIRE_ALL_PEERS=1 \
-BLEEP_TPS_COUNT=10000 \
-bash ./test_tps.sh
-```
+The current load generator submits to and measures inclusion through one RPC
+endpoint (`BLEEP_RPC`); it does not yet verify transaction inclusion on every
+validator. For a 10,000-transaction run and the required sender/admin setup,
+see [Funding TPS benchmark senders](docs/DEPLOYMENT.md#funding-tps-benchmark-senders).
+For a multi-validator test, configure `BLEEP_TPS_PEERS` only if using an
+external monitor; it is not consumed by `test_tps.sh` or `bleep-loadgen`.
 
 The benchmark obtains a temporary session through the RPC authentication
 registration endpoint. The CLI itself requires a server-issued
@@ -844,15 +837,17 @@ Protocol Hardening
 
 DevNet UI
   GET  /explorer
-  POST /faucet/{address}              opt-in only: BLEEP_FAUCET_ENABLED=true on dev/test
+  POST /faucet/{address}              opt-in only: BLEEP_FAUCET_ENABLED=true on dev/test networks
   GET  /metrics                       Prometheus-compatible
 ```
 
 The faucet is disabled unless `BLEEP_FAUCET_ENABLED=true` and
-`BLEEP_NETWORK_MODE` is `dev`, `development`, or `test`. It is not available in
-`testnet` or `pretestnet` modes. Live consensus nodes also reject direct faucet
-and native-mint state changes; funding must be included in a committed chain
-transaction rather than applied to one validator's local state.
+`BLEEP_NETWORK_MODE` is `dev`, `development`, `test`, `testnet`, or `pretestnet`.
+Live consensus nodes still reject direct faucet and native-mint state changes;
+funding must be included in a committed chain transaction or provisioned in
+genesis, rather than applied to one validator's local state. For a 500-sender
+benchmark setup and a 10,000-transaction TPS run, see
+[Funding TPS benchmark senders](docs/DEPLOYMENT.md#funding-tps-benchmark-senders).
 
 At startup, `BLEEP_NETWORK_MODE=mainnet` selects the embedded
 `config/mainnet_config.json`; `testnet`, `pretestnet`, and development/test modes

@@ -176,6 +176,8 @@ struct CanonicalBlockRecord {
     previous_hash: String,
     chain_id: String,
     body: Vec<u8>,
+    #[serde(default)]
+    finality_certificate: Option<Vec<u8>>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -568,13 +570,62 @@ impl StateManager {
         chain_id: &str,
         genesis_hash: &str,
     ) -> StateResult<()> {
+        self.persist_canonical_block_inner(
+            block,
+            index,
+            block_hash,
+            previous_hash,
+            chain_id,
+            genesis_hash,
+            None,
+        )
+    }
+
+    /// Persist a canonical block and its authenticated consensus certificate
+    /// atomically with the state transition and canonical tip.
+    pub fn persist_canonical_block_with_finality<T: serde::Serialize>(
+        &mut self,
+        block: &T,
+        index: u64,
+        block_hash: &str,
+        previous_hash: &str,
+        chain_id: &str,
+        genesis_hash: &str,
+        finality_certificate: &[u8],
+    ) -> StateResult<()> {
+        self.persist_canonical_block_inner(
+            block,
+            index,
+            block_hash,
+            previous_hash,
+            chain_id,
+            genesis_hash,
+            Some(finality_certificate),
+        )
+    }
+
+    fn persist_canonical_block_inner<T: serde::Serialize>(
+        &mut self,
+        block: &T,
+        index: u64,
+        block_hash: &str,
+        previous_hash: &str,
+        chain_id: &str,
+        genesis_hash: &str,
+        finality_certificate: Option<&[u8]>,
+    ) -> StateResult<()> {
         self.check_next_canonical_block(index, previous_hash, chain_id, genesis_hash)?;
         self.verify_supply_at_block(index)?;
         self.block_height = index;
         self.sync_trie();
-        if let Err(e) =
-            self.flush_with_canonical_block(block, index, block_hash, previous_hash, chain_id)
-        {
+        if let Err(e) = self.flush_with_canonical_block(
+            block,
+            index,
+            block_hash,
+            previous_hash,
+            chain_id,
+            finality_certificate,
+        ) {
             self.block_height = index.saturating_sub(1);
             return Err(e);
         }
@@ -589,6 +640,26 @@ impl StateManager {
         &mut self,
         block: &T,
         context: CanonicalBlockContext<'_>,
+    ) -> StateResult<()> {
+        self.apply_canonical_block_inner(block, context, None)
+    }
+
+    /// Apply and atomically persist an inbound canonical block together with
+    /// its authenticated consensus certificate.
+    pub fn apply_canonical_block_with_finality<T: serde::Serialize>(
+        &mut self,
+        block: &T,
+        context: CanonicalBlockContext<'_>,
+        finality_certificate: &[u8],
+    ) -> StateResult<()> {
+        self.apply_canonical_block_inner(block, context, Some(finality_certificate))
+    }
+
+    fn apply_canonical_block_inner<T: serde::Serialize>(
+        &mut self,
+        block: &T,
+        context: CanonicalBlockContext<'_>,
+        finality_certificate: Option<&[u8]>,
     ) -> StateResult<()> {
         self.check_next_canonical_block(
             context.index,
@@ -645,6 +716,7 @@ impl StateManager {
             context.block_hash,
             context.previous_hash,
             context.chain_id,
+            finality_certificate,
         ) {
             self.block_height = context.index.saturating_sub(1);
             self.cache = original_cache;
@@ -653,6 +725,26 @@ impl StateManager {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Return the certificate persisted with one canonical block, if present.
+    pub fn canonical_block_finality_certificate(&self, index: u64) -> StateResult<Option<Vec<u8>>> {
+        let block_key = [PREFIX_BLOCK, format!("{:020}", index).as_bytes()].concat();
+        let Some(value) = self
+            .db
+            .get(block_key)
+            .map_err(|error| StateError::Storage(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let record: CanonicalBlockRecord = serde_json::from_slice(&value)
+            .map_err(|error| StateError::Serialisation(error.to_string()))?;
+        if record.index != index {
+            return Err(StateError::Storage(format!(
+                "canonical block record index mismatch at height {index}"
+            )));
+        }
+        Ok(record.finality_certificate)
     }
 
     /// Load persisted non-genesis blocks and verify the canonical chain index,
@@ -797,6 +889,7 @@ impl StateManager {
         block_hash: &str,
         previous_hash: &str,
         chain_id: &str,
+        finality_certificate: Option<&[u8]>,
     ) -> StateResult<()> {
         let block_key = [PREFIX_BLOCK, format!("{:020}", index).as_bytes()].concat();
         let record = CanonicalBlockRecord {
@@ -806,6 +899,7 @@ impl StateManager {
             chain_id: chain_id.to_string(),
             body: serde_json::to_vec(block)
                 .map_err(|e| StateError::Serialisation(e.to_string()))?,
+            finality_certificate: finality_certificate.map(<[u8]>::to_vec),
         };
         let block_value =
             serde_json::to_vec(&record).map_err(|e| StateError::Serialisation(e.to_string()))?;
@@ -1751,7 +1845,15 @@ mod tests {
             .set_balance("alice", 123)
             .expect("set initial balance");
         state
-            .persist_canonical_block(&block, 1, block_hash, genesis_hash, chain_id, genesis_hash)
+            .persist_canonical_block_with_finality(
+                &block,
+                1,
+                block_hash,
+                genesis_hash,
+                chain_id,
+                genesis_hash,
+                b"certificate",
+            )
             .expect("persist block");
         drop(state);
 
@@ -1763,7 +1865,20 @@ mod tests {
             .expect("load canonical history");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0], block);
+        assert_eq!(
+            reopened.canonical_block_finality_certificate(1).unwrap(),
+            Some(b"certificate".to_vec())
+        );
         drop(reopened);
+    }
+
+    #[test]
+    fn legacy_canonical_block_record_without_certificate_is_readable() {
+        let record: CanonicalBlockRecord = serde_json::from_str(
+            r#"{"index":1,"block_hash":"block-hash","previous_hash":"parent-hash","chain_id":"test-chain","body":[]}"#,
+        )
+        .expect("deserialize legacy canonical block record");
+        assert!(record.finality_certificate.is_none());
     }
 
     #[test]

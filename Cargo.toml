@@ -59,6 +59,9 @@ path = "src/bin/executor.rs"
 [[bin]]
 name = "bleep-loadgen"
 path = "src/bin/bleep-loadgen.rs"
+[[bin]]
+name = "bleep-tps-prepare"
+path = "src/bin/bleep-tps-prepare.rs"
 
 [features]
 default = ["mainnet"]

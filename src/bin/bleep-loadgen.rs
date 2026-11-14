@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bleep_crypto::tx_signer::{sign_tx_payload, tx_payload_v2};
 use futures::{stream, StreamExt};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha3::Digest;
@@ -17,6 +18,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, sleep_until, Instant};
+
+const MAX_IN_FLIGHT_REQUESTS: usize = 512;
 
 #[derive(Deserialize)]
 struct SenderKey {
@@ -59,6 +62,7 @@ struct Summary {
     transport_errors: usize,
     included: usize,
     not_included: usize,
+    measurement_duration_ms: u128,
     p50_ms: Option<u128>,
     p99_ms: Option<u128>,
     p99_dispatch_lag_ms: Option<u128>,
@@ -285,7 +289,7 @@ fn presign(
         );
     }
     let timestamp = now_ms() as u64 / 1000;
-    let mut prepared = Vec::with_capacity(count);
+    let mut signing_tasks = Vec::with_capacity(count);
     for index in 0..count {
         let sender_index = index % senders.len();
         let sender = &senders[sender_index];
@@ -304,33 +308,43 @@ fn presign(
             timestamp,
             nonce,
         );
-        let signature = sign_tx_payload(&payload, &sender.secret_key)
-            .map_err(|error| anyhow!("failed to sign transaction {index}: {error}"))?;
-        let mut wire_signature = Vec::with_capacity(sender.public_key.len() + signature.len());
-        wire_signature.extend_from_slice(&sender.public_key);
-        wire_signature.extend_from_slice(&signature);
-        let signing_hash = hex::encode(payload);
-        let submission_id = hex::encode(sha3::Sha3_256::digest(&wire_signature));
-        let request_body = serde_json::to_vec(&json!({
-            "version": 2,
-            "chain_id": chain_id,
-            "sender": sender.address,
-            "receiver": receiver,
-            "amount": amount,
-            "fee": fee,
-            "timestamp": timestamp,
-            "nonce": nonce,
-            "signature": STANDARD.encode(wire_signature),
-        }))
-        .with_context(|| format!("failed serializing transaction {index}"))?;
-        prepared.push((
-            request_body,
-            sender.address.clone(),
-            submission_id,
-            signing_hash,
-        ));
+        signing_tasks.push((index, sender_index, nonce, receiver, payload));
     }
-    Ok(prepared)
+
+    signing_tasks
+        .into_par_iter()
+        .map(|(index, sender_index, nonce, receiver, payload)| {
+            let sender = &senders[sender_index];
+            let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+            let signature = sign_tx_payload(&payload, &sender.secret_key)
+                .map_err(|error| anyhow!("failed to sign transaction {index}: {error}"))?;
+            let mut wire_signature = Vec::with_capacity(sender.public_key.len() + signature.len());
+            wire_signature.extend_from_slice(&sender.public_key);
+            wire_signature.extend_from_slice(&signature);
+            let signing_hash = hex::encode(&payload);
+            let submission_id = hex::encode(sha3::Sha3_256::digest(&wire_signature));
+            let request_body = serde_json::to_vec(&json!({
+                "version": 2,
+                "chain_id": chain_id,
+                "sender": sender.address,
+                "receiver": receiver,
+                "amount": amount,
+                "fee": fee,
+                "timestamp": timestamp,
+                "nonce": nonce,
+                "signature": STANDARD.encode(wire_signature),
+            }))
+            .with_context(|| format!("failed serializing transaction {index}"))?;
+            Ok((
+                request_body,
+                sender.address.clone(),
+                submission_id,
+                signing_hash,
+            ))
+        })
+        .collect::<Vec<Result<_>>>()
+        .into_iter()
+        .collect()
 }
 
 async fn health_height(client: &reqwest::Client, rpc: &str) -> Result<u64> {
@@ -399,7 +413,8 @@ async fn run_load(
     });
 
     let start = Instant::now() + Duration::from_millis(100);
-    let max_in_flight = prepared.len().max(1);
+    let measurement_started = start;
+    let max_in_flight = prepared.len().min(MAX_IN_FLIGHT_REQUESTS);
     let results = stream::iter(prepared.into_iter().enumerate())
         .map(
             |(index, (transaction, sender, submission_id, inclusion_hash))| {
@@ -560,6 +575,7 @@ async fn run_load(
         .iter()
         .filter(|result| result.inclusion_height.is_some())
         .count();
+    let measurement_duration = measurement_started.elapsed();
     let summary = Summary {
         offered_tps,
         attempted,
@@ -568,12 +584,21 @@ async fn run_load(
         transport_errors,
         included,
         not_included: accepted - included,
+        measurement_duration_ms: measurement_duration.as_millis(),
         p50_ms: percentile(&mut p50_values, 50),
         p99_ms: percentile(&mut p99_values, 99),
         p99_dispatch_lag_ms: percentile(&mut dispatch_lag_values, 99),
-        observed_tps: included as f64 / duration_secs as f64,
+        observed_tps: observed_inclusion_tps(included, measurement_duration),
     };
     Ok((results, summary))
+}
+
+fn observed_inclusion_tps(included: usize, measurement_duration: Duration) -> f64 {
+    let elapsed_secs = measurement_duration.as_secs_f64();
+    if elapsed_secs == 0.0 {
+        return 0.0;
+    }
+    included as f64 / elapsed_secs
 }
 
 fn output_paths() -> (PathBuf, PathBuf) {
@@ -597,13 +622,13 @@ fn summary_csv(summaries: &[Summary]) -> String {
             || summary.transport_errors as f64 / summary.attempted as f64 > 0.01
     });
     let mut csv = String::from(
-        "offered_tps,attempted,accepted,rejected,rejection_rate_percent,transport_errors,included,not_included,observed_tps,p50_inclusion_ms,p99_inclusion_ms,p99_dispatch_lag_ms,knee_candidate\n",
+        "offered_tps,attempted,accepted,rejected,rejection_rate_percent,transport_errors,included,not_included,measurement_duration_ms,observed_tps,p50_inclusion_ms,p99_inclusion_ms,p99_dispatch_lag_ms,knee_candidate\n",
     );
     for summary in summaries {
         let rejection_rate = summary.rejected as f64 * 100.0 / summary.attempted as f64;
         let is_knee = knee.is_some_and(|candidate| candidate.offered_tps == summary.offered_tps);
         csv.push_str(&format!(
-            "{},{},{},{},{:.2},{},{},{},{:.2},{},{},{},{}\n",
+            "{},{},{},{},{:.2},{},{},{},{},{:.2},{},{},{},{}\n",
             summary.offered_tps,
             summary.attempted,
             summary.accepted,
@@ -612,6 +637,7 @@ fn summary_csv(summaries: &[Summary]) -> String {
             summary.transport_errors,
             summary.included,
             summary.not_included,
+            summary.measurement_duration_ms,
             summary.observed_tps,
             summary
                 .p50_ms
@@ -686,13 +712,14 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("{} TPS run failed", offered_tps))?;
         println!(
-            "{:>5} TPS offered | accepted={} rejected={} transport_errors={} included={} missing={} | observed={:.1} TPS | p50={}ms p99={}ms dispatch_p99={}ms",
+            "{:>5} TPS offered | accepted={} rejected={} transport_errors={} included={} missing={} | measured={:.1}s observed={:.1} TPS | p50={}ms p99={}ms dispatch_p99={}ms",
             summary.offered_tps,
             summary.accepted,
             summary.rejected,
             summary.transport_errors,
             summary.included,
             summary.not_included,
+            summary.measurement_duration_ms as f64 / 1_000.0,
             summary.observed_tps,
             summary.p50_ms.map_or_else(|| "n/a".into(), |v| v.to_string()),
             summary.p99_ms.map_or_else(|| "n/a".into(), |v| v.to_string()),
@@ -801,5 +828,42 @@ mod tests {
         let mut values = vec![40, 10, 30, 20];
         assert_eq!(percentile(&mut values, 50), Some(20));
         assert_eq!(percentile(&mut values, 99), Some(40));
+    }
+
+    #[test]
+    fn observed_throughput_includes_settlement_delay() {
+        assert_eq!(observed_inclusion_tps(10, Duration::from_secs(100)), 0.1);
+        assert_eq!(observed_inclusion_tps(10, Duration::ZERO), 0.0);
+    }
+
+    #[test]
+    fn summary_csv_reports_the_measured_duration() {
+        let summary = Summary {
+            offered_tps: 10,
+            attempted: 10,
+            accepted: 10,
+            rejected: 0,
+            transport_errors: 0,
+            included: 10,
+            not_included: 0,
+            measurement_duration_ms: 100_000,
+            p50_ms: Some(50_000),
+            p99_ms: Some(90_000),
+            p99_dispatch_lag_ms: Some(5),
+            observed_tps: 0.1,
+        };
+        let csv = summary_csv(&[summary]);
+        let mut lines = csv.lines();
+        let header = lines.next().expect("CSV header");
+        let row = lines.next().expect("CSV row");
+        let columns = header.split(',').collect::<Vec<_>>();
+        let values = row.split(',').collect::<Vec<_>>();
+
+        assert_eq!(columns.len(), values.len());
+        let duration_column = columns
+            .iter()
+            .position(|column| *column == "measurement_duration_ms")
+            .expect("measurement duration column");
+        assert_eq!(values[duration_column], "100000");
     }
 }

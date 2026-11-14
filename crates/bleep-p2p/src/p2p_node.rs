@@ -28,7 +28,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::ai_security::PeerScoring;
-use crate::error::P2PResult;
+use crate::error::{P2PError, P2PResult};
 use crate::gossip_protocol::GossipProtocol;
 use crate::message_protocol::MessageProtocol;
 use crate::onion_routing::OnionRouter;
@@ -254,6 +254,25 @@ impl P2PNode {
             timestamp: crate::types::unix_now(),
         };
         self.gossip.enqueue(msg, None);
+    }
+
+    /// Send an authenticated message directly to one connected peer.
+    pub async fn send_to_peer(
+        &self,
+        peer_id: &NodeId,
+        message_type: MessageType,
+        payload: Vec<u8>,
+    ) -> P2PResult<()> {
+        let addr =
+            self.peer_manager
+                .get_peer_addr(peer_id)
+                .ok_or_else(|| P2PError::PeerNotFound {
+                    peer_id: peer_id.to_string(),
+                })?;
+        let message = self
+            .message_protocol
+            .seal_message(peer_id, message_type, &payload)?;
+        self.message_protocol.send_message(addr, &message).await
     }
 
     /// Receive the next verified inbound message (blocks until one arrives).
@@ -525,6 +544,32 @@ mod tests {
                 }
             }
         }
+
+        node1
+            .send_to_peer(
+                &node2.node_id,
+                MessageType::Custom("direct-test".into()),
+                b"unicast payload".to_vec(),
+            )
+            .await
+            .expect("direct message should send to connected peer");
+        let (sender_id, message, plaintext) =
+            timeout(Duration::from_secs(10), node2.recv_with_payload())
+                .await
+                .expect("target should receive direct message")
+                .expect("target inbound channel should remain open");
+        assert_eq!(sender_id, node1.node_id);
+        assert_eq!(
+            message.message_type,
+            MessageType::Custom("direct-test".into())
+        );
+        assert_eq!(plaintext, b"unicast payload".to_vec());
+        assert!(
+            timeout(Duration::from_millis(250), node3.recv_with_payload())
+                .await
+                .is_err(),
+            "direct message must not be broadcast to other peers"
+        );
 
         handle1.shutdown().await;
         handle2.shutdown().await;
