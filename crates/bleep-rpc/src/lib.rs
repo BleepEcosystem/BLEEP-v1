@@ -682,7 +682,7 @@ pub fn rpc_routes_with_state(
                         });
                         return Ok::<_, warp::Rejection>(warp::reply::with_status(
                             resp,
-                            warp::http::StatusCode::OK,
+                            warp::http::StatusCode::SERVICE_UNAVAILABLE,
                         ));
                     }
                 };
@@ -726,7 +726,7 @@ pub fn rpc_routes_with_state(
                                 tx_id: "error".to_string(),
                                 status: "serialization_failed",
                             }),
-                            warp::http::StatusCode::OK,
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
                         ));
                     }
                 };
@@ -752,7 +752,10 @@ pub fn rpc_routes_with_state(
                         tx_id: "rejected".to_string(),
                         status: "validation_failed",
                     });
-                    Ok(warp::reply::with_status(resp, warp::http::StatusCode::OK))
+                    Ok(warp::reply::with_status(
+                        resp,
+                        warp::http::StatusCode::BAD_REQUEST,
+                    ))
                 }
             },
         );
@@ -4195,11 +4198,19 @@ fn explorer_api_transactions(
 fn explorer_api_transaction(
     state: Arc<RpcState>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-    warp::path!("rpc" / "explorer" / "transaction" / String)
+    let explorer_path =
+        warp::path!("rpc" / "explorer" / "transaction" / String).map(|hash| (hash, false));
+    let receipt_path = warp::path!("rpc" / "tx" / "receipt" / String).map(|hash| (hash, true));
+
+    explorer_path
+        .or(receipt_path)
+        .unify()
         .and(warp::get())
         .and(with_arc_state(state))
         .map(
-            |hash: String, st: Arc<RpcState>| -> Box<dyn warp::Reply + Send> {
+            |(hash, is_receipt): (String, bool),
+             st: Arc<RpcState>|
+             -> Box<dyn warp::Reply + Send> {
                 let Some(blockchain) = &st.blockchain else {
                     return Box::new(warp::reply::with_status(
                         warp::reply::json(&ErrResp {
@@ -4216,18 +4227,42 @@ fn explorer_api_transaction(
                         warp::http::StatusCode::SERVICE_UNAVAILABLE,
                     ));
                 };
+                let latest_height = chain.latest_block().map(|block| block.index).unwrap_or(0);
                 let found = chain.chain.iter().rev().find_map(|block| {
                     block
                         .transactions
                         .iter()
-                        .find(|tx| hex::encode(tx.tx_hash()) == hash)
-                        .map(|tx| explorer_transaction(tx, block.index))
+                        .enumerate()
+                        .find(|(_, tx)| hex::encode(tx.tx_hash()) == hash)
+                        .map(|(transaction_index, tx)| {
+                            let transaction = explorer_transaction(tx, block.index);
+                            let response = if is_receipt {
+                                serde_json::json!({
+                                    "transaction_hash": hash,
+                                    "status": "finalized",
+                                    "execution_status": "success",
+                                    "block_height": block.index,
+                                    "block_hash": block.compute_hash(),
+                                    "transaction_index": transaction_index,
+                                    "confirmations": latest_height.saturating_sub(block.index).saturating_add(1),
+                                    "state_root": block.shard_state_root.clone(),
+                                    "transaction": transaction,
+                                })
+                            } else {
+                                transaction
+                            };
+                            response
+                        })
                 });
                 match found {
                     Some(transaction) => Box::new(warp::reply::json(&transaction)),
                     None => Box::new(warp::reply::with_status(
                         warp::reply::json(&ErrResp {
-                            error: format!("Transaction '{hash}' not found."),
+                            error: if is_receipt {
+                                format!("Finalized transaction '{hash}' not found.")
+                            } else {
+                                format!("Transaction '{hash}' not found.")
+                            },
                         }),
                         warp::http::StatusCode::NOT_FOUND,
                     )),
@@ -4957,6 +4992,7 @@ mod tests {
         let payload = bleep_crypto::tx_signer::tx_payload_v2(
             chain_id, &sender, receiver, amount, fee, timestamp, nonce,
         );
+        let expected_tx_id = hex::encode(payload);
         let mut signature = public_key;
         signature.extend(sign_tx_payload(&payload, &secret_key).unwrap());
 
@@ -4973,11 +5009,34 @@ mod tests {
                 "fee": fee,
                 "timestamp": timestamp,
                 "nonce": nonce,
-                "signature": signature,
+                "signature": signature.clone(),
             }))
             .reply(&routes)
             .await;
         assert_eq!(response.status(), warp::http::StatusCode::ACCEPTED);
+        let accepted: serde_json::Value =
+            serde_json::from_slice(response.body()).expect("valid accepted transaction response");
+        assert_eq!(accepted["tx_id"], expected_tx_id);
+        assert_eq!(accepted["status"], "accepted_durable");
+
+        let duplicate = request()
+            .method("POST")
+            .path("/rpc/tx")
+            .header("authorization", format!("Bearer {}", token.token))
+            .json(&serde_json::json!({
+                "chain_id": chain_id,
+                "version": 2,
+                "sender": sender.clone(),
+                "receiver": receiver,
+                "amount": amount,
+                "fee": fee,
+                "timestamp": timestamp,
+                "nonce": nonce,
+                "signature": signature,
+            }))
+            .reply(&routes)
+            .await;
+        assert_eq!(duplicate.status(), warp::http::StatusCode::BAD_REQUEST);
 
         let (_, message, payload) =
             timeout(Duration::from_secs(10), second_node.recv_with_payload())
@@ -5319,6 +5378,21 @@ mod tests {
         let transaction: serde_json::Value = serde_json::from_slice(transaction.body()).unwrap();
         assert_eq!(transaction["sender"], address);
         assert_eq!(transaction["amount"], "123");
+
+        let receipt = request()
+            .method("GET")
+            .path(&format!("/rpc/tx/receipt/{expected_tx_hash}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(receipt.status(), 200);
+        let receipt: serde_json::Value = serde_json::from_slice(receipt.body()).unwrap();
+        assert_eq!(receipt["transaction_hash"], expected_tx_hash);
+        assert_eq!(receipt["status"], "finalized");
+        assert_eq!(receipt["execution_status"], "success");
+        assert_eq!(receipt["block_height"], 1);
+        assert_eq!(receipt["transaction_index"], 0);
+        assert_eq!(receipt["confirmations"], 1);
+        assert_eq!(receipt["transaction"]["hash"], expected_tx_hash);
 
         let account = request()
             .method("GET")

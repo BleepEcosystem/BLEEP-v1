@@ -122,6 +122,7 @@ pub struct Blockchain {
     pub chain: VecDeque<Block>,
     pub state: Arc<RwLock<BlockchainState>>,
     pub transaction_pool: Arc<RwLock<Arc<TransactionPool>>>,
+    blocks_per_epoch: Option<u64>,
 }
 
 impl Blockchain {
@@ -137,7 +138,18 @@ impl Blockchain {
             chain,
             state: Arc::new(RwLock::new(state)),
             transaction_pool: Arc::new(RwLock::new(tx_pool)),
+            blocks_per_epoch: None,
         }
+    }
+
+    /// Configure epoch-proof binding and current-network validation for future
+    /// appends. Historical restoration keeps protocol-version compatibility.
+    pub fn set_blocks_per_epoch(&mut self, blocks_per_epoch: u64) -> Result<(), String> {
+        if blocks_per_epoch == 0 {
+            return Err("blocks_per_epoch must be positive".to_string());
+        }
+        self.blocks_per_epoch = Some(blocks_per_epoch);
+        Ok(())
     }
 
     /// Restore canonical history already validated and replayed from durable
@@ -159,7 +171,16 @@ impl Blockchain {
                 .validator_signature
                 .get(..crate::block::SPHINCS_PK_LEN)
                 .ok_or_else(|| format!("Persisted block {} has no signer key", block.index))?;
-            if !BlockValidator::validate_full_block(&previous, &block, signer) {
+            let valid = match self.blocks_per_epoch {
+                Some(blocks_per_epoch) => BlockValidator::validate_full_block_with_epoch_length(
+                    &previous,
+                    &block,
+                    signer,
+                    blocks_per_epoch,
+                ),
+                None => BlockValidator::validate_full_block(&previous, &block, signer),
+            };
+            if !valid {
                 return Err(format!(
                     "Persisted canonical block {} failed validation",
                     block.index
@@ -178,9 +199,18 @@ impl Blockchain {
     /// Returns `true` on success.  `public_key` is the expected validator key;
     /// genesis uses `&[]` and is always accepted without signature check.
     pub fn add_block(&mut self, block: Block, public_key: &[u8]) -> bool {
+        let blocks_per_epoch = self.blocks_per_epoch;
         self.add_block_inner(
             block,
-            |previous, block| BlockValidator::validate_full_block(previous, block, public_key),
+            |previous, block| match blocks_per_epoch {
+                Some(blocks_per_epoch) => BlockValidator::validate_full_block_for_network(
+                    previous,
+                    block,
+                    public_key,
+                    blocks_per_epoch,
+                ),
+                None => BlockValidator::validate_full_block(previous, block, public_key),
+            },
             true,
         )
     }
@@ -192,14 +222,23 @@ impl Blockchain {
         block: Block,
         validator_keys: &[Vec<u8>],
     ) -> bool {
+        let blocks_per_epoch = self.blocks_per_epoch;
         self.add_block_inner(
             block,
-            |previous, block| {
-                BlockValidator::validate_full_block_with_validator_set(
+            |previous, block| match blocks_per_epoch {
+                Some(blocks_per_epoch) => {
+                    BlockValidator::validate_full_block_with_validator_set_for_network(
+                        previous,
+                        block,
+                        validator_keys,
+                        blocks_per_epoch,
+                    )
+                }
+                None => BlockValidator::validate_full_block_with_validator_set(
                     previous,
                     block,
                     validator_keys,
-                )
+                ),
             },
             true,
         )
@@ -211,14 +250,23 @@ impl Blockchain {
         block: Block,
         validator_keys: &[Vec<u8>],
     ) -> bool {
+        let blocks_per_epoch = self.blocks_per_epoch;
         self.add_block_inner(
             block,
-            |previous, block| {
-                BlockValidator::validate_full_block_with_validator_set(
+            |previous, block| match blocks_per_epoch {
+                Some(blocks_per_epoch) => {
+                    BlockValidator::validate_full_block_with_validator_set_for_network(
+                        previous,
+                        block,
+                        validator_keys,
+                        blocks_per_epoch,
+                    )
+                }
+                None => BlockValidator::validate_full_block_with_validator_set(
                     previous,
                     block,
                     validator_keys,
-                )
+                ),
             },
             false,
         )
@@ -320,9 +368,15 @@ impl Blockchain {
         for i in 1..self.chain.len() {
             let prev = &self.chain[i - 1];
             let current = &self.chain[i];
-            if !BlockValidator::validate_block_link(prev, current)
-                || !BlockValidator::validate_block(current, public_key)
-            {
+            let block_is_valid = match self.blocks_per_epoch {
+                Some(blocks_per_epoch) => BlockValidator::validate_block_with_blocks_per_epoch(
+                    current,
+                    public_key,
+                    blocks_per_epoch,
+                ),
+                None => BlockValidator::validate_block(current, public_key),
+            };
+            if !BlockValidator::validate_block_link(prev, current) || !block_is_valid {
                 log::error!("Chain integrity failed at block {}", current.index);
                 return false;
             }
@@ -353,6 +407,12 @@ impl Blockchain {
             return Err("Candidate fork does not share the canonical genesis block".into());
         }
 
+        let current_protocol_activation = self
+            .chain
+            .iter()
+            .find(|block| block.protocol_version == crate::block::CURRENT_PROTOCOL_VERSION)
+            .map(|block| block.index)
+            .unwrap_or_else(|| self.height().saturating_add(1));
         for index in 1..new_chain.len() {
             let previous = &new_chain[index - 1];
             let block = &new_chain[index];
@@ -362,13 +422,30 @@ impl Blockchain {
                     block.epoch_id
                 ));
             };
-            if block.index != previous.index.saturating_add(1)
-                || !BlockValidator::validate_full_block_with_validator_set(
+            let block_is_valid = match self.blocks_per_epoch {
+                Some(blocks_per_epoch) if block.index >= current_protocol_activation => {
+                    BlockValidator::validate_full_block_with_validator_set_for_network(
+                        previous,
+                        block,
+                        validator_keys,
+                        blocks_per_epoch,
+                    )
+                }
+                Some(blocks_per_epoch) => {
+                    BlockValidator::validate_full_block_with_validator_set_and_epoch_length(
+                        previous,
+                        block,
+                        validator_keys,
+                        blocks_per_epoch,
+                    )
+                }
+                None => BlockValidator::validate_full_block_with_validator_set(
                     previous,
                     block,
                     validator_keys,
-                )
-            {
+                ),
+            };
+            if block.index != previous.index.saturating_add(1) || !block_is_valid {
                 return Err(format!(
                     "Candidate fork failed validation at block {}",
                     block.index

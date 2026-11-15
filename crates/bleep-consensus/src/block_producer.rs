@@ -1214,8 +1214,155 @@ pub fn start_block_producer(
 #[cfg(test)]
 mod real_transaction_benchmark {
     use super::*;
+    use crate::validator_identity::ValidatorIdentity;
     use bleep_core::blockchain::{Blockchain, BlockchainState};
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload};
+
+    #[tokio::test]
+    async fn admitted_transaction_is_executed_finalized_and_removed_from_mempool() {
+        let (sender_pk, sender_sk) = generate_tx_keypair();
+        let sender = bleep_crypto::derive_account_address(&sender_pk);
+        let receiver = "BLEEP1lifecycle-recipient";
+        let amount = 100;
+        let fee = bleep_core::transaction::MIN_TRANSACTION_FEE;
+        let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
+        let chain_id = bleep_crypto::DEFAULT_CHAIN_ID;
+        let payload = bleep_crypto::tx_signer::tx_payload_v2(
+            chain_id, &sender, receiver, amount, fee, timestamp, 0,
+        );
+        let mut signature = sender_pk;
+        signature.extend(sign_tx_payload(&payload, &sender_sk).expect("sign transfer"));
+        let transaction = ZKTransaction {
+            version: 2,
+            chain_id: chain_id.to_string(),
+            sender: sender.clone(),
+            receiver: receiver.to_string(),
+            amount,
+            fee,
+            timestamp,
+            nonce: 0,
+            signature,
+        };
+
+        let state = Arc::new(PLMutex::new(StateManager::new()));
+        state
+            .lock()
+            .set_balance(&sender, 1_000)
+            .expect("fund sender");
+        let tx_pool = TransactionPool::new_with_state(10, chain_id, Some(Arc::clone(&state)));
+        assert!(tx_pool.add_transaction(transaction.clone()).await);
+        assert_eq!(tx_pool.pool_size().await, 1);
+
+        let (validator_pk, validator_sk) = generate_tx_keypair();
+        let validator_id = hex::encode(&validator_pk[..8]);
+        let vrf_public_key =
+            PoSConsensusEngine::derive_vrf_public_key(&validator_sk).expect("derive VRF key");
+        let (kyber_public_key, _) =
+            bleep_crypto::pq_crypto::KyberKem::keygen().expect("generate validator KEM key");
+        let identity = ValidatorIdentity::new_with_vrf_public_key(
+            validator_id.clone(),
+            kyber_public_key.as_bytes().to_vec(),
+            hex::encode(&validator_pk),
+            vrf_public_key,
+            1_000_000,
+            0,
+        )
+        .expect("create validator identity");
+        let mut registry = ValidatorRegistry::new();
+        registry
+            .register_validator(identity)
+            .expect("register validator");
+        registry
+            .activate_validator(&validator_id)
+            .expect("activate validator");
+
+        let genesis = Block::genesis_for_chain(chain_id);
+        let blockchain = Arc::new(RwLock::new(Blockchain::new(
+            genesis,
+            BlockchainState::new(),
+            Arc::clone(&tx_pool),
+        )));
+        let (mut producer, _) = BlockProducer::new(
+            validator_id,
+            1_000_000,
+            Arc::clone(&tx_pool),
+            Arc::clone(&blockchain),
+            Arc::clone(&state),
+            validator_sk,
+            validator_pk.clone(),
+            None,
+        );
+        producer.set_validator_registry(Arc::new(PLMutex::new(registry)));
+
+        let finalized = producer
+            .produce_one()
+            .await
+            .expect("produce and finalize block")
+            .expect("single validator is selected as proposer");
+        assert_eq!(finalized.height, 1);
+        assert_eq!(finalized.tx_count, 1);
+        assert_eq!(tx_pool.pool_size().await, 0);
+
+        let chain = blockchain.read().expect("read canonical chain");
+        let block = chain.latest_block().expect("committed block");
+        assert!(block.verify_zkp_with_blocks_per_epoch(BLOCKS_PER_EPOCH));
+        assert!(!block.verify_zkp_with_blocks_per_epoch(BLOCKS_PER_EPOCH + 1));
+        let mut tampered_proof_block = block.clone();
+        let last_proof_byte = tampered_proof_block
+            .zk_proof
+            .last_mut()
+            .expect("generated block has a STARK proof");
+        *last_proof_byte ^= 1;
+        assert!(
+            !tampered_proof_block.verify_zkp(),
+            "a byte-flipped valid STARK proof must be rejected"
+        );
+        let mut invalid_tx_signature_block = block.clone();
+        let last_tx_signature_byte = invalid_tx_signature_block.transactions[0]
+            .signature
+            .last_mut()
+            .expect("generated transaction has a signature");
+        *last_tx_signature_byte ^= 1;
+        assert!(
+            invalid_tx_signature_block.verify_zkp_with_blocks_per_epoch(BLOCKS_PER_EPOCH),
+            "the STARK remains valid when conventional transaction-signature data is tampered"
+        );
+        assert!(
+            !bleep_core::block_validation::BlockValidator::validate_full_block_for_network(
+                &Block::genesis_for_chain(chain_id),
+                &invalid_tx_signature_block,
+                &validator_pk,
+                BLOCKS_PER_EPOCH,
+            ),
+            "conventional transaction authentication must reject a block with a valid STARK"
+        );
+        assert_eq!(block.transactions.len(), 1);
+        assert_eq!(
+            hex::encode(block.transactions[0].tx_hash()),
+            transaction.get_hash()
+        );
+        assert!(block.transactions[0].verify_signature());
+        assert_eq!(
+            block.shard_state_root,
+            hex::encode(state.lock().state_root())
+        );
+        drop(chain);
+
+        let state = state.lock();
+        assert_eq!(state.block_height(), 1);
+        assert_eq!(state.get_nonce(&sender), 1);
+        assert_eq!(state.get_balance(&sender), 899);
+        assert_eq!(state.get_balance(receiver), u128::from(amount));
+        assert_eq!(
+            state.get_balance("bleep:treasury:transaction-fees"),
+            u128::from(fee)
+        );
+        drop(state);
+        assert!(
+            !tx_pool.add_transaction(transaction).await,
+            "a finalized nonce cannot be replayed"
+        );
+    }
 
     #[test]
     fn vm_transfer_accounts_match_native_addresses() {

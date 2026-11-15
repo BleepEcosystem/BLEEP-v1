@@ -265,8 +265,10 @@ impl PoSConsensusEngine {
         validators: &[ValidatorStake],
         previous_randomness: &[u8; 32],
     ) -> Result<String, ConsensusError> {
-        // Filter to active validators
-        let active: Vec<_> = validators.iter().filter(|v| v.can_participate()).collect();
+        // Canonicalize the weighted order so HashMap/HashSet iteration cannot
+        // make validators disagree about the proposer for the same slot.
+        let mut active: Vec<_> = validators.iter().filter(|v| v.can_participate()).collect();
+        active.sort_by(|left, right| left.id.cmp(&right.id));
 
         if active.is_empty() {
             return Err(ConsensusError::InsufficientValidatorParticipation {
@@ -471,6 +473,52 @@ mod tests {
         let p1 = PoSConsensusEngine::select_proposer(100, &validators, &randomness).unwrap();
         let p2 = PoSConsensusEngine::select_proposer(100, &validators, &randomness).unwrap();
         assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_select_proposer_is_invariant_to_validator_order() {
+        let validators = vec![
+            ValidatorStake {
+                id: "validator-c".to_string(),
+                stake: 19,
+                active: true,
+                slashing_count: 0,
+                vrf_public_key: test_vrf_public_key(b"validator-c"),
+            },
+            ValidatorStake {
+                id: "validator-a".to_string(),
+                stake: 7,
+                active: true,
+                slashing_count: 0,
+                vrf_public_key: test_vrf_public_key(b"validator-a"),
+            },
+            ValidatorStake {
+                id: "validator-b".to_string(),
+                stake: 31,
+                active: true,
+                slashing_count: 0,
+                vrf_public_key: test_vrf_public_key(b"validator-b"),
+            },
+        ];
+        let randomness = PoSConsensusEngine::genesis_randomness("genesis");
+        let expected = PoSConsensusEngine::select_proposer(100, &validators, &randomness).unwrap();
+        let reversed = validators.iter().cloned().rev().collect::<Vec<_>>();
+        let rotated = validators
+            .iter()
+            .cycle()
+            .skip(1)
+            .take(validators.len())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            PoSConsensusEngine::select_proposer(100, &reversed, &randomness).unwrap(),
+            expected
+        );
+        assert_eq!(
+            PoSConsensusEngine::select_proposer(100, &rotated, &randomness).unwrap(),
+            expected
+        );
     }
 
     #[test]
