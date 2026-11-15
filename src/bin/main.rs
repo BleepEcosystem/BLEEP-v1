@@ -1963,6 +1963,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let core_state = CoreBlockchainState::with_state_manager(Arc::clone(&state));
         let mut blockchain = Blockchain::new(genesis, core_state, tx_pool.clone());
         blockchain
+            .set_blocks_per_epoch(blocks_per_epoch)
+            .map_err(|error| format!("Invalid network epoch length: {error}"))?;
+        blockchain
             .restore_blocks(canonical_blocks)
             .map_err(|e| format!("Canonical block validation failed: {e}"))?;
         blockchain
@@ -3194,10 +3197,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 if verify_pos_vrf_block(block, &tip, &active_validators).is_err()
                                     || block.index != tip.index.saturating_add(1)
                                     || !stake_transactions_valid
-                                    || !BlockValidator::validate_full_block(
+                                    || !BlockValidator::validate_full_block_for_network(
                                         &tip,
                                         block,
                                         &proposer_signing_key,
+                                        blocks_per_epoch,
                                     )
                                 {
                                     false
@@ -3382,8 +3386,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
-                    let valid = BlockValidator::validate_block(&block, &proposer_signing_key)
-                        && block.chain_id == inbound_chain_id
+                    let valid = BlockValidator::validate_full_block_for_network(
+                        &parent,
+                        &block,
+                        &proposer_signing_key,
+                        blocks_per_epoch,
+                    ) && block.chain_id == inbound_chain_id
                         && block
                             .transactions
                             .iter()
@@ -3437,10 +3445,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         };
                         if block.index != tip.index.saturating_add(1)
                             || verify_pos_vrf_block(&block, &tip, &active_validators).is_err()
-                            || !BlockValidator::validate_full_block(
+                            || !BlockValidator::validate_full_block_for_network(
                                 &tip,
                                 &block,
                                 &proposer_signing_key,
+                                blocks_per_epoch,
                             )
                         {
                             false

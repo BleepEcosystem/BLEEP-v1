@@ -1305,6 +1305,37 @@ mod real_transaction_benchmark {
 
         let chain = blockchain.read().expect("read canonical chain");
         let block = chain.latest_block().expect("committed block");
+        assert!(block.verify_zkp_with_blocks_per_epoch(BLOCKS_PER_EPOCH));
+        assert!(!block.verify_zkp_with_blocks_per_epoch(BLOCKS_PER_EPOCH + 1));
+        let mut tampered_proof_block = block.clone();
+        let last_proof_byte = tampered_proof_block
+            .zk_proof
+            .last_mut()
+            .expect("generated block has a STARK proof");
+        *last_proof_byte ^= 1;
+        assert!(
+            !tampered_proof_block.verify_zkp(),
+            "a byte-flipped valid STARK proof must be rejected"
+        );
+        let mut invalid_tx_signature_block = block.clone();
+        let last_tx_signature_byte = invalid_tx_signature_block.transactions[0]
+            .signature
+            .last_mut()
+            .expect("generated transaction has a signature");
+        *last_tx_signature_byte ^= 1;
+        assert!(
+            invalid_tx_signature_block.verify_zkp_with_blocks_per_epoch(BLOCKS_PER_EPOCH),
+            "the STARK remains valid when conventional transaction-signature data is tampered"
+        );
+        assert!(
+            !bleep_core::block_validation::BlockValidator::validate_full_block_for_network(
+                &Block::genesis_for_chain(chain_id),
+                &invalid_tx_signature_block,
+                &validator_pk,
+                BLOCKS_PER_EPOCH,
+            ),
+            "conventional transaction authentication must reject a block with a valid STARK"
+        );
         assert_eq!(block.transactions.len(), 1);
         assert_eq!(
             hex::encode(block.transactions[0].tx_hash()),

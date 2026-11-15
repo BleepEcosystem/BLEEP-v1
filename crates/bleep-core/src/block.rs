@@ -604,6 +604,22 @@ impl Block {
 
     /// Verify the extended Winterfell STARK proof.
     pub fn verify_zkp(&self) -> bool {
+        self.verify_zkp_with_expected_blocks_per_epoch(None)
+    }
+
+    /// Verify the STARK proof and bind its epoch arithmetic to the configured
+    /// network epoch length.
+    pub fn verify_zkp_with_blocks_per_epoch(&self, blocks_per_epoch: u64) -> bool {
+        if blocks_per_epoch == 0 {
+            return false;
+        }
+        self.verify_zkp_with_expected_blocks_per_epoch(Some(blocks_per_epoch))
+    }
+
+    fn verify_zkp_with_expected_blocks_per_epoch(
+        &self,
+        expected_blocks_per_epoch: Option<u64>,
+    ) -> bool {
         if self.zk_proof.is_empty() {
             return self.index == 0 && self.validator_signature.is_empty();
         }
@@ -612,10 +628,10 @@ impl Block {
                 return false;
             };
             stark_proof.starts_with(EXTENDED_STARK_MAGIC)
-                && self.verify_extended_stark_zkp(stark_proof)
+                && self.verify_extended_stark_zkp(stark_proof, expected_blocks_per_epoch)
         } else {
             self.zk_proof.starts_with(EXTENDED_STARK_MAGIC)
-                && self.verify_extended_stark_zkp(&self.zk_proof)
+                && self.verify_extended_stark_zkp(&self.zk_proof, expected_blocks_per_epoch)
         }
     }
 
@@ -642,7 +658,11 @@ impl Block {
     /// The `zk_proof` bytes must start with `EXTENDED_STARK_MAGIC` (9 bytes),
     /// followed by 232 bytes of fixed-width public inputs, followed by the
     /// Winterfell `StarkProof` bytes.
-    fn verify_extended_stark_zkp(&self, proof_bytes: &[u8]) -> bool {
+    fn verify_extended_stark_zkp(
+        &self,
+        proof_bytes: &[u8],
+        expected_blocks_per_epoch: Option<u64>,
+    ) -> bool {
         let magic_len = EXTENDED_STARK_MAGIC.len();
         let total_header = magic_len + EXT_PUB_INPUTS_LEN;
 
@@ -678,6 +698,13 @@ impl Block {
             log::error!("Extended STARK: epoch_id mismatch");
             return false;
         }
+        if expected_blocks_per_epoch.is_some_and(|blocks_per_epoch| {
+            pub_inputs.blocks_per_epoch != blocks_per_epoch
+                || self.epoch_id != self.index / blocks_per_epoch
+        }) {
+            log::error!("Extended STARK: configured epoch length mismatch");
+            return false;
+        }
         if pub_inputs.tx_count as usize != self.transactions.len() {
             log::error!(
                 "Extended STARK: tx_count mismatch ({} vs {})",
@@ -703,6 +730,15 @@ impl Block {
         }
         if pub_inputs.block_hash != self.compute_hash_bytes() {
             log::error!("Extended STARK: block_hash mismatch");
+            return false;
+        }
+        let Some(signer_public_key) = self.validator_signature.get(..SPHINCS_PK_LEN) else {
+            log::error!("Extended STARK: block signer public key is missing");
+            return false;
+        };
+        let expected_validator_pk_hash: [u8; 32] = Sha3_256::digest(signer_public_key).into();
+        if pub_inputs.validator_pk_hash != expected_validator_pk_hash {
+            log::error!("Extended STARK: validator public key hash mismatch");
             return false;
         }
         if pub_inputs.sig_commitment_root != self.sig_commitment_root {

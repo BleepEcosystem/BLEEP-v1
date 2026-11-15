@@ -14,6 +14,14 @@ impl BlockValidator {
                 .all(|transaction| transaction.version == 2 && transaction.fee > 0)
     }
 
+    fn validate_current_transaction_protocol(block: &Block) -> bool {
+        block.protocol_version == crate::block::CURRENT_PROTOCOL_VERSION
+            && block
+                .transactions
+                .iter()
+                .all(|transaction| transaction.version == 2 && transaction.fee > 0)
+    }
+
     /// **Validate block integrity (SPHINCS+ signature + extended STARK)**
     ///
     /// SAFETY: Rejects blocks with invalid signatures or ZK proofs.
@@ -24,6 +32,27 @@ impl BlockValidator {
     /// by `BlockProducer`. An empty proof is allowed only for unsigned genesis
     /// blocks.
     pub fn validate_block(block: &Block, public_key: &[u8]) -> bool {
+        Self::validate_block_with_epoch_length(block, public_key, None)
+    }
+
+    /// Validate block integrity while binding the proof to the configured
+    /// network epoch length.
+    pub fn validate_block_with_blocks_per_epoch(
+        block: &Block,
+        public_key: &[u8],
+        blocks_per_epoch: u64,
+    ) -> bool {
+        if blocks_per_epoch == 0 {
+            return false;
+        }
+        Self::validate_block_with_epoch_length(block, public_key, Some(blocks_per_epoch))
+    }
+
+    fn validate_block_with_epoch_length(
+        block: &Block,
+        public_key: &[u8],
+        blocks_per_epoch: Option<u64>,
+    ) -> bool {
         if !Self::verify_merkle_root(block) {
             log::error!("Block {} transaction Merkle root mismatch", block.index);
             return false;
@@ -47,7 +76,11 @@ impl BlockValidator {
         }
 
         // Verify ZK proof
-        if !block.verify_zkp() {
+        let proof_is_valid = match blocks_per_epoch {
+            Some(blocks_per_epoch) => block.verify_zkp_with_blocks_per_epoch(blocks_per_epoch),
+            None => block.verify_zkp(),
+        };
+        if !proof_is_valid {
             log::error!("Block {} ZK proof verification failed", block.index);
             return false;
         }
@@ -308,11 +341,61 @@ impl BlockValidator {
     /// SAFETY: Checks chain identity, then executes all validation steps in
     /// strict order: signature, link, network consensus, and anomaly checks.
     pub fn validate_full_block(prev_block: &Block, block: &Block, public_key: &[u8]) -> bool {
+        Self::validate_full_block_inner(prev_block, block, public_key, None, false)
+    }
+
+    /// Validate a historical block while binding its proof to the configured
+    /// epoch length, without applying the current protocol-version policy.
+    pub fn validate_full_block_with_epoch_length(
+        prev_block: &Block,
+        block: &Block,
+        public_key: &[u8],
+        blocks_per_epoch: u64,
+    ) -> bool {
+        if blocks_per_epoch == 0 {
+            return false;
+        }
+        Self::validate_full_block_inner(
+            prev_block,
+            block,
+            public_key,
+            Some(blocks_per_epoch),
+            false,
+        )
+    }
+
+    /// Validate a block for the active network. Unlike historical-chain
+    /// validation, this requires the current protocol and the network epoch
+    /// length advertised by node configuration.
+    pub fn validate_full_block_for_network(
+        prev_block: &Block,
+        block: &Block,
+        public_key: &[u8],
+        blocks_per_epoch: u64,
+    ) -> bool {
+        if blocks_per_epoch == 0 {
+            return false;
+        }
+        Self::validate_full_block_inner(prev_block, block, public_key, Some(blocks_per_epoch), true)
+    }
+
+    fn validate_full_block_inner(
+        prev_block: &Block,
+        block: &Block,
+        public_key: &[u8],
+        blocks_per_epoch: Option<u64>,
+        enforce_current_protocol: bool,
+    ) -> bool {
         if !Self::validate_chain_id(prev_block, block) {
             log::error!("Block {} has an invalid chain ID", block.index);
             return false;
         }
-        if !Self::validate_transaction_protocol(block) {
+        let transaction_protocol_is_valid = if enforce_current_protocol {
+            Self::validate_current_transaction_protocol(block)
+        } else {
+            Self::validate_transaction_protocol(block)
+        };
+        if !transaction_protocol_is_valid {
             log::error!(
                 "Block {} contains a legacy or fee-free transaction under protocol {}",
                 block.index,
@@ -322,7 +405,7 @@ impl BlockValidator {
         }
 
         // Step 1: Verify block signature
-        if !Self::validate_block(block, public_key) {
+        if !Self::validate_block_with_epoch_length(block, public_key, blocks_per_epoch) {
             log::error!("Block {} failed signature validation", block.index);
             return false;
         }
@@ -390,6 +473,59 @@ impl BlockValidator {
             return false;
         }
         true
+    }
+
+    /// Full historical-block validation using the registered signer and
+    /// configured epoch length, while preserving historical protocol rules.
+    pub fn validate_full_block_with_validator_set_and_epoch_length(
+        prev_block: &Block,
+        block: &Block,
+        validator_keys: &[Vec<u8>],
+        blocks_per_epoch: u64,
+    ) -> bool {
+        let Some(signer_key) = block
+            .validator_signature
+            .get(..crate::block::SPHINCS_PK_LEN)
+        else {
+            return false;
+        };
+        if !validator_keys
+            .iter()
+            .any(|registered_key| registered_key.as_slice() == signer_key)
+        {
+            log::error!(
+                "Block {} signer is not a member of its epoch validator set",
+                block.index
+            );
+            return false;
+        }
+        Self::validate_full_block_with_epoch_length(prev_block, block, signer_key, blocks_per_epoch)
+    }
+
+    /// Full active-network validation using the block's registered signer.
+    pub fn validate_full_block_with_validator_set_for_network(
+        prev_block: &Block,
+        block: &Block,
+        validator_keys: &[Vec<u8>],
+        blocks_per_epoch: u64,
+    ) -> bool {
+        let Some(signer_key) = block
+            .validator_signature
+            .get(..crate::block::SPHINCS_PK_LEN)
+        else {
+            return false;
+        };
+        if !validator_keys
+            .iter()
+            .any(|registered_key| registered_key.as_slice() == signer_key)
+        {
+            log::error!(
+                "Block {} signer is not a member of its epoch validator set",
+                block.index
+            );
+            return false;
+        }
+        Self::validate_full_block_for_network(prev_block, block, signer_key, blocks_per_epoch)
     }
 }
 
@@ -483,6 +619,58 @@ mod tests {
         block.transactions[0].version = 2;
         block.transactions[0].fee = 1;
         assert!(BlockValidator::validate_transaction_protocol(&block));
+    }
+
+    #[test]
+    fn active_network_rejects_legacy_protocol_blocks() {
+        let mut block = Block::new(1, vec![], "prev".into());
+        block.protocol_version = crate::block::FEE_TRANSACTION_PROTOCOL_VERSION - 1;
+        block.transactions.push(Transaction {
+            version: 1,
+            chain_id: block.chain_id.clone(),
+            sender: "alice".into(),
+            receiver: "bob".into(),
+            amount: 1,
+            fee: 0,
+            timestamp: 1,
+            nonce: 0,
+            signature: vec![],
+        });
+
+        assert!(
+            BlockValidator::validate_transaction_protocol(&block),
+            "historical validation remains compatible with pre-fork blocks"
+        );
+        assert!(
+            !BlockValidator::validate_current_transaction_protocol(&block),
+            "active network validation must not accept legacy transaction rules"
+        );
+    }
+
+    #[test]
+    fn network_validation_rejects_protocol_downgrade_before_signature_checks() {
+        let previous = Block::genesis_for_chain("test-chain");
+        let mut block = Block::new(1, vec![], previous.compute_hash());
+        block.chain_id = previous.chain_id.clone();
+        block.protocol_version = crate::block::CURRENT_PROTOCOL_VERSION - 1;
+        block.transactions.push(Transaction {
+            version: 1,
+            chain_id: block.chain_id.clone(),
+            sender: "alice".into(),
+            receiver: "bob".into(),
+            amount: 1,
+            fee: 0,
+            timestamp: 1,
+            nonce: 0,
+            signature: vec![],
+        });
+
+        assert!(!BlockValidator::validate_full_block_for_network(
+            &previous,
+            &block,
+            &[0; crate::block::SPHINCS_PK_LEN],
+            100,
+        ));
     }
 
     #[test]
