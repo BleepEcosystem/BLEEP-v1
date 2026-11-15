@@ -46,6 +46,9 @@ bleep-rpc
 | `GET` | `/rpc/health` | Node status, height, and configured chain ID |
 | `GET` | `/rpc/state/{address}` | Live balance & nonce |
 | `GET` | `/rpc/proof/{address}` | Sparse Merkle inclusion proof |
+| `POST` | `/rpc/tx` | Submit a signed transaction; returns its canonical transaction ID when durably admitted |
+| `GET` | `/rpc/tx/history` | Pending transaction IDs |
+| `GET` | `/rpc/tx/receipt/{hash}` | Finalized receipt for a transaction included in the canonical chain |
 | `POST` | `/rpc/validator/stake` | Queue a signed stake transaction for block inclusion |
 | `POST` | `/rpc/validator/unstake` | Not implemented; returns `501` until consensus-based exits are supported |
 | `GET` | `/rpc/validator/list` | Active validator set |
@@ -90,6 +93,10 @@ in page memory and is not persisted. Ethereum-only injected providers are not
 compatible with BLEEP's SPHINCS+ account signatures. Deployments should serve
 the node and explorer over HTTPS, configure the intended `BLEEP_CHAIN_ID`, and
 protect the RPC listener with their normal network and rate-limiting controls.
+The returned `tx_id` is the canonical payload hash used in the block and as the
+`hash` path parameter for `/rpc/tx/receipt/{hash}`. A receipt is returned only
+after the transaction is in the canonical finalized chain; pending or unknown
+transactions return `404`.
 
 Full request/response schemas: [RPC API Specification](../docs/specs/rpc_api_spec.md).
 

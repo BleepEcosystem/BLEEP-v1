@@ -5,7 +5,6 @@ use crate::transaction::{
 };
 use bleep_state::state_manager::StateManager;
 use parking_lot::Mutex as StateMutex;
-use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -256,9 +255,29 @@ impl Mempool {
 }
 
 impl ZKTransaction {
-    /// Generates a transaction ID from its signed representation.
+    /// Generates the canonical transaction ID used by blocks and receipts.
     pub fn get_hash(&self) -> String {
-        hex::encode(Sha3_256::digest(&self.signature))
+        let payload = if self.version == 2 && self.fee > 0 {
+            bleep_crypto::tx_signer::tx_payload_v2(
+                &self.chain_id,
+                &self.sender,
+                &self.receiver,
+                self.amount,
+                self.fee,
+                self.timestamp,
+                self.nonce,
+            )
+        } else {
+            bleep_crypto::tx_signer::tx_payload(
+                &self.chain_id,
+                &self.sender,
+                &self.receiver,
+                self.amount,
+                self.timestamp,
+                self.nonce,
+            )
+        };
+        hex::encode(payload)
     }
 }
 
@@ -319,6 +338,27 @@ mod tests {
             nonce,
             signature: signed_bytes,
         }
+    }
+
+    #[test]
+    fn transaction_id_matches_the_hash_used_by_blocks() {
+        let transaction = signed_transaction("recipient", 10, 0);
+        let block_transaction = crate::block::Transaction {
+            version: transaction.version,
+            chain_id: transaction.chain_id.clone(),
+            sender: transaction.sender.clone(),
+            receiver: transaction.receiver.clone(),
+            amount: transaction.amount,
+            fee: transaction.fee,
+            timestamp: transaction.timestamp,
+            nonce: transaction.nonce,
+            signature: transaction.signature.clone(),
+        };
+
+        assert_eq!(
+            transaction.get_hash(),
+            hex::encode(block_transaction.tx_hash())
+        );
     }
 
     #[tokio::test]

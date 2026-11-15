@@ -306,6 +306,15 @@ impl TransactionPool {
         });
         for (key, transaction) in pending {
             if self.add_transaction(transaction.clone()).await {
+                let canonical_key = durable_transaction_key(&transaction.get_hash());
+                if key != canonical_key {
+                    state
+                        .lock()
+                        .update_application_data(&[(key, None)])
+                        .map_err(|error| {
+                            format!("Failed to migrate restored mempool record: {error}")
+                        })?;
+                }
                 restored += 1;
             } else {
                 log::warn!(
@@ -463,6 +472,7 @@ mod tests {
     use super::*;
     use bleep_crypto::tx_signer::{generate_tx_keypair, sign_tx_payload};
     use proptest::prelude::*;
+    use sha3::Sha3_256;
 
     fn test_state() -> StateManager {
         static NEXT_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1072,6 +1082,57 @@ mod tests {
             .is_empty());
         drop(restored_pool);
         drop(reopened);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn restore_migrates_legacy_signature_hash_mempool_keys() {
+        let path = std::env::temp_dir().join(format!(
+            "bleep-txpool-legacy-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let state = Arc::new(StateMutex::new(test_state_at(&path)));
+        let transaction = make_signed_tx("alice", "bob", 1, 0);
+        state
+            .lock()
+            .set_balance(&transaction.sender, 10)
+            .expect("fund sender");
+        let legacy_id = hex::encode(Sha3_256::digest(&transaction.signature));
+        let legacy_key = durable_transaction_key(&legacy_id);
+        let serialized = serde_json::to_vec(&transaction).expect("serialize pending transaction");
+        state
+            .lock()
+            .update_application_data(&[(legacy_key, Some(serialized))])
+            .expect("persist legacy mempool entry");
+
+        let pool = TransactionPool::new_with_state(
+            10,
+            bleep_crypto::DEFAULT_CHAIN_ID,
+            Some(Arc::clone(&state)),
+        );
+        assert_eq!(pool.restore_pending_transactions().await.unwrap(), (1, 0));
+        let records = state
+            .lock()
+            .application_data_with_prefix(DURABLE_MEMPOOL_PREFIX)
+            .expect("read migrated mempool records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].0,
+            durable_transaction_key(&transaction.get_hash())
+        );
+
+        pool.remove_confirmed(&transaction.get_hash()).await;
+        assert!(state
+            .lock()
+            .application_data_with_prefix(DURABLE_MEMPOOL_PREFIX)
+            .expect("read drained mempool records")
+            .is_empty());
+        drop(pool);
+        drop(state);
         let _ = std::fs::remove_dir_all(path);
     }
 
